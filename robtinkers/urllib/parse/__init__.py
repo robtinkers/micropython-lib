@@ -1,117 +1,180 @@
+# robtinkers/urllib.parse
 
-_QUOTE_PLUS = {
-    ord('\t'):'%09',
-    ord('\n'):'%0A',
-    ord('\r'):'%0D',
-    ord('"'): '%22',
-    ord('#'): '%23',
-    ord('%'): '%25',
-    ord('&'): '%26',
-    ord("'"): '%27',
-    ord('+'): '%2B',
-    ord('/'): '%2F',
-    ord(';'): '%3B',
-    ord('='): '%3D',
-    ord('?'): '%3F',
-    ord(' '): '+',
-}
+__all__ = [
+    "quote", "quote_plus", "unquote", "unquote_plus",
+    "urlsplit", "netlocsplit", "netlocdict", "urlunsplit", "urljoin",
+    "urlencode", "parse_qs", "parse_qsl", "urldecode", 
+]
+
+import io
+
+
+_hexdigits = b'0123456789ABCDEF'
+_safe_set = frozenset([45, 46, 95, 126]) # -._~
+_safe_set_with_slash = frozenset([45, 46, 95, 126, 47]) # -._~/
+
+def quote(s, safe='/', *, _plus=False):
+    if s == '':
+        return s
+    
+    bmv = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
+    
+    if safe == '/':
+        safe_ords = _safe_set_with_slash
+    elif safe == '':
+        safe_ords = _safe_set
+    elif isinstance(safe, (set, frozenset)): # extension (must be a set of ord values)
+        safe_ords = safe
+    else:
+        safe_ords = set(_safe_set) # creates a writeable copy
+        safe_ords.update(set(ord(c) for c in safe)) # safe characters must be ASCII
+    
+    fast = True
+    for b in bmv:
+        if (48 <= b <= 57) or (65 <= b <= 90) or (97 <= b <= 122) or (b in safe_ords):
+            continue
+        fast = False
+        break
+    if fast:
+        return s
+    
+    res = io.BytesIO()
+    
+    # Pre-allocate tiny buffers to avoid creating bytes objects inside the loop
+    tmp1 = bytearray(1)
+    tmp1mv = memoryview(tmp1)
+    tmp3 = bytearray(b'%00')
+    tmp3mv = memoryview(tmp3)
+    
+    for b in bmv:
+        if (48 <= b <= 57) or (65 <= b <= 90) or (97 <= b <= 122) or (b in safe_ords):
+            tmp1mv[0] = b
+            res.write(tmp1)
+        elif b == 32 and _plus:
+            tmp1mv[0] = 43 # +
+            res.write(tmp1)
+        else:
+            tmp3mv[1] = _hexdigits[b >> 4]
+            tmp3mv[2] = _hexdigits[b & 0xf]
+            res.write(tmp3)
+    
+    return res.getvalue().decode('utf-8') # can raise UnicodeError
+
 
 def quote_plus(s, safe=''):
-    # Similar to Cpython but uses a blacklist for efficiency
-    # Adapted from micropython-lib string.translate()
-    import io
+    return quote(s, safe, _plus=True)
 
-    sb = io.StringIO()
-    for c in s:
-        v = ord(c)
-        if v in _QUOTE_PLUS and c not in _safe:
-            v = _QUOTE_PLUS[v]
-            if isinstance(v, int):
-                sb.write(chr(v))
-            elif v is not None:
-                sb.write(v)
-        else:
-            sb.write(c)
-    return sb.getvalue()
 
-def quote(s, safe='/'):
-    # Similar to Cpython but uses a blacklist for efficiency
-    s = quote_plus(s, safe)
-    if '+' in s:  # Avoid creating a new object if not necessary
-        s = s.replace('+', '%20')
-    return s
+def unquote(s, *, _plus=False):
+    if s == '':
+        return ''
+    
+    bmv = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
+    
+    res = io.BytesIO()
+    
+    # Pre-allocate tiny buffers to avoid creating bytes objects inside the loop
+    tmp1 = bytearray(1)
+    tmp1mv = memoryview(tmp1)
+    
+    i = 0
+    n = len(bmv)
+    start = 0
+    
+    while (i < n):
+        byte = bmv[i]
+        if (byte != 37) and (byte != 43 or not _plus):
+            i += 1
+            continue
+        # Found '%' or '+' (if _plus)
+        
+        # Write pending data
+        if start < i:
+            res.write(bmv[start:i])
+        
+        # Found '+' (if _plus)
+        if byte == 43 and _plus: # +
+            res.write(b' ')
+            i += 1
+            start = i
+            continue
+        
+        # We must have found '%'
+        if i + 2 < n:
+            try:
+                # Manual hex conversion to avoid slicing allocation
+                digit1 = bmv[i+1]
+                digit2 = bmv[i+2]
+                
+                # Convert ASCII hex char to int
+                if 48 <= digit1 <= 57: d1 = digit1 - 48
+                elif 65 <= digit1 <= 70: d1 = digit1 - 55
+                elif 97 <= digit1 <= 102: d1 = digit1 - 87
+                else: raise ValueError
+                
+                if 48 <= digit2 <= 57: d2 = digit2 - 48
+                elif 65 <= digit2 <= 70: d2 = digit2 - 55
+                elif 97 <= digit2 <= 102: d2 = digit2 - 87
+                else: raise ValueError
+                
+                tmp1mv[0] = (d1 << 4) | d2
+                res.write(tmp1)
+                i += 3
+                start = i
+                continue
+            except ValueError:
+                pass
+        
+        # Invalid hex or incomplete, keep the % literal and advance by 1
+        res.write(b'%')
+        i += 1
+        start = i
+    
+    # Write remainder
+    if start < n:
+        res.write(bmv[start:])
+    
+    return res.getvalue().decode('utf-8') # can raise UnicodeError
 
-def unquote(s):
-    # Similar to Cpython. Raises ValueError if unable to percent-decode.
-    if '%' not in s:
-        return s
-    parts = s.split('%')
-    result = bytearray()
-    result.extend(parts[0].encode())
-    for item in parts[1:]:
-        if len(item) < 2:
-            raise ValueError()
-        result.append(int(item[:2], 16))
-        result.extend(item[2:].encode())
-    return result.decode()
 
 def unquote_plus(s):
-    # Similar to Cpython
-    if '+' in s:  # Avoid creating a new object if not necessary
-        s = s.replace('+', ' ')
-    return unquote(s)
-
-def urlencode(data):
-    # Similar to Cpython
-    parts = []
-    for key, val in data.items():
-        if True:  # emulates quote_via=quote_plus
-            key, val = quote_plus(key), quote_plus(val)
-        if key:
-            parts.append(key + '=' + val)
-    return '&'.join(parts)
-
-def urldecode(qs):
-    # Similar to CPython but returns a simple dict, not a dict of lists.
-    # For example, urldecode('foo=1&bar=2&baz') returns {'foo': '1', 'bar': '2', 'baz': ''}.
-    data = {}
-    parts = qs.split('&')
-    for part in parts:
-        key, sep, val = part.partition('=')
-        if True:
-            key, val = unquote_plus(key), unquote_plus(val)
-        if key:
-            data[key] = val
-    return data
+    return unquote(s, _plus=True)
 
 
-# robtinkers/urllib_parse.py
-
-
-def urlsplit(url, scheme=''):
-    """Poor man's urllib.parse.urlsplit()"""
-    url, _, fragment = url.partition('#')
+def urlsplit(url, scheme='', allow_fragments=True):
+    netloc = query = fragment = ''
+    if allow_fragments:
+        url, _, fragment = url.partition('#')
     url, _, query = url.partition('?')
+    
     if url.startswith('//'):
         url = url[2:]
+        netloc, _, path = url.partition('/')
+        if path:
+             path = '/' + path
     elif url.startswith('/'):
-        return scheme, '', url, query, fragment
+        path = url
     else:
         colon = url.find(':')
         slash = url.find('/')
-        if colon >= 0 and (slash == -1 or slash > colon) and colon + 3 <= len(url) and url[colon:colon+3] == '://':
-            # we only support URLs with '://' format
-            if colon > 0:
-                scheme = url[:colon].lower()
-            url = url[colon+3:]
+        # Scheme exists if colon is present and comes before any slash
+        if colon > 0 and (slash == -1 or slash > colon) and url[0].isalpha():
+            scheme = url[:colon].lower()
+            url = url[colon+1:]
+            if url.startswith('//'):
+                url = url[2:]
+                netloc, _, path = url.partition('/')
+                if path:
+                    path = '/' + path
+            else:
+                path = url
         else:
-            return scheme, '', url, query, fragment
-    netloc, slash, path = url.partition('/')
-    return scheme, netloc, slash + path, query, fragment
+            path = url
+    
+    return (scheme, netloc, path, query, fragment)
 
 
-def netlocsplit(netloc):
-    """Poor man's urllib.parse.urlsplit() part 2"""
+def netlocsplit(netloc): # extension
     userinfo, sep, hostport = netloc.rpartition('@')
     if sep:
         username, sep, password = userinfo.partition(':')
@@ -131,170 +194,167 @@ def netlocsplit(netloc):
                 port = hostport[close_bracket + 2:]
             else:
                 port = None
-        else: # malformed
-            hostname = hostport[1:]
+            # Don't lower-case IPv6 addresses because of %zone_info
+        else:
+            # Malformed IPv6 address (missing bracket)
+            # Treat the whole string as the hostname
+            hostname = hostport
             port = None
     else:
         # IPv4 or hostname
         hostname, sep, port = hostport.rpartition(':')
         if not sep:
             hostname, port = hostport, None
+        elif not port:
+            port = None
+        if hostname:
+            hostname = hostname.lower()
+        else:
+            hostname = None
     
     try:
         port = int(port, 10)
-        if not (0 <= port <= 65535):
+        if not (0 <= port): # CPython raises ValueError if out of range 0-65535
             port = None
     except (TypeError, ValueError):
         port = None
     
-    return (username, password, hostname, port)  # port is int or None
+    return (username, password, hostname, port)
+
+
+def netlocdict(netloc): # extension
+    return dict(zip(('username', 'password', 'hostname', 'port'), netlocsplit(netloc)))
+
+
+def urlunsplit(components):
+    scheme, netloc, url, query, fragment = components
+    if netloc:
+        if url and url[:1] != '/':
+            url = '/' + url
+        url = '//' + netloc + url
+    if scheme:
+        url = scheme + ':' + url
+    if query:
+        url = url + '?' + query
+    if fragment:
+        url = url + '#' + fragment
+    return url
 
 
 def _normalize_path(path):
-    segments = path.split('/')
-    normalized = []
-    for seg in segments:
+    if not path:
+        return path
+    
+    is_absolute = path.startswith('/')
+    
+    stack = []
+    for seg in path.split('/'):
         if seg == '..':
-            if normalized and normalized[-1] != '':
-                normalized.pop()
+            if stack and stack[-1] != '..':
+                stack.pop()
+            elif not is_absolute:
+                stack.append(seg)
         elif seg != '.' and seg != '':
-            normalized.append(seg)
-    if path.startswith('/'):
-        return '/' + '/'.join(normalized)
-    else:
-        return '/'.join(normalized)
+            stack.append(seg)
+    
+    res = '/'.join(stack)
+    if is_absolute:
+        res = '/' + res
+    
+    if path.endswith(('/', '/.', '/..')) or path in ('.', '..'):
+        if not res.endswith('/'):
+            res += '/'
+    
+    return res
 
 
 def urljoin(base, url, allow_fragments=True):
-    """Poor man's urllib.parse.urljoin()"""
-
-    if not allow_fragments:
-        url = url.split('#', 1)[0]
+    if base == '':
+        return url
+    if url == '':
+        return base
     
-    # Check for absolute url
-    uscheme, unetloc, upath, uquery, ufragment = urlsplit(url)
-    if uscheme:
+    bs, bn, bp, bq, bf = urlsplit(base, '', allow_fragments)
+    us, un, up, uq, uf = urlsplit(url, '', allow_fragments)
+    
+    if us != '' and us != bs:
         return url
     
-    # Parse the base URL into its components.
-    bscheme, bnetloc, bpath, _, _ = urlsplit(base)
+    s, n, p, q, f = bs, bn, up, uq, uf
     
-    # Handle scheme-relative URLs
-    if url.startswith('//'):
-        return bscheme + (':' if bscheme else '') + url
+    if un != '':
+        n = un
+    elif up == '':
+        # Empty path
+        p = bp
+        if uq == '':
+            q = bq
+            if uf == '':
+                f = bf
+    elif up.startswith('/'):
+        # Absolute path
+        pass # p is already up
+    elif bp == '' or bp.endswith('/'):
+        # Relative path - ...
+        p = bp + up
+    elif (i := bp.rfind('/')) != -1:
+        # Relative path - ...
+        p = bp[:i+1] + up
     
-    # Handle absolute paths
-    if url.startswith('/'):
-        joined = bscheme + ('://' if bscheme else '') + bnetloc + _normalize_path(upath)
-    else:
-        # Handle relative paths
-        if not bpath.endswith('/'):
-            bpath = bpath.rsplit('/', 1)[0] + '/'
-        joined = bscheme + ('://' if bscheme else '') + bnetloc + _normalize_path(bpath + upath)
-    
-    if uquery:
-        joined += '?' + uquery
-    if ufragment:  # will be empty if not allow_fragments 
-        joined += '#' + ufragment
-    return joined
+    return urlunsplit((s, n, _normalize_path(p), q, f))
 
 
-def parse_qs(qs, *, keep_blank_values=False, _qsd=False, _qsl=False):
-    """Poor man's urllib.parse.parse_qs() and .parse_qsl()"""
-    if _qsd or not _qsl:
-        result = {}
-    else:
+def urlencode(query, doseq=False, safe='', quote_via=quote_plus):
+    return '&'.join(
+        (quote_via(str(key), safe) + '=' + quote_via(str(v), safe))
+        for key, val in (query.items() if hasattr(query, 'items') else query)
+        for v in (val if doseq else (val,))
+    )
+
+
+def parse_qs(qs, keep_blank_values=False, *, unquote_via=unquote_plus, _qsl=False, _qsd=False):
+    if _qsl:
         result = []
-    for ksv in qs.split('&'):
-        if not ksv:
+    else:
+        result = {}
+    if not qs:
+        return result
+    
+    i = 0
+    n = len(qs)
+    while (i < n):
+        k = qs.find('&', i)
+        if k == -1:
+            k = n
+        j = qs.find('=', i, k)
+        
+        if j != -1:
+            key = unquote_via(qs[i:j])
+            val = unquote_via(qs[j+1:k])
+        elif keep_blank_values:
+            key = unquote_via(qs[i:k])
+            val = ''
+        else:
+            i = k + 1
             continue
-        key, sep, val = ksv.partition('=')
-        if not sep and not keep_blank_values:
-            continue
-        key = unquote_plus(key)
-        val = unquote_plus(val)
-        if _qsd:
-            result[key] = val
-        elif _qsl:
+        i = k + 1
+        
+        if _qsl:
             result.append((key, val))
+        elif _qsd:
+            result[key] = val
         elif key in result:
             result[key].append(val)
         else:
             result[key] = [val]
+    
     return result
 
 
-def parse_qsd(qs, *, keep_blank_values=False):
-    """A simplified version of parse_qs with just the last value seen."""
-    return parse_qs(qs, keep_blank_values=keep_blank_values, _qsd=True)
+def parse_qsl(*args, **kwargs):
+    return parse_qs(*args, **kwargs, _qsl=True)
 
 
-def parse_qsl(qs, *, keep_blank_values=False):
-    """Poor man's urllib.parse.parse_qsl()"""
-    return parse_qs(qs, keep_blank_values=keep_blank_values, _qsl=True)
+def urldecode(*args, **kwargs):
+    return parse_qs(*args, **kwargs, _qsd=True)
 
-
-def quote(s, *, safe='/', _plus=False):
-    """Poor man's urllib.parse.quote() and .quote_plus()"""
-    safe += '_.-~'
-    if all(c.isalpha() or c.isdigit() or c in safe for c in s):
-        return s
-    encoded = bytearray()
-    space = b'+' if _plus else b'%20'
-    for c in s:
-        if c.isalpha() or c.isdigit() or c in safe:
-            encoded.append(ord(c))
-        elif c == ' ':
-            encoded.extend(space)
-        else:
-            for b in c.encode('utf-8'):
-                hi, lo = (b >> 4), (b & 15)
-                encoded.extend(bytes([37, hi + (48 if hi < 10 else 55), lo + (48 if lo < 10 else 55)]))
-    return encoded.decode('ascii')
-
-
-def quote_plus(s, *, safe=''):
-    """Poor man's urllib.parse.quote_plus()"""
-    return quote(s, safe=safe, _plus=True)
-
-
-def unquote(s, *, _plus=False):
-    """Poor man's urllib.parse.unquote()"""
-    if not ('%' in s or (_plus and '+' in s)):
-        return s
-    encoded = bytearray()
-    i = 0
-    len_s = len(s)
-    while i < len_s:
-        c = s[i]
-        if c == '%' and i + 2 < len_s:
-            try:
-                encoded.append(int(s[i+1:i+3], 16))
-                i += 2
-            except ValueError:
-                encoded.extend(c.encode('utf-8'))
-        elif c == '+' and _plus:
-            encoded.append(32)
-        else:
-            encoded.extend(c.encode('utf-8'))
-        i += 1
-    return encoded.decode('utf-8')
-
-
-def unquote_plus(s):
-    """Poor man's urllib.parse.unquote_plus()"""
-    return unquote(s, _plus=True)
-
-
-def urlencode(data, *, quote_via=quote_plus, doseq=False):
-    """Poor man's urllib.parse.urlencode()"""
-    if isinstance(data, dict):
-        data = data.items()
-    parts = []
-    for key, value in data:
-        if doseq and isinstance(value, (list, tuple)):
-            for item in value:
-                parts.append(quote_via(key) + '=' + quote_via(item))
-        else:
-            parts.append(quote_via(key) + '=' + quote_via(value))
-    return '&'.join(parts)
