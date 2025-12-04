@@ -6,130 +6,124 @@ __all__ = [
     "urlencode", "parse_qs", "parse_qsl", "urldecode", 
 ]
 
-import io
 
-
-_hexdigits = b'0123456789ABCDEF'
 _safe_set = frozenset([45, 46, 95, 126]) # -._~
 _safe_set_with_slash = frozenset([45, 46, 95, 126, 47]) # -._~/
+
+_hexdig = b'0123456789ABCDEF'
 
 def quote(s, safe='/', *, _plus=False):
     if s == '':
         return s
     
+    if safe == '/':
+        safe_bytes = _safe_set_with_slash
+    elif safe == '':
+        safe_bytes = _safe_set
+    elif isinstance(safe, (set, frozenset)): # extension (should be a set of byte-values)
+        safe_bytes = safe
+    else:
+        safe_bytes = set(_safe_set) # creates a writeable copy
+        safe_bytes.update(set(ord(c) for c in safe)) # safe characters must be ASCII
+    
     bmv = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
     
-    if safe == '/':
-        safe_ords = _safe_set_with_slash
-    elif safe == '':
-        safe_ords = _safe_set
-    elif isinstance(safe, (set, frozenset)): # extension (must be a set of ord values)
-        safe_ords = safe
-    else:
-        safe_ords = set(_safe_set) # creates a writeable copy
-        safe_ords.update(set(ord(c) for c in safe)) # safe characters must be ASCII
+    # First pass: check for fast path (no quotes) and calculate length of the result
     
+    m = 0
     fast = True
     for b in bmv:
-        if (48 <= b <= 57) or (65 <= b <= 90) or (97 <= b <= 122) or (b in safe_ords):
-            continue
-        fast = False
-        break
+        if (48 <= b <= 57) or (65 <= b <= 90) or (97 <= b <= 122) or (b in safe_bytes):
+            m += 1
+        elif b == 32 and _plus:
+            m += 1
+            fast = False
+        else:
+            m += 3
+            fast = False
     if fast:
-        return s
+        return s if isinstance(s, str) else s.decode('ascii')
     
-    res = io.BytesIO()
+    # Second pass:
     
-    # Pre-allocate tiny buffers to avoid creating bytes objects inside the loop
-    tmp1 = bytearray(1)
-    tmp1mv = memoryview(tmp1)
-    tmp3 = bytearray(b'%00')
-    tmp3mv = memoryview(tmp3)
+    res = bytearray(m) # we just calculated the length of the result
+    j = 0
     
     for b in bmv:
-        if (48 <= b <= 57) or (65 <= b <= 90) or (97 <= b <= 122) or (b in safe_ords):
-            tmp1mv[0] = b
-            res.write(tmp1)
+        if (48 <= b <= 57) or (65 <= b <= 90) or (97 <= b <= 122) or (b in safe_bytes):
+            res[j] = b
+            j += 1
         elif b == 32 and _plus:
-            tmp1mv[0] = 43 # +
-            res.write(tmp1)
+            res[j] = 43 # +
+            j += 1
         else:
-            tmp3mv[1] = _hexdigits[b >> 4]
-            tmp3mv[2] = _hexdigits[b & 0xf]
-            res.write(tmp3)
+            res[j+0] = 37 # %
+            res[j+1] = _hexdig[(b >> 4) & 0xF]
+            res[j+2] = _hexdig[(b >> 0) & 0xF]
+            j += 3
     
-    return res.getvalue().decode('utf-8') # can raise UnicodeError
+    return res.decode('ascii') # can raise UnicodeError
+
+
+quote_from_bytes = quote
 
 
 def quote_plus(s, safe=''):
     return quote(s, safe, _plus=True)
 
 
+def _hexval(h):
+    if 48 <= h <= 57:  return h - 48
+    if 65 <= h <= 70:  return h - 55
+    if 97 <= h <= 102: return h - 87
+    raise ValueError
+
 def unquote(s, *, _plus=False):
     if s == '':
-        return ''
+        return s
     
     bmv = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
-    
-    res = io.BytesIO()
-    
-    # Pre-allocate tiny buffers to avoid creating bytes objects inside the loop
-    tmp1 = bytearray(1)
-    tmp1mv = memoryview(tmp1)
-    
-    i = 0 # The beginning of the unprocessed chunk
-    k = 0 # The active cursor looking ahead
     n = len(bmv)
     
-    while (k < n):
-        byte = bmv[k]
+    # First pass: check for fast path (no quotes)
+    
+    fast = True
+    for b in bmv:
+        if (b == 37) or (b == 43 and _plus):
+            fast = False
+            break
+    if fast:
+        return s if isinstance(s, str) else str(s, 'utf-8')
+    
+    # Second pass:
+    
+    res = bytearray(n) # Worst Case: result is the same size as the input
+    j = 0
+    
+    i = 0
+    while (i < n):
+        b = bmv[i]
+        i += 1
         
-        # If it's not a special char (%, or + if _plus), keep scouting
-        if (byte != 37) and (byte != 43 or not _plus):
-            k += 1
-            continue
-        # Found a special character.
-        
-        # First, flush the safe text we've "anchored" so far
-        if i < k:
-            res.write(bmv[i:k])
-        
-        if byte == 43 and _plus: 
-            # Found '+' (if _plus)
-            res.write(b' ')
-        else:
+        if b == 37:
             # Found '%'
             try:
-                digit1 = bmv[k+1]
-                digit2 = bmv[k+2]
-                
-                # Convert ASCII hex char to int
-                if 48 <= digit1 <= 57: d1 = digit1 - 48
-                elif 65 <= digit1 <= 70: d1 = digit1 - 55
-                elif 97 <= digit1 <= 102: d1 = digit1 - 87
-                else: raise ValueError
-                
-                if 48 <= digit2 <= 57: d2 = digit2 - 48
-                elif 65 <= digit2 <= 70: d2 = digit2 - 55
-                elif 97 <= digit2 <= 102: d2 = digit2 - 87
-                else: raise ValueError
-                
-                tmp1mv[0] = (d1 << 4) | d2
-                res.write(tmp1)
-                
-                k += 2
+                n1 = _hexval(bmv[i+0])
+                n2 = _hexval(bmv[i+1])
+                i += 2
+                res[j] = (n1 << 4) | (n2 << 0)
             except (ValueError, IndexError):
                 # Invalid or partial %, treat as literal
-                res.write(b'%')
+                res[j] = 37 # percent
+        elif b == 43 and _plus:
+            # Found '+' and _plus
+            res[j] = 32 # space
+        else:
+            res[j] = b
         
-        k += 1
-        i = k
+        j += 1
     
-    # Flush any remaining text after the loop
-    if i < n:
-        res.write(bmv[i:])
-    
-    return res.getvalue().decode('utf-8') # can raise UnicodeError
+    return str(memoryview(res)[:j], 'utf-8') # can raise UnicodeError
 
 
 def unquote_plus(s):
@@ -137,6 +131,8 @@ def unquote_plus(s):
 
 
 def urlsplit(url, scheme='', allow_fragments=True):
+    if len(url) > 0 and ord(url[0]) <= 32:
+        url = url.lstrip()
     netloc = query = fragment = ''
     if allow_fragments:
         url, _, fragment = url.partition('#')
@@ -144,8 +140,8 @@ def urlsplit(url, scheme='', allow_fragments=True):
     
     if url.startswith('//'):
         url = url[2:]
-        netloc, _, path = url.partition('/')
-        if path:
+        netloc, sep, path = url.partition('/')
+        if sep or path:
              path = '/' + path
     elif url.startswith('/'):
         path = url
@@ -158,8 +154,8 @@ def urlsplit(url, scheme='', allow_fragments=True):
             url = url[colon+1:]
             if url.startswith('//'):
                 url = url[2:]
-                netloc, _, path = url.partition('/')
-                if path:
+                netloc, sep, path = url.partition('/')
+                if sep or path:
                     path = '/' + path
             else:
                 path = url
@@ -237,50 +233,40 @@ def urlunsplit(components):
 
 
 def _normalize_path(path):
-    if not path:
+    if path == '':
         return path
-
+    
     is_abs = path.startswith('/')
+    parts = path.split('/')
     stack = []
-    
-    i = 0
-    n = len(path)
-    
-    while (i < n):
-        # Find the next '/'
-        k = path.find('/', i)
-        if k == -1:
-            k = n
-        
-        if k == i:
-            # Empty segment (//)
-            pass
-        elif k == i + 1 and path[i] == '.':
-            # Current dir (.)
-            pass
-        elif k == i + 2 and path[i] == '.' and path[i+1] == '.':
-            # Parent dir (..) logic
+
+    # Process
+    for p in parts:
+        if p == '' or p == '.':
+            continue
+        if p == '..':
             if stack and stack[-1] != '..':
                 stack.pop()
             elif not is_abs:
                 stack.append('..')
         else:
-            # Only allocate the string slice if we are actually keeping it
-            stack.append(path[i:k])
-            
-        i = k + 1
-
-    # Reconstruct the path
-    norm = '/'.join(stack)
+            stack.append(p)
+    
+    # Reconstruct
     if is_abs:
-        norm = '/' + norm
-
-    # Handle trailing slash preference based on original path
-    if path.endswith(('/', '/.', '/..')) or path in ('.', '..'):
-        if not norm.endswith('/'):
-            norm += '/'
-            
-    return norm
+        res = '/' + '/'.join(stack)
+    else:
+        res = '/'.join(stack)
+    del stack
+    
+    # Trailing slash logic
+    if path.endswith('/') and res not in ('', '/'):
+        res += '/'
+    
+    # Empty normalization rules
+    if res == '':
+        return '.' if not is_abs else '/'
+    return res
 
 
 def urljoin(base, url, allow_fragments=True):
@@ -312,9 +298,11 @@ def urljoin(base, url, allow_fragments=True):
     elif bp == '' or bp.endswith('/'):
         # Relative path - ...
         p = bp + up
-    elif (i := bp.rfind('/')) != -1:
-        # Relative path - ...
-        p = bp[:i+1] + up
+    else:
+        i = bp.rfind('/')
+        if i != -1:
+            # Relative path - ...
+            p = bp[:i+1] + up
     
     return urlunsplit((s, n, _normalize_path(p), q, f))
 
@@ -329,11 +317,11 @@ def urlencode(query, doseq=False, safe='', quote_via=quote_plus):
 
 def parse_qs(qs, keep_blank_values=False, *, unquote_via=unquote_plus, _qsl=False, _qsd=False):
     if _qsl:
-        result = []
+        res = []
     else:
-        result = {}
+        res = {}
     if not qs:
-        return result
+        return res
     
     i = 0
     n = len(qs)
@@ -355,20 +343,19 @@ def parse_qs(qs, keep_blank_values=False, *, unquote_via=unquote_plus, _qsl=Fals
         else:
             valid = False
 
-        if not valid:
-            pass
-        elif _qsl:
-            result.append((key, val))
-        elif _qsd:
-            result[key] = val
-        elif key in result:
-            result[key].append(val)
-        else:
-            result[key] = [val]
+        if valid and key:
+            if _qsl:
+                res.append((key, val))
+            elif _qsd:
+                res[key] = val
+            elif key in res:
+                res[key].append(val)
+            else:
+                res[key] = [val]
         
         i = k + 1
     
-    return result
+    return res
 
 
 def parse_qsl(*args, **kwargs):
