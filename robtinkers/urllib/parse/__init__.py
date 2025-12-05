@@ -8,89 +8,103 @@ __all__ = [
 
 _USES_NETLOC = frozenset(['file', 'ftp', 'http', 'https', 'ws', 'wss'])
 
-_ASCIITABLE = (
-    # bit7: isupper
-    # bit6: islower
-    # bit5: isdigit
-    # bit4: ishex
-    # bits3-0: hex
-    b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
-    b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
-    b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
-    b'\x30\x31\x32\x33\x34\x35\x36\x37\x38\x39\x00\x00\x00\x00\x00\x00' # 0-9
-    b'\x00\x9a\x9b\x9c\x9d\x9e\x9f\x80\x80\x80\x80\x80\x80\x80\x80\x80' # A-O
-    b'\x80\x80\x80\x80\x80\x80\x80\x80\x80\x80\x80\x00\x00\x00\x00\x00' # P-Z
-    b'\x00\x5a\x5b\x5c\x5d\x5e\x5f\x40\x40\x40\x40\x40\x40\x40\x40\x40' # a-o
-    b'\x40\x40\x40\x40\x40\x40\x40\x40\x40\x40\x40\x00\x00\x00\x00\x00' # p-z
-    b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
-    b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
-    b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
-    b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
-    b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
-    b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
-    b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
-    b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+# Table Size: 128 Bytes
+# Indices 0-15:   Hex Digits '0'-'F' (used for lookup during encoding)
+# Indices 16-31:  Unused/Unsafe (0xFF)
+# Indices 32-127: Mapping (0xFF = Encode, Other = Output Char)
+_QUOTE_TABLE = (
+    b'0123456789ABCDEF' 
+    b'\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff'
+    b'\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff-.\xff'
+    b'0123456789\xff\xff\xff\xff\xff\xff'
+    b'\xffABCDEFGHIJKLMNO'
+    b'PQRSTUVWXYZ\xff\xff\xff\xff_'
+    b'\xffabcdefghijklmno'
+    b'pqrstuvwxyz\xff\xff\xff~\xff'
 )
 
-_HEXNIBBLE = b'0123456789ABCDEF'
-
-_SAFE_SET = frozenset([45, 46, 95, 126]) # -._~
-_SAFE_SET_WITH_SLASH = frozenset([45, 46, 95, 126, 47]) # -._~/
-
-
-#@micropython.native # loops could be viper with some work
-def quote(s, safe='/', *, _plus=False) -> str:
-    if not s:
-        return ''
+@micropython.viper
+def _quote_reslen(qtab: ptr8, src: ptr8, srclen: int) -> int:
+    reslen = 0
+    qfound = False
+    i = 0
+    while i < srclen:
+        b = src[i]
+        i += 1
+        
+        if (32 <= b <= 127) and qtab[b] != 255:
+            reslen += 1
+            if qtab[b] != b:
+                qfound = True
+        else:
+            reslen += 3
+            qfound = True
     
-    if safe == '/':
-        safe_bytes = _SAFE_SET_WITH_SLASH
-    elif safe == '':
-        safe_bytes = _SAFE_SET
-    elif isinstance(safe, (set, frozenset)): # extension (should be a set of byte-values)
-        safe_bytes = safe
-    elif isinstance(safe, str):
-        safe_bytes = set(_SAFE_SET).union(set(ord(c) for c in safe))
+    if qfound:
+        return reslen
     else:
-        safe_bytes = set(_SAFE_SET).union(set(b for b in safe))
-    
-    bmv = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
-    
-    # First pass: check for fast path (no quotes) and calculate length of the result
-    
-    m = 0
-    fast = True
-    for b in bmv:
-        if (_ASCIITABLE[b] & 0xE0) or (b in safe_bytes):
-            m += 1
-        elif b == 32 and _plus:
-            m += 1
-            fast = False
-        else:
-            m += 3
-            fast = False
-    if fast:
-        return s if isinstance(s, str) else s.decode('ascii')
-    
-    # Second pass:
-    
-    res = bytearray(m) # we just calculated the length of the result
+        return -1
+
+@micropython.viper
+def _quote_process(qtab: ptr8, src: ptr8, srclen: int, dst: ptr8):
     j = 0
-    
-    for b in bmv:
-        if (_ASCIITABLE[b] & 0xE0) or (b in safe_bytes):
-            res[j] = b
-            j += 1
-        elif b == 32 and _plus:
-            res[j] = 43 # +
+    i = 0
+    while i < srclen:
+        b = src[i]
+        i += 1
+        
+        if (32 <= b <= 127) and qtab[b] != 255:
+            dst[j] = qtab[b]
             j += 1
         else:
-            res[j+0] = 37 # %
-            res[j+1] = _HEXNIBBLE[(b >> 4) & 0xF]
-            res[j+2] = _HEXNIBBLE[(b >> 0) & 0xF]
+            dst[j+0] = 37 # '%'
+            dst[j+1] = qtab[(b >> 4) & 0xF]
+            dst[j+2] = qtab[b & 0xF]
             j += 3
+
+def quote(s, safe='/', *, always_str=True, _plus=False) -> str:
+    # can raise UnicodeError
     
-    return res.decode('ascii') # can raise UnicodeError
+    if not s: # empty input
+        if isinstance(s, str):
+            return s
+        elif always_str and s is not None:
+            return str(s, 'ascii')
+        else:
+            return bytes(s)
+    
+    qtab = bytearray(_QUOTE_TABLE)
+    if isinstance(safe, str):
+        for c in safe:
+            b = ord(c)
+            if 32 <= b <= 127: qtab[b] = b
+    else:
+        for b in safe:
+            if 32 <= b <= 127: qtab[b] = b
+    if _plus:
+        qtab[32] = 43 # '+'
+    qtab = memoryview(qtab)
+    
+    src = memoryview(s)
+    srclen = len(src)
+    
+    reslen = _quote_reslen(qtab, src, srclen)
+    
+    if reslen == -1:
+        if isinstance(s, str):
+            return s
+        elif always_str and s is not None:
+            return str(s, 'ascii')
+        else:
+            return bytes(s)
+    
+    res = bytearray(reslen)
+    _quote_process(qtab, src, srclen, res)
+    
+    if isinstance(s, str) or always_str:
+        return str(res, 'ascii')
+    else:
+        return bytes(res)
 
 
 quote_from_bytes = quote
@@ -100,57 +114,78 @@ def quote_plus(s, safe='') -> str:
     return quote(s, safe=safe, _plus=True)
 
 
-#@micropython.native # loops could be viper with some work
-def unquote(s, *, _plus=False) -> str:
-    if not s:
-        return ''
-    
-    bmv = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
-    n = len(bmv)
-    
-    # First pass: check for fast path (no quotes)
-    
-    fast = True
-    for b in bmv:
-        if (b == 37) or (b == 43 and _plus):
-            fast = False
-            break
-    if fast:
-        return s if isinstance(s, str) else str(s, 'utf-8')
-    
-    # Second pass:
-    
-    res = bytearray(n) # Worst Case: result is the same size as the input
-    j = 0
-    
-    i = 0
-    while (i < n):
-        b = bmv[i]
+@micropython.viper
+def _unquote_process(_plus: bool, src: ptr8, srclen: int, res: ptr8) -> int:
+    qfound = False
+    reslen = 0
+    n1 = n2 = b = i = 0
+    while (i < srclen):
+        b = src[i]
         i += 1
         
-        if b == 37:
-            # Found '%'
-            if (i + 1 < n):
-                n1 = _ASCIITABLE[bmv[i+0]]
-                n1 = (n1 & 0x0F) if (n1 & 0x10) else -1
-                n2 = _ASCIITABLE[bmv[i+1]]
-                n2 = (n2 & 0x0F) if (n2 & 0x10) else -1
+        if b == 37: # '%'
+            if (i + 1 < srclen):
+                n1 = src[i+0]
+                if   48 <= n1 <= 57: n1 -= 48
+                elif 65 <= n1 <= 70: n1 -= 55
+                elif 97 <= n1 <=102: n1 -= 87
+                else: n1 = 255
+                
+                n2 = src[i+1]
+                if   48 <= n2 <= 57: n2 -= 48
+                elif 65 <= n2 <= 70: n2 -= 55
+                elif 97 <= n2 <=102: n2 -= 87
+                else: n2 = 255
             else:
-                n1 = n2 = -1
-            if n1 >= 0 and n2 >= 0:
-                res[j] = (n1 << 4) | (n2 << 0)
+                n1 = 255
+                n2 = 255
+            
+            if n1 != 255 and n2 != 255:
+                qfound = True
+                b = (n1 << 4) | (n2 << 0)
                 i += 2
-            else:
-                res[j] = 37 # percent
-        elif b == 43 and _plus:
-            # Found '+' and _plus
-            res[j] = 32 # space
-        else:
-            res[j] = b
         
-        j += 1
+        elif b == 43 and _plus: # '+'
+            qfound = True
+            b = 32 # space
+        
+        res[reslen] = b
+        reslen += 1
     
-    return str(memoryview(res)[:j], 'utf-8') # can raise UnicodeError
+    return reslen if qfound else -1
+
+
+def unquote(s, *, always_str=True, _plus=False) -> str:
+    # can raise UnicodeError
+    
+    if not s: # empty input
+        if isinstance(s, str):
+            return s
+        elif always_str and s is not None:
+            return str(s, 'utf-8')
+        else:
+            return bytes(s)
+    
+    src = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
+    srclen = len(src)
+    res = bytearray(srclen) # Worst Case: result is the same size as the input
+    
+    reslen = _unquote_process(_plus, src, srclen, res)
+    
+    if reslen == -1: # no quotes found
+        if isinstance(s, str):
+            return s
+        elif always_str and s is not None:
+            return str(s, 'utf-8')
+        else:
+            return bytes(s)
+    
+    res = memoryview(res)[:reslen]
+    
+    if isinstance(s, str) or always_str:
+        return str(res, 'utf-8')
+    else:
+        return bytes(res)
 
 
 def unquote_plus(s) -> str:
