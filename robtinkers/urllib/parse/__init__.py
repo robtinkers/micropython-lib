@@ -6,6 +6,8 @@ __all__ = [
     "urlencode", "parse_qs", "parse_qsl", "urldecode", 
 ]
 
+_USES_NETLOC = frozenset(['file', 'ftp', 'http', 'https', 'ws', 'wss'])
+
 _ASCIITABLE = (
     # bit7: isupper
     # bit6: islower
@@ -34,6 +36,7 @@ _HEXNIBBLE = b'0123456789ABCDEF'
 
 _SAFE_SET = frozenset([45, 46, 95, 126]) # -._~
 _SAFE_SET_WITH_SLASH = frozenset([45, 46, 95, 126, 47]) # -._~/
+
 
 def quote(s, safe='/', *, _plus=False) -> str:
     if not s:
@@ -245,12 +248,14 @@ def netlocdict(netloc:str) -> dict: # extension
     return dict(zip(('username', 'password', 'hostname', 'port'), netlocsplit(netloc)))
 
 
-def urlunsplit(components:tuple) -> str:
+def urlunsplit(components: tuple) -> str:
     scheme, netloc, url, query, fragment = components
-    if netloc:
-        if url and url[:1] != '/':
+    
+    if netloc or (scheme in _USES_NETLOC):
+        if url and url[:1] != '/': 
             url = '/' + url
-        url = '//' + netloc + url
+        url = '//' + (netloc or '') + url
+        
     if scheme:
         url = scheme + ':' + url
     if query:
@@ -258,7 +263,6 @@ def urlunsplit(components:tuple) -> str:
     if fragment:
         url = url + '#' + fragment
     return url
-
 
 def _normalize_path(path: str) -> str:
     if not path:
@@ -281,9 +285,7 @@ def _normalize_path(path: str) -> str:
         
         slen = j - i
         
-        if slen == 0:
-            pass
-        elif slen == 1 and path[i] == '.':
+        if slen == 1 and path[i] == '.':
             pass
         elif slen == 2 and path[i] == '.' and path[i+1] == '.':
             if stack:
@@ -295,10 +297,20 @@ def _normalize_path(path: str) -> str:
                 stack.append('..')
         else:
             stack.append(path[i:j])
-    
+            
+    res = '/'.join(stack)
     if is_abs:
-        stack.insert(0, '')
-    return '/'.join(stack)
+        res = '/' + res
+
+    if path.endswith('/') or path.endswith('/.') or path == '.' or \
+       path.endswith('/..') or path == '..':
+        if not res.endswith('/'):
+            if res == '':
+                res = '/'
+            else:
+                res += '/'
+                
+    return res
 
 def urljoin(base:str, url:str, allow_fragments=True) -> str:
     if not isinstance(base, str):
@@ -318,19 +330,23 @@ def urljoin(base:str, url:str, allow_fragments=True) -> str:
         return url
     us = bs
     
-    if un:
+    if un or url.startswith('//'):
         return urlunsplit((us, un, _normalize_path(up), uq, uf))
     un = bn
     
     if up:
-        if not up.startswith('/'):
-            if bp:
-                if bp.endswith('/'):
-                    up = bp + up
-                else:
-                    rs = bp.rfind('/')
-                    if rs != -1:
-                        up = bp[:rs+1] + up    
+        if up.startswith('/'):
+            pass 
+        else:
+            if not bp:
+                if bn:
+                    up = '/' + up
+            elif bp.endswith('/'):
+                up = bp + up
+            else:
+                rs = bp.rfind('/')
+                if rs != -1:
+                    up = bp[:rs+1] + up
     else:
         up = bp
         if not uq:
