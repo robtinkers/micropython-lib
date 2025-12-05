@@ -257,24 +257,16 @@ def netlocdict(netloc: str) -> dict: # extension
 #class SplitResult(_SplitTuple):
 #    @property
 #    def username(self):
-#        if not hasattr(self._netlocsplit):
-#            self._netlocsplit = netlocsplit(self.netloc)
-#        return self._netlocsplit[0]
+#        return netlocsplit(self.netloc)[0]
 #    @property
 #    def password(self):
-#        if not hasattr(self._netlocsplit):
-#            self._netlocsplit = netlocsplit(self.netloc)
-#        return self._netlocsplit[1]
+#        return netlocsplit(self.netloc)[1]
 #    @property
 #    def hostname(self):
-#        if not hasattr(self._netlocsplit):
-#            self._netlocsplit = netlocsplit(self.netloc)
-#        return self._netlocsplit[2]
+#        return netlocsplit(self.netloc)[2]
 #    @property
 #    def port(self):
-#        if not hasattr(self._netlocsplit):
-#            self._netlocsplit = netlocsplit(self.netloc)
-#        return self._netlocsplit[3]
+#        return netlocsplit(self.netloc)[3]
 #def urlsplit(url: str, *args, **kwargs) -> SplitResult:
 #    return SplitResult(*_urlsplit(url, *args, **kwargs))
 
