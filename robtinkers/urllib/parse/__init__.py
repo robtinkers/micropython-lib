@@ -344,10 +344,7 @@ def urljoin(base:str, url:str, allow_fragments=True) -> str:
 
 
 def _urlencode_generator(query, doseq=False, safe='', *, quote_via=quote_plus):
-    if hasattr(query, 'items'):
-        query = query.items()
-    
-    for key, val in query:
+    for key, val in (query.items() if hasattr(query, 'items') else query):
         if isinstance(key, (str, bytes, bytearray)):
             key = quote_via(key, safe)
         else:
