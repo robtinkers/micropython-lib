@@ -2,7 +2,7 @@
 
 __all__ = [
     "quote", "quote_plus", "quote_from_bytes",
-    "unquote", "unquote_plus",
+    "unquote", "unquote_plus", "unquote_to_bytes",
     "netlocsplit", "netlocdict", "urlsplit", "urlunsplit", "urljoin",
     "urlencode", "parse_qs", "parse_qsl", "urldecode", 
 ]
@@ -63,16 +63,18 @@ def _quote_process(qtab: ptr8, src: ptr8, srclen: int, dst: ptr8):
             dst[j+2] = qtab[b & 0xF]
             j += 3
 
-def quote(s, safe='/', *, always_str=True, _plus=False) -> str:
+def quote(s, safe='/', *, to_bytes=False, _plus=False) -> str:
     # can raise UnicodeError
     
     if not s: # empty input
-        if isinstance(s, str):
-            return s
-        elif always_str and s is not None:
-            return str(s, 'ascii')
-        else:
+        if s is None:
+            return b'' if to_bytes else ''
+        elif to_bytes:
             return bytes(s)
+        elif isinstance(s, str):
+            return s
+        else:
+            return str(s, 'ascii')
     
     qtab = bytearray(_QUOTE_TABLE)
     if isinstance(safe, str):
@@ -92,20 +94,20 @@ def quote(s, safe='/', *, always_str=True, _plus=False) -> str:
     reslen = _quote_reslen(qtab, src, srclen)
     
     if reslen == -1:
-        if isinstance(s, str):
-            return s
-        elif always_str and s is not None:
-            return str(s, 'ascii')
-        else:
+        if to_bytes:
             return bytes(s)
+        elif isinstance(s, str):
+            return s
+        else:
+            return str(s, 'ascii')
     
     res = bytearray(reslen)
     _quote_process(qtab, src, srclen, res)
     
-    if isinstance(s, str) or always_str:
-        return str(res, 'ascii')
-    else:
+    if to_bytes:
         return bytes(res)
+    else:
+        return str(res, 'ascii')
 
 
 quote_from_bytes = quote
@@ -156,16 +158,18 @@ def _unquote_process(plus: bool, src: ptr8, srclen: int, res: ptr8) -> int:
     return reslen if qfound else -1
 
 
-def unquote(s, *, always_str=True, _plus=False) -> str:
+def unquote(s, *, to_bytes=False, _plus=False) -> str:
     # can raise UnicodeError
     
     if not s: # empty input
-        if isinstance(s, str):
-            return s
-        elif always_str and s is not None:
-            return str(s, 'utf-8')
-        else:
+        if s is None:
+            return b'' if to_bytes else ''
+        elif to_bytes:
             return bytes(s)
+        elif isinstance(s, str):
+            return s
+        else:
+            return str(s, 'utf-8')
     
     src = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
     srclen = len(src)
@@ -174,23 +178,27 @@ def unquote(s, *, always_str=True, _plus=False) -> str:
     reslen = _unquote_process(_plus, src, srclen, res)
     
     if reslen == -1: # no quotes found
-        if isinstance(s, str):
-            return s
-        elif always_str and s is not None:
-            return str(s, 'utf-8')
-        else:
+        if to_bytes:
             return bytes(s)
+        elif isinstance(s, str):
+            return s
+        else:
+            return str(s, 'utf-8')
     
     res = bytes(memoryview(res)[:reslen])
     
-    if isinstance(s, str) or always_str:
-        return str(res, 'utf-8')
-    else:
+    if to_bytes:
         return res
+    else:
+        return str(res, 'utf-8')
 
 
 def unquote_plus(s) -> str:
     return unquote(s, _plus=True)
+
+
+def unquote_to_bytes(s) -> bytes:
+    return unquote(s, to_bytes=True)
 
 
 def netlocsplit(netloc: str) -> tuple: # extension
