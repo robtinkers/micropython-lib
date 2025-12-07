@@ -8,6 +8,8 @@ DECODE_BODY = const(None)
 ENCODE_HEAD = const(None)
 ENCODE_BODY = const(None)
 
+OK = const(200)
+
 _CS_IDLE = const(1) # 'Idle'
 _CS_REQ_STARTED = const(2) # 'Request-started'
 _CS_REQ_SENT = const(3) # 'Request-sent'
@@ -275,6 +277,31 @@ class HTTPResponse:
                 self.length -= len(data)
             return data
     
+    def readinto(self, b):
+        if self.fp is None:
+            return 0
+        
+        if self.chunked:
+            # Chunked readinto is complex; fallback to read() and copy for simplicity
+            data = self._read_chunked(len(b))
+            if not data:
+                return 0
+            n = len(data)
+            b[:n] = data
+            return n
+        
+        if self.length is not None:
+            if len(b) > self.length:
+                # clip the read to the "end of response"
+                b = memoryview(b)[0:self.length]
+        
+        n = self.fp.readinto(b) # no short reads on micropython
+        if self.length is not None:
+            self.length -= n
+        if n != len(b):
+            self.close()
+        return n
+    
     def _read_chunked(self, amt):
         if amt is not None and amt < 0:
             amt = None
@@ -283,7 +310,7 @@ class HTTPResponse:
         while True:
             
             if self.chunk_left is not None:
-                # Read Chunk Data
+                # Read chunk data
                 if amt is None:
                     n = self.chunk_left
                 else:
@@ -306,7 +333,7 @@ class HTTPResponse:
                         break
                     self.chunk_left = None
             else:
-                # Read Chunk Header
+                # Read chunk header
                 line = self.fp.readline()
                 if not line.endswith(b'\r\n'):
                     self.close()
