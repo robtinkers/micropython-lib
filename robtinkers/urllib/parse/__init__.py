@@ -214,7 +214,7 @@ def netlocsplit(netloc: str) -> tuple: # extension
         # IPv6
         close_bracket = hostport.find(']')
         if close_bracket > 0:
-            hostname = hostport[1:close_bracket]
+            host = hostport[1:close_bracket]
             # check for :port after the closing bracket
             if len(hostport) > close_bracket + 1 and hostport[close_bracket + 1] == ':':
                 port = hostport[close_bracket + 2:]
@@ -224,19 +224,19 @@ def netlocsplit(netloc: str) -> tuple: # extension
         else:
             # Malformed IPv6 address (missing bracket)
             # Treat the whole string as the hostname
-            hostname = hostport
+            host = hostport
             port = None
     else:
         # IPv4 or hostname
-        hostname, sep, port = hostport.rpartition(':')
+        host, sep, port = hostport.rpartition(':')
         if not sep:
-            hostname, port = hostport, None
+            host, port = hostport, None
         elif not port:
             port = None
-        if hostname:
-            hostname = hostname.lower()
+        if host:
+            host = host.lower()
         else:
-            hostname = None
+            host = None
     
     try:
         port = int(port, 10)
@@ -245,7 +245,7 @@ def netlocsplit(netloc: str) -> tuple: # extension
     except (TypeError, ValueError):
         port = None
     
-    return (username, password, hostname, port)
+    return (username, password, host, port)
 
 
 def netlocdict(netloc: str) -> dict: # extension
