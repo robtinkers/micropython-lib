@@ -201,48 +201,33 @@ def netlocsplit(netloc: str) -> tuple: # extension
     if not isinstance(netloc, str):
         raise TypeError('netloc must be a string')
     
-    userinfo, sep, hostport = netloc.rpartition('@')
+    userpass, sep, hostport = netloc.partition('@')
     if sep:
-        username, sep, password = userinfo.partition(':')
+        username, sep, password = userpass.partition(':')
         if not sep:
             password = None
     else:
-        hostport = netloc
         username, password = None, None
+        hostport = userpass
     
-    if hostport.startswith('['):
-        # IPv6
-        close_bracket = hostport.find(']')
-        if close_bracket > 0:
-            host = hostport[1:close_bracket]
-            # check for :port after the closing bracket
-            if len(hostport) > close_bracket + 1 and hostport[close_bracket + 1] == ':':
-                port = hostport[close_bracket + 2:]
-            else:
-                port = None
-            # Don't lower-case IPv6 addresses because of %zone_info
-        else:
-            # Malformed IPv6 address (missing bracket)
-            # Treat the whole string as the hostname
+    if ']' in hostport: # Handle IPv6 (simple check)
+        host, sep, port = hostport.rpartition(':')
+        if ']' not in host: # The colon was inside the brackets!
             host = hostport
             port = None
     else:
-        # IPv4 or hostname
         host, sep, port = hostport.rpartition(':')
-        if not sep:
-            host, port = hostport, None
-        elif not port:
-            port = None
         if host:
             host = host.lower()
-        else:
-            host = None
+    
+    if not host:
+        host = None
     
     try:
         port = int(port, 10)
-        if not (0 <= port): # CPython raises ValueError if out of range 0-65535
+        if port < 0:
             port = None
-    except (TypeError, ValueError):
+    except ValueError:
         port = None
     
     return (username, password, host, port)
