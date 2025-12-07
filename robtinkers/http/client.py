@@ -32,7 +32,7 @@ def _create_connection(address, timeout=None):
             return sock
         except OSError as e:
             err = e
-            if sock is not None: 
+            if sock is not None:
                 sock.close()
     if err is None:
         raise OSError("getaddrinfo failed")
