@@ -38,7 +38,7 @@ def _enck(b, *args): # encode-and-check helper
 #    elif isinstance(b, memoryview):
 #        b = bytes(b)
     else:
-        raise TypeError('value must be bytes, bytearray or str')
+        raise TypeError('value must be bytes-like')
     if b'\0' in b or b'\r' in b or b'\n' in b:
         raise ValueError('value can\'t contain control characters')
     return b
@@ -73,16 +73,16 @@ def create_connection(address, timeout=None):
                 sock.close()
     raise OSError('create_connection() failed')
 
-def parse_headers(sock, *, more_headers=False, with_cookies=None): # returns dict/s {str:bytes, ...}
+def parse_headers(sock, *, extra_headers=False, parse_cookies=None): # returns dict/s {str:bytes, ...}
     headers = {}
-    if with_cookies is not None:
+    if parse_cookies is not None:
         cookies = {}
     last_header = None
     
     while True:
         line = sock.readline()
         if not line or line == b'\r\n':
-            if with_cookies is not None:
+            if parse_cookies is not None:
                 return headers, cookies
             else:
                 return headers
@@ -100,13 +100,13 @@ def parse_headers(sock, *, more_headers=False, with_cookies=None): # returns dic
             val = line[x+1:].strip()
             
             if key == b'set-cookie':
-                if with_cookies == True:
+                if parse_cookies == True:
                     key, sep, val = val.partition(b'=')
                     if sep:
                         key = key.decode(_DECODE_HEAD)
                         cookies[key] = val # includes any quotes and parameters
-            elif more_headers == True \
-                    or (isinstance(more_headers, (frozenset, set, list, tuple, dict)) and key in more_headers) \
+            elif extra_headers == True \
+                    or (isinstance(extra_headers, (frozenset, set, list, tuple, dict)) and key in extra_headers) \
                     or key in _IMPORTANT_HEADERS:
                 key = key.decode(_DECODE_HEAD)
                 if key in headers:
@@ -128,7 +128,7 @@ class HTTPResponse:
         self.close()
         return False
     
-    def __init__(self, sock, debuglevel=0, method=None, url=None, *, more_headers=False, set_cookies=False):
+    def __init__(self, sock, debuglevel=0, method=None, url=None, *, extra_headers=False, parse_cookies=False):
         self._sock = sock
         self.debuglevel = debuglevel
         self._method = method
@@ -138,7 +138,7 @@ class HTTPResponse:
         if self.debuglevel > 0:
             print('status:', repr(self.version), repr(self.status), repr(self.reason))
         
-        self.headers, self.cookies = parse_headers(self._sock, more_headers=more_headers, with_cookies=bool(set_cookies))
+        self.headers, self.cookies = parse_headers(self._sock, extra_headers=extra_headers, parse_cookies=parse_cookies or False)
         if self.debuglevel > 0:
             for key, val in self.headers.items():
                 print('header:', repr(key), '=', repr(val))
@@ -179,7 +179,8 @@ class HTTPResponse:
         # if the connection remains open, and we aren't using chunked, and
         # a content-length was not provided, then assume that the connection
         # WILL close.
-        if (not self.chunked and
+        if (not self.will_close and
+            not self.chunked and
             self.length is None):
             self.will_close = True
     
@@ -275,15 +276,6 @@ class HTTPResponse:
         total = 0
         
         while True:
-            # If we finished a chunk on a previous call, consume its CRLF now
-            # (important when callers do bounded reads that stop at boundaries).
-            if self.chunk_left == 0:
-                crlf = self._sock.read(2)
-                if crlf != b'\r\n':
-                    self._close(True)
-                    break
-                self.chunk_left = None
-            
             if self.chunk_left is None:
                 # Need to read a new chunk header
                 line = self._sock.readline()
@@ -319,12 +311,12 @@ class HTTPResponse:
             
             to_read = self.chunk_left
             
-            if isinstance(arg, memoryview):  # For `readinto()`
+            if isinstance(arg, memoryview):  # readinto()
                 to_read = min(to_read, len(arg) - total)
                 if to_read <= 0:
                     break
                 nread = self._sock.readinto(arg[total:total+to_read])
-            else:  # For `read()`
+            else:  # read()
                 if arg is not None:
                     to_read = min(to_read, arg - total)
                 if to_read <= 0:
@@ -342,6 +334,15 @@ class HTTPResponse:
             if nread == 0 or self.chunk_left < 0:
                 self.close()  # Malformed data
                 break
+            
+            # if we finished the chunk, validate trailing CRLF immediately.
+            if self.chunk_left == 0:
+                crlf = self._sock.read(2)
+                if crlf != b'\r\n':
+                    # close connection, but still return the data already read
+                    self._close(True)
+                    break
+                self.chunk_left = None  # ready for next chunk header
             
             # short read under specific circumstances to avoid the join() below
             if not isinstance(arg, memoryview) and arg is not None and total > 0:
@@ -366,6 +367,8 @@ class HTTPResponse:
             elif self.length >= 0:
                 to_read = min(len(arg), self.length)
                 res = self._sock.readinto(arg[:to_read])
+                if not res and to_read:
+                    self.close()  # Close the connection, unexpected EOF
                 self.length -= res
                 if self.length <= 0:
                     self.close()  # Close the connection, over-read possible
@@ -382,6 +385,8 @@ class HTTPResponse:
             elif self.length >= 0:
                 to_read = min(self.length, arg if arg is not None else self.length)
                 res = self._sock.read(to_read)
+                if not res and to_read:
+                    self.close()  # Close the connection, unexpected EOF
                 self.length -= len(res)
                 if self.length <= 0:
                     self.close()  # Close the connection, over-read possible
@@ -594,8 +599,7 @@ class HTTPConnection:
             values = _enck(values[0], _ENCODE_HEAD)
         else:
             values = b'\r\n\t'.join([_enck(v, _ENCODE_HEAD) for v in values])
-        header = header.encode(_ENCODE_HEAD)
-        self._sendall(b'%s: %s\r\n' % (header, values))
+        self._sendall(b'%s: %s\r\n' % (header.encode(_ENCODE_HEAD), values))
     
     def endheaders(self, message_body=None, *, encode_chunked=False):
         self._sendall(b'\r\n')
@@ -661,9 +665,9 @@ class HTTPConnection:
                 print('send: terminating chunk')
             self._sendall(b'0\r\n\r\n')
     
-    def getresponse(self, more_headers=False, set_cookies=False): # more_headers and set_cookies are an extension
+    def getresponse(self, extra_headers=False, parse_cookies=False): # extra_headers and parse_cookies are an extension
         try:
-            self._response = HTTPResponse(self._sock, self.debuglevel, self._method, self._url, more_headers=more_headers, set_cookies=set_cookies)
+            self._response = HTTPResponse(self._sock, self.debuglevel, self._method, self._url, extra_headers=extra_headers, parse_cookies=parse_cookies)
             return self._response
         except Exception:
             self.close()
