@@ -131,7 +131,7 @@ class HTTPResponse:
     def __init__(self, sock, debuglevel=0, method=None, url=None, *, more_headers=False, set_cookies=False):
         self._sock = sock
         self.debuglevel = debuglevel
-        self.method = method # CPython uses ._method
+        self._method = method
         self.url = url
         
         self.version, self.status, self.reason = self._read_status()
@@ -150,7 +150,9 @@ class HTTPResponse:
         self.chunk_left = None
         
         # will the connection close at the end of the response?
-        if self.version == 11:
+        if self.status == 101:
+            self.will_close = True
+        elif self.version == 11:
             self.will_close = b'close' in self.headers.get('connection', b'').lower()
         else:
             self.will_close = not (b'keep-alive' in self.headers.get('connection', b'').lower() or self.headers.get('keep-alive'))
@@ -171,14 +173,13 @@ class HTTPResponse:
         # does the body have a fixed length? (of zero)
         if (self.status == 204 or self.status == 304 or
             100 <= self.status < 200 or      # 1xx codes
-            self.method == 'HEAD'):
+            self._method == 'HEAD'):
             self.length = 0
         
         # if the connection remains open, and we aren't using chunked, and
         # a content-length was not provided, then assume that the connection
         # WILL close.
-        if (not self.will_close and
-            not self.chunked and
+        if (not self.chunked and
             self.length is None):
             self.will_close = True
     
@@ -236,13 +237,19 @@ class HTTPResponse:
         self._close(False)
     
     def _close(self, hard):
-        self._sock = None
-        if hard or self.chunk_left is not None:
-            self.length = None
+        if hard or self.will_close or self.chunk_left is not None or self.length != 0:
+            if self._sock is not None:
+                self._sock.close()
             self.chunk_left = None
+            self.length = 0
+        self._sock = None
     
     def isclosed(self):
         return self._sock is None
+    
+    @property
+    def closed(self):
+        return self.isclosed()
     
     def readinto(self, buf):
         if not isinstance(buf, memoryview):
@@ -305,6 +312,8 @@ class HTTPResponse:
                         line = self._sock.readline()
                         if line == b'\r\n' or line == b'':
                             break
+                    self.chunk_left = None
+                    self.length = 0
                     self.close()
                     break
             
@@ -314,7 +323,7 @@ class HTTPResponse:
                 to_read = min(to_read, len(arg) - total)
                 if to_read <= 0:
                     break
-                nread = self._sock.readinto(arg[total:total + to_read])
+                nread = self._sock.readinto(arg[total:total+to_read])
             else:  # For `read()`
                 if arg is not None:
                     to_read = min(to_read, arg - total)
@@ -327,13 +336,11 @@ class HTTPResponse:
                 else:
                     nread = 0
             
-            if nread == 0:
-                break
-            
             total += nread
             self.chunk_left -= nread
-            if self.chunk_left < 0:
-                self._close(True)  # Malformed data: chunk size error
+            
+            if nread == 0 or self.chunk_left < 0:
+                self.close()  # Malformed data
                 break
             
             # short read under specific circumstances to avoid the join() below
@@ -361,9 +368,9 @@ class HTTPResponse:
                 res = self._sock.readinto(arg[:to_read])
                 self.length -= res
                 if self.length <= 0:
-                    self._close(bool(self.length))  # Close the connection, over-read possible
+                    self.close()  # Close the connection, over-read possible
             else:
-                self._close(True)  # Malformed data
+                self.close()  # Malformed data
                 res = 0
         else:  # For `read()` and `read(N)`
             if self.isclosed():
@@ -377,9 +384,9 @@ class HTTPResponse:
                 res = self._sock.read(to_read)
                 self.length -= len(res)
                 if self.length <= 0:
-                    self._close(bool(self.length))  # Close the connection, over-read possible
+                    self.close()  # Close the connection, over-read possible
             else:
-                self._close(True)  # Malformed data
+                self.close()  # Malformed data
                 res = b'' # EOF
         return res
     
@@ -444,6 +451,7 @@ class HTTPConnection:
         self._sock = None
         self._method = None
         self._url = None
+        
         self._response = None
     
     def set_debuglevel(self, level):
@@ -459,6 +467,8 @@ class HTTPConnection:
         self._response = None
     
     def _sendall(self, data):
+        if self._sock is None:
+            raise NotConnected()
         try:
             self._sock.sendall(data)
         except OSError:
@@ -531,9 +541,10 @@ class HTTPConnection:
     
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
         if self._response is not None:
-            if self._response.will_close or not self._response.isclosed():
+            if self._response.isclosed():
+                self._response = None
+            else:
                 self.close()
-            self._response = None
         
         self._method = method
         self._url = url or '/'
@@ -542,23 +553,15 @@ class HTTPConnection:
         if b'\0' in request or 0 <= request.find(b'\r') < len(request) - 2 or 0 <= request.find(b'\n') < len(request) - 2:
             raise ValueError('request can\'t contain control characters')
         
-        if self._sock is None:
-            if True:
-                if self.auto_open:
-                    self.connect()
-                    self._sendall(request)
-                else:
-                    raise NotConnected()
-        else:
-            try:
+        try:
+            self._sendall(request)
+        except NotConnected:
+            self.close()
+            if self.auto_open:
+                self.connect()
                 self._sendall(request)
-            except NotConnected:
-                self.close()
-                if self.auto_open:
-                    self.connect()
-                    self._sendall(request)
-                else:
-                    raise NotConnected()
+            else:
+                raise
         
         # Issue some standard headers for better HTTP/1.1 compliance
         if not skip_host:
