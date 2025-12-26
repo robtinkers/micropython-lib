@@ -1,5 +1,9 @@
 # http/client.py
 
+#TODO:
+# self.headers should be a dict of str to bytes
+# self.cookies should be a dict of str to bytes
+
 from micropython import const
 import socket
 
@@ -43,12 +47,16 @@ def create_connection(address, timeout=None):
         sock = None
         try:
             sock = socket.socket(f, t, p)
-            try:
-                if timeout is not None:
+            if timeout is not None:
+                try:
                     sock.settimeout(timeout)
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            except (AttributeError, OSError):
-                pass
+                except (AttributeError, OSError):
+                    pass
+            if True:
+                try:
+                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                except (AttributeError, OSError):
+                    pass
             sock.connect(a)
             return sock
         except OSError:
@@ -110,14 +118,14 @@ class HTTPResponse:
         
         self.version, self.status, self.reason = self._read_status()
         if self.debuglevel > 0:
-            print(f"status: {self.version!r} {self.status!r} {self.reason!r}")
+            print('status:', repr(self.version), repr(self.status), repr(self.reason))
         
         self.headers, self.cookies = parse_headers(self._sock, all_headers=all_headers, and_cookies=bool(set_cookies))
         if self.debuglevel > 0:
             for key, val in self.headers.items():
-                print(f"header: {key!r} = {val!r}")
+                print('header:', repr(key), '=', repr(val))
             for key, val in self.cookies.items():
-                print(f"cookie: {key!r} = {val!r}")
+                print('cookie:', repr(key), '=', repr(val))
         
         # are we using the chunked-style of transfer encoding?
         self.chunked = b'chunked' in self.headers.get('transfer-encoding', b'').lower()
@@ -214,7 +222,7 @@ class HTTPResponse:
     
     def isclosed(self):
         return self._sock is None
-
+    
 # This is in the CPython docs, but not actually implemented
 #    @property
 #    def closed(self):
@@ -239,8 +247,9 @@ class HTTPResponse:
             return self._read_raw(amt)
     
     def _read_chunked(self, arg):
+        if not isinstance(arg, memoryview):
+            chunks = []
         total = 0
-        chunks = []
         
         while True:
             # If we finished a chunk on a previous call, consume its CRLF now
@@ -379,6 +388,24 @@ class HTTPResponse:
     
     def getcookies(self):
         return self.cookies.items()
+    
+    def iter_content(self, chunk_size=1024):
+        chunk_size = int(chunk_size)
+        if chunk_size <= 0:
+            raise ValueError('chunk_size must be > 0')
+        while True:
+            b = self.read(chunk_size)
+            if not b:
+                return
+            yield b
+    
+    def iter_content_into(self, buf):
+        bmv = buf if isinstance(buf, memoryview) else memoryview(buf)
+        while True:
+            n = self.readinto(bmv)
+            if not n:
+                return
+            yield n
 
 class HTTPConnection:
     default_port = HTTP_PORT
@@ -556,11 +583,14 @@ class HTTPConnection:
         return s
     
     def putheader(self, header, *values):
-        self._sendall(b'%s: %s\r\n' % (
-                header.encode(ENCODE_HEAD), # header names must be strings
-                b'\r\n\t'.join([self._enck(v, ENCODE_HEAD) for v in values])
-            )
-        )
+        if len(values) == 0:
+            return
+        elif len(values) == 1:
+            values = self._enck(values[0], ENCODE_HEAD)
+        else:
+            values = b'\r\n\t'.join([self._enck(v, ENCODE_HEAD) for v in values])
+        header = header.encode(ENCODE_HEAD)
+        self._sendall(b'%s: %s\r\n' % (header, values))
     
     def endheaders(self, message_body=None, *, encode_chunked=False):
         self._sendall(b'\r\n')
@@ -571,16 +601,16 @@ class HTTPConnection:
         if isinstance(data, str):
             data = data.encode(ENCODE_BODY)
         if self.debuglevel > 0:
-            print(f"send: {type(data).__name__}")
+            print('send:', type(data).__name__)
         
         if data is None:
             pass
         elif isinstance(data, (bytes, bytearray, memoryview)):
             if data:
                 if self.debuglevel > 0:
-                    print(f"send: {len(data)} {type(data).__name__}")
+                    print('send:', type(data).__name__, len(data))
                 if encode_chunked:
-                    self._sendall(f"{len(data):X}\r\n".encode('ascii'))
+                    self._sendall(b'%X\r\n' % len(data))
                 self._sendall(data)
                 if encode_chunked:
                     self._sendall(b'\r\n')
@@ -590,11 +620,11 @@ class HTTPConnection:
                 if isinstance(d, str):
                     d = d.encode(ENCODE_BODY)
                 if self.debuglevel > 0:
-                    print(f"send: {len(d)} {type(d).__name__}")
+                    print('send:', type(d).__name__, len(d))
                 if not d:
                     break
                 if encode_chunked:
-                    self._sendall(f"{len(d):X}\r\n".encode('ascii'))
+                    self._sendall(b'%X\r\n' % len(d))
                 self._sendall(d)
                 if encode_chunked:
                     self._sendall(b'\r\n')
@@ -608,13 +638,13 @@ class HTTPConnection:
                     continue
                 elif isinstance(d, (bytes, bytearray, memoryview)):
                     if self.debuglevel > 0:
-                        print(f"send: {len(d)} {type(d).__name__}")
+                        print('send:', type(d).__name__, len(d))
                     if not d:
                         continue
                 else:
                     raise TypeError(f"unexpected {type(d).__name__}")
                 if encode_chunked:
-                    self._sendall(f"{len(d):X}\r\n".encode('ascii'))
+                    self._sendall(b'%X\r\n' % len(d))
                 self._sendall(d)
                 if encode_chunked:
                     self._sendall(b'\r\n')
