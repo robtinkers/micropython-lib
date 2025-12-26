@@ -56,16 +56,12 @@ def create_connection(address, timeout=None):
         sock = None
         try:
             sock = socket.socket(f, t, p)
-            if timeout != 0: # 0 would be a non-blocking socket
-                try:
+            try:
+                if timeout != 0: # 0 would be a non-blocking socket
                     sock.settimeout(timeout)
-                except (AttributeError, OSError):
-                    pass
-            if True:
-                try:
-                    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-                except (AttributeError, OSError):
-                    pass
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except (AttributeError, OSError):
+                pass
             sock.connect(a)
             return sock
         except OSError:
@@ -571,11 +567,11 @@ class HTTPConnection:
         if not skip_host:
             host = self.host
             if ':' in host and not host.startswith('['):
-                host = f"[{host}]"
+                host = '[%s]' % (host, )
             if self.port == self.default_port:
                 self.putheader('Host', host)
             else:
-                self.putheader('Host', f"{host}:{self.port}")
+                self.putheader('Host', '%s:%s' % (host, self.port))
         if not skip_accept_encoding:
             self.putheader('Accept-Encoding', 'identity')
     
@@ -650,14 +646,14 @@ class HTTPConnection:
                     if not d:
                         continue
                 else:
-                    raise TypeError(f"unexpected {type(d).__name__}")
+                    raise TypeError('iterator data must be bytes-like')
                 if encode_chunked:
                     self._sendall(b'%X\r\n' % (len(d),))
                 self._sendall(d)
                 if encode_chunked:
                     self._sendall(b'\r\n')
         else:
-            raise TypeError(f"unexpected {type(data).__name__}")
+            raise TypeError('data must be bytes-like, file-like, or an iterator')
         
         if encode_chunked:
             if self.debuglevel > 0:
