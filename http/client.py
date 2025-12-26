@@ -660,14 +660,14 @@ class HTTPConnection:
                     if not d:
                         continue
                 else:
-                    raise TypeError('unexpected %s' % (type(d).__name__,))
+                    raise TypeError('unexpected data')
                 if encode_chunked:
                     self._sendall(b'%X\r\n' % (len(d),))
                 self._sendall(d)
                 if encode_chunked:
                     self._sendall(b'\r\n')
         else:
-            raise TypeError('unexpected %s' % (type(data).__name__,))
+            raise TypeError('unexpected data')
         
         if encode_chunked:
             if self.debuglevel > 0:
