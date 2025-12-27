@@ -1,6 +1,6 @@
 # urllib/parse.py
 
-from micropython import const
+import micropython
 
 __all__ = [
     "quote", "quote_plus", "quote_from_bytes",
@@ -28,7 +28,7 @@ _QUOTE_TABLE = (
 )
 
 @micropython.viper
-def _quote_reslen(qtab: ptr8, src: ptr8, srclen: int) -> int:
+def _quote_reslen(src: ptr8, srclen: int, qtab: ptr8) -> int:
     reslen = 0
     qfound = False
     i = 0
@@ -50,7 +50,7 @@ def _quote_reslen(qtab: ptr8, src: ptr8, srclen: int) -> int:
         return -1
 
 @micropython.viper
-def _quote_process(qtab: ptr8, src: ptr8, srclen: int, dst: ptr8):
+def _quote_process(src: ptr8, srclen: int, qtab: ptr8, dst: ptr8):
     j = 0
     i = 0
     while i < srclen:
@@ -66,16 +66,12 @@ def _quote_process(qtab: ptr8, src: ptr8, srclen: int, dst: ptr8):
             dst[j+2] = qtab[b & 0xF]
             j += 3
 
-def quote(s, safe='/', *, to_bytes=False, _plus=False) -> str:
+def _quote(s, safe='', *, plus=False, to_bytes=False):
     # can raise UnicodeError
     
     if not s: # empty input
-        if to_bytes:
-            return bytes(s)
-        elif isinstance(s, str):
-            return s
-        else:
-            return str(s, 'ascii')
+        if to_bytes: return b''
+        else: return ''
     
     qtab = bytearray(_QUOTE_TABLE)
     if isinstance(safe, str):
@@ -85,42 +81,48 @@ def quote(s, safe='/', *, to_bytes=False, _plus=False) -> str:
     else:
         for b in safe:
             if 32 <= b <= 127: qtab[b] = b
-    if _plus:
+    if plus:
         qtab[32] = 43 # '+'
     qtab = memoryview(qtab)
     
-    src = memoryview(s)
+    if isinstance(s, memoryview):
+        src = s
+    else:
+        src = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
     srclen = len(src)
     
-    reslen = _quote_reslen(qtab, src, srclen)
+    reslen = _quote_reslen(src, srclen, qtab)
     
-    if reslen == -1:
-        if to_bytes:
-            return bytes(s)
-        elif isinstance(s, str):
-            return s
-        else:
-            return str(s, 'ascii')
-    
-    res = bytearray(reslen)
-    _quote_process(qtab, src, srclen, res)
+    if reslen >= 0:
+        res = bytearray(reslen)
+        _quote_process(src, srclen, qtab, res)
+    else:
+        res = s
     
     if to_bytes:
-        return bytes(res)
-    else:
-        return str(res, 'ascii')
+        if isinstance(res, str): return res.encode()
+        elif isinstance(res, bytes): return res
+        elif isinstance(res, (bytearray, memoryview)): return bytes(res)
+        else: return bytes(res)
+    elif isinstance(res, str): return res
+    elif isinstance(res, (bytes, bytearray)): return res.decode('ascii')
+    elif isinstance(res, memoryview): return bytes(res).decode('ascii')
+    else: return str(res)
+
+
+def quote(s, safe='/') -> str:
+    return _quote(s, safe=safe)
+
+
+def quote_plus(s, safe='') -> str:
+    return _quote(s, safe=safe, plus=True)
 
 
 quote_from_bytes = quote
 
 
-def quote_plus(s, safe='') -> str:
-    return quote(s, safe=safe, _plus=True)
-
-
 @micropython.viper
-def _unquote_process(plus: bool, src: ptr8, srclen: int, res: ptr8) -> int:
-    qfound = False
+def _unquote_process(src: ptr8, srclen: int, plus: int, res: ptr8) -> int:
     reslen = 0
     n1 = n2 = b = i = 0
     while (i < srclen):
@@ -144,67 +146,78 @@ def _unquote_process(plus: bool, src: ptr8, srclen: int, res: ptr8) -> int:
                 n1 = 255
                 n2 = 255
             
-            if n1 != 255 and n2 != 255:
-                qfound = True
+            if n1 < 16 and n2 < 16:
                 b = (n1 << 4) | (n2 << 0)
                 i += 2
         
         elif b == 43 and plus: # '+'
-            qfound = True
             b = 32 # space
         
         res[reslen] = b
         reslen += 1
     
-    return reslen if qfound else -1
+    return reslen
 
+@micropython.viper
+def _unquote_required(src: ptr8, srclen: int, plus: int) -> int:
+    i = 0
+    while i < srclen:
+        b = src[i]
+        if b == 37 or (plus and b == 43):
+            return 1
+        i += 1
+    return 0
 
-def unquote(s, *, to_bytes=False, _plus=False) -> str:
+def _unquote(s, *, plus=False, to_bytes=False):
     # can raise UnicodeError
     
     if not s: # empty input
-        if to_bytes:
-            return bytes(s)
-        elif isinstance(s, str):
-            return s
-        else:
-            return str(s, 'utf-8')
+        if to_bytes: return b''
+        else: return ''
     
-    src = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
+    if isinstance(s, memoryview):
+        src = s
+    else:
+        src = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
     srclen = len(src)
-    res = bytearray(srclen) # Worst Case: result is the same size as the input
     
-    reslen = _unquote_process(_plus, src, srclen, res)
-    
-    if reslen == -1: # no quotes found
-        if to_bytes:
-            return bytes(s)
-        elif isinstance(s, str):
-            return s
-        else:
-            return str(s, 'utf-8')
-    
-    res = bytes(memoryview(res)[:reslen])
+    plus = 1 if plus else 0
+    if _unquote_required(src, srclen, plus):
+        res = bytearray(srclen) # Worst Case: result is the same size as the input
+        reslen = _unquote_process(src, srclen, plus, res)
+        if reslen < srclen:
+            res = memoryview(res)[:reslen]
+    else:
+        res = s
     
     if to_bytes:
-        return res
-    else:
-        return str(res, 'utf-8')
+        if isinstance(res, str): return res.encode()
+        elif isinstance(res, bytes): return res
+        elif isinstance(res, (bytearray, memoryview)): return bytes(res)
+        else: return bytes(res)
+    elif isinstance(res, str): return res
+    elif isinstance(res, (bytes, bytearray)): return res.decode('utf-8')
+    elif isinstance(res, memoryview): return bytes(res).decode('utf-8')
+    else: return str(res)
+
+
+def unquote(s) -> str:
+    return _unquote(s)
 
 
 def unquote_plus(s) -> str:
-    return unquote(s, _plus=True)
+    return _unquote(s, plus=True)
 
 
 def unquote_to_bytes(s) -> bytes:
-    return unquote(s, to_bytes=True)
+    return _unquote(s, to_bytes=True)
 
 
 def locsplit_tuple(netloc: str) -> tuple: # extension
     if not isinstance(netloc, str):
         raise TypeError('netloc must be a string')
     
-    userpass, sep, hostport = netloc.partition('@')
+    userpass, sep, hostport = netloc.rpartition('@')
     if sep:
         username, sep, password = userpass.partition(':')
         if not sep:
@@ -213,18 +226,18 @@ def locsplit_tuple(netloc: str) -> tuple: # extension
         username, password = None, None
         hostport = userpass
     
-    if ']' in hostport: # Handle IPv6 (simple check)
-        host, sep, port = hostport.rpartition(':')
-        if ']' not in host: # The colon was inside the brackets!
-            host = hostport
-            port = ''
+    if hostport.startswith('['): # Handle IPv6 (simple check)
+        host, sep, port = hostport[1:].partition(']')
+        if sep and port.startswith(':'):
+            port = port[1:]
     else:
         host, sep, port = hostport.rpartition(':')
         if not sep:
             host, port = port, ''
-        host = host.lower()
     
-    if not host:
+    if host:
+        host = host.lower()
+    else:
         host = None
     
     if port:
@@ -283,6 +296,9 @@ def urlsplit_tuple(url: str, scheme='', allow_fragments=True) -> tuple:
 
 
 class SplitResult:
+    
+    __slots__ = ('scheme', 'netloc', 'path', 'query', 'fragment',
+                 'username', 'password', 'hostname', 'port', '_url')
     
     def __init__(self, url: str, scheme='', allow_fragments=True):
         self.scheme, self.netloc, self.path, self.query, self.fragment = urlsplit_tuple(url, scheme, allow_fragments)
@@ -378,8 +394,8 @@ def urljoin(base: str, url: str, allow_fragments=True) -> str:
     if url == '':
         return base
     
-    bs, bn, bp, bq, bf = urlsplit(base, '', allow_fragments)
-    us, un, up, uq, uf = urlsplit(url, '', allow_fragments)
+    bs, bn, bp, bq, bf = urlsplit_tuple(base, '', allow_fragments)
+    us, un, up, uq, uf = urlsplit_tuple(url, '', allow_fragments)
     
     if us:
         return url
