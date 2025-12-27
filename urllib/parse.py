@@ -5,7 +5,8 @@ from micropython import const
 __all__ = [
     "quote", "quote_plus", "quote_from_bytes",
     "unquote", "unquote_plus", "unquote_to_bytes",
-    "netlocsplit", "netlocdict", "urlsplit", "urlunsplit", "urljoin",
+    "urlsplit_tuple", "locsplit_tuple",
+    "urlsplit", "urlunsplit", "urljoin",
     "urlencode", "parse_qs", "parse_qsl", "urldecode", 
 ]
 
@@ -199,7 +200,7 @@ def unquote_to_bytes(s) -> bytes:
     return unquote(s, to_bytes=True)
 
 
-def netlocsplit(netloc: str) -> tuple: # extension
+def locsplit_tuple(netloc: str) -> tuple: # extension
     if not isinstance(netloc, str):
         raise TypeError('netloc must be a string')
     
@@ -236,11 +237,7 @@ def netlocsplit(netloc: str) -> tuple: # extension
     return (username, password, host, port)
 
 
-def netlocdict(netloc: str) -> dict: # extension
-    return dict(zip(('username', 'password', 'hostname', 'port'), netlocsplit(netloc)))
-
-
-def _urlsplit(url: str, scheme='', allow_fragments=True) -> tuple:
+def urlsplit_tuple(url: str, scheme='', allow_fragments=True) -> tuple:
     if not isinstance(url, str):
         raise TypeError('url must be a string')
     
@@ -278,27 +275,35 @@ def _urlsplit(url: str, scheme='', allow_fragments=True) -> tuple:
     return (scheme, netloc, path, query, fragment)
 
 
-def urlsplit(url: str, *args, **kwargs) -> tuple:
-    return _urlsplit(url, *args, **kwargs)
+class SplitResult:
+    
+    def __init__(self, url: str, scheme='', allow_fragments=True):
+        self.scheme, self.netloc, self.path, self.query, self.fragment = urlsplit_tuple(url, scheme, allow_fragments)
+        self.username, self.password, self.hostname, self.port = locsplit_tuple(self.netloc)
+        self._url = url
+    
+    def __len__(self):
+        return 5
+    
+    def __iter__(self):
+        yield self.scheme
+        yield self.netloc
+        yield self.path
+        yield self.query
+        yield self.fragment
+    
+    def __getitem__(self, i):
+        return (self.scheme, self.netloc, self.path, self.query, self.fragment)[i]
+    
+    def __repr__(self):
+        return ('SplitResult(%s)' % repr(self._url))
+    
+    def geturl(self):
+        return self._url
 
 
-#from collections import namedtuple
-#_SplitTuple = namedtuple('_SplitTuple', ('scheme', 'netloc', 'path', 'query', 'fragment'))
-#class SplitResult(_SplitTuple):
-#    @property
-#    def username(self):
-#        return netlocsplit(self.netloc)[0]
-#    @property
-#    def password(self):
-#        return netlocsplit(self.netloc)[1]
-#    @property
-#    def hostname(self):
-#        return netlocsplit(self.netloc)[2]
-#    @property
-#    def port(self):
-#        return netlocsplit(self.netloc)[3]
-#def urlsplit(url: str, *args, **kwargs) -> SplitResult:
-#    return SplitResult(*_urlsplit(url, *args, **kwargs))
+def urlsplit(url: str, scheme='', allow_fragments=True) -> SplitResult:
+    return SplitResult(url, scheme, allow_fragments)
 
 
 def urlunsplit(components: tuple) -> str:
