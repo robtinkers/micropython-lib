@@ -228,14 +228,16 @@ def locsplit_tuple(netloc: str) -> tuple: # extension
         host = None
     
     if port:
-        # Incompatibility with CPython (where bad port numbers raise ValueError)
+        # Incompatibility:
+        # CPython raises ValueError for bad ports
+        # we return bad ports as the string
         try:
-            port = int(port, 10)
+            port_number = int(port, 10)
         except ValueError:
-            port = None
+            pass
         else:
-            if not (0 <= port <= 65535):
-                port = None
+            if (0 <= port_number <= 65535):
+                port = port_number
     else:
         port = None
     
