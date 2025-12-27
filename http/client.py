@@ -1,7 +1,6 @@
 # http/client.py
 
-from micropython import const
-import socket
+import micropython, socket
 
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
