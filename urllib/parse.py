@@ -10,7 +10,13 @@ __all__ = [
     "urlencode", "parse_qs", "parse_qsl", "urldecode", 
 ]
 
-_USES_NETLOC = frozenset(['file', 'ftp', 'http', 'https', 'ws', 'wss'])
+_USES_RELATIVE = frozenset([
+    '', 'file', 'ftp', 'http', 'https', 'rtsp', 'rtsps', 'sftp', 'ws', 'wss',
+])
+
+_USES_NETLOC = frozenset([
+    '', 'file', 'ftp', 'http', 'https', 'rtsp', 'rtsps', 'sftp', 'ws', 'wss',
+])
 
 # Table Size: 128 Bytes
 # Indices 0-15:   Hex Digits '0'-'F' (used for lookup during encoding)
@@ -322,6 +328,7 @@ class SplitResult:
         return ('SplitResult(%s)' % repr(self._url))
     
     def geturl(self):
+#        return urlunsplit((self.scheme, self.netloc, self.path, self.query, self.fragment)) # match CPython
         return self._url
 
 
@@ -346,82 +353,63 @@ def urlunsplit(components: tuple) -> str:
     return url
 
 
-def _normalize_path(path: str) -> str:
-    if path == '' or path == '/':
-        return path
-    
-    slashes = 0
-    for char in path:
-        if char == '/':
-            slashes += 1
-        else:
-            break
-    
-    stack = []
-    
-    for seg in path.split('/'):
-        if seg == '' or seg == '.':
-            continue
-        elif seg == '..':
-            if stack and stack[-1] != '..':
-                stack.pop()
-            elif slashes == 0:
-                stack.append('..')
-        else:
-            stack.append(seg)
-    
-    res = '/'.join(stack)
-    
-    if slashes > 0:
-        res = ('/' * slashes) + res
-    
-    if path.endswith('/') or path.endswith('/.') or path.endswith('/..') or path == '.' or path == '..':
-        if not res.endswith('/') and not (stack and stack[-1] == '..'):
-            if res != '':
-                res += '/'
-    
-    return res
-
-
-def urljoin(base: str, url: str, allow_fragments=True) -> str:
-    if not isinstance(base, str):
-        raise TypeError('base must be a string')
-    if not isinstance(url, str):
-        raise TypeError('url must be a string')
-    
-    if base == '':
+# copied from CPython with minor edits
+def urljoin(base: str, url: str, allow_fragments=True):
+    if not base:
         return url
-    if url == '':
+    if not url:
         return base
     
-    bs, bn, bp, bq, bf = urlsplit_tuple(base, '', allow_fragments)
-    us, un, up, uq, uf = urlsplit_tuple(url, '', allow_fragments)
+    bscheme, bnetloc, bpath, bquery, bfragment = urlsplit_tuple(base, None, allow_fragments)
+    scheme, netloc, path, query, fragment = urlsplit_tuple(url, None, allow_fragments)
     
-    if us:
+    if scheme is None:
+        scheme = bscheme
+    if scheme != bscheme or (scheme and scheme not in _USES_RELATIVE):
         return url
-    us = bs
+    if not scheme or scheme in _USES_NETLOC:
+        if netloc:
+            return urlunsplit(scheme, netloc, path, query, fragment)
+        netloc = bnetloc
     
-    if un or url.startswith('//'):
-        return urlunsplit((us, un, _normalize_path(up), uq, uf))
-    un = bn
+    if not path:
+        path = bpath
+        if query is None:
+            query = bquery
+            if fragment is None:
+                fragment = bfragment
+        return urlunsplit(scheme, netloc, path, query, fragment)
     
-    if up:
-        if not up.startswith('/'):
-            if not bp:
-                if bn:
-                    up = '/' + up
-            elif bp.endswith('/'):
-                up = bp + up
-            else:
-                rs = bp.rfind('/')
-                if rs != -1:
-                    up = bp[:rs+1] + up
+    base_parts = bpath.split('/')
+    if base_parts[-1] != '':
+        # the last item is not a directory, so will not be taken into account
+        # in resolving the relative path
+        del base_parts[-1]
+    
+    # for rfc3986, ignore all base path should the first character be root.
+    if path[:1] == '/':
+        segments = path.split('/')
     else:
-        up = bp
-        if not uq:
-            uq = bq
+        segments = base_parts + path.split('/')
+        # filter out elements that would cause redundant slashes on re-joining
+        # the resolved_path
+        segments[1:-1] = filter(None, segments[1:-1])
     
-    return urlunsplit((us, un, _normalize_path(up), uq, uf))
+    resolved_path = []
+    
+    for seg in segments:
+        if seg == '..':
+            if resolved_path:
+                resolved_path.pop()
+        elif seg != '.':
+            resolved_path.append(seg)
+    
+    if segments[-1] == '.' or segments[-1] == '..':
+        # do some post-processing here. if the last segment was a relative dir,
+        # then we need to append the trailing '/'
+        resolved_path.append('')
+    
+    return urlunsplit(scheme, netloc, '/'.join(resolved_path) or '/', query, fragment)
 
 
 def _urlencode_generator(query, doseq=False, safe='', *, quote_via=quote_plus):
