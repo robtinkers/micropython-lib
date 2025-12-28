@@ -456,9 +456,7 @@ def urljoin(base: str, url: str, allow_fragments: bool=True) -> str:
         if seg == '..':
             if resolved_path:
                 resolved_path.pop()
-        elif seg == '.':
-            continue
-        else:
+        elif seg != '.':
             resolved_path.append(seg)
     
     if segments[-1] in ('.', '..'):
