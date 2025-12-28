@@ -342,7 +342,6 @@ class SplitResult:
                  'username', 'password', 'hostname', 'port', '_url')
     
     def __init__(self, url: str, scheme, allow_fragments: bool):
-        self._url = url
         self.scheme, netloc, path, query, fragment = _urlsplit(url, scheme, allow_fragments)
         self.netloc = netloc or ''
         self.path = path or ''
@@ -361,13 +360,16 @@ class SplitResult:
         yield self.fragment
     
     def __getitem__(self, i):
-        return (self.scheme, self.netloc, self.path, self.query, self.fragment)[i]
-    
-    def __repr__(self):
-        return ('SplitResult(%s)' % repr(self._url))
+#        return (self.scheme, self.netloc, self.path, self.query, self.fragment)[i]
+        if i == 0: return self.scheme
+        if i == 1: return self.netloc
+        if i == 2: return self.path
+        if i == 3: return self.query
+        if i == 4: return self.fragment
+        raise IndexError('tuple index out of range')
     
     def geturl(self):
-        return self._url
+        return urlunsplit(self)
 
 def urlsplit(url: str, scheme='', allow_fragments=True) -> SplitResult:
     return SplitResult(url, scheme, allow_fragments)
