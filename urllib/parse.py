@@ -10,11 +10,11 @@ __all__ = [
 ]
 
 _USES_RELATIVE = frozenset([
-    '', 'file', 'ftp', 'http', 'https', 'rtsp', 'rtsps', 'sftp', 'ws', 'wss',
+    'file', 'ftp', 'http', 'https', 'rtsp', 'rtsps', 'sftp', 'ws', 'wss',
 ])
 
 _USES_NETLOC = frozenset([
-    '', 'file', 'ftp', 'http', 'https', 'rtsp', 'rtsps', 'sftp', 'ws', 'wss',
+    'file', 'ftp', 'http', 'https', 'rtsp', 'rtsps', 'sftp', 'ws', 'wss',
 ])
 
 # Table Size: 128 Bytes
