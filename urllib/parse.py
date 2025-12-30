@@ -189,10 +189,10 @@ def _unquote(s, start, end, plus) -> bytes:
     return bytes(res)
 
 def unquote(s):
-    return _unquote(s, 0, None, False).decode()
+    return _unquote(s, 0, None, False).decode('utf-8')
 
 def unquote_plus(s):
-    return _unquote(s, 0, None, True).decode()
+    return _unquote(s, 0, None, True).decode('utf-8')
 
 def unquote_to_bytes(s) -> bytes:
     return _unquote(s, 0, None, False)
