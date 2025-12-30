@@ -1,6 +1,7 @@
 # urllib/parse.py
 
 import micropython
+from uctypes import addressof
 
 __all__ = [
     "quote", "quote_plus", "quote_from_bytes",
@@ -57,12 +58,15 @@ def _quote_helper(src: ptr8, srclen: int, qtab: ptr8, res: ptr8) -> int:
     
     return reslen if modified else 0
 
-def _quote(s, safe='', *, plus=False, to_bytes=False):
-    # can raise UnicodeError
+def _quote(s, safe, plus) -> str:
+    if isinstance(s, (memoryview, bytes)):
+        src = s
+    else:
+        src = memoryview(s)
     
-    if not s: # empty input
-        if to_bytes: return b''
-        else: return ''
+    srclen = len(src)
+    if srclen == 0:
+        return ''
     
     if safe == '' and plus:
         # we optimise for quote_plus() with safe='' (the default)
@@ -70,47 +74,37 @@ def _quote(s, safe='', *, plus=False, to_bytes=False):
     else:
         # other methods/arguments will have a slight memory churn
         qtab = bytearray(_QUOTE_PLUS)
+        qtab[32] = 0xFF
         if isinstance(safe, str):
             for c in safe:
                 b = ord(c)
-                if 32 <= b <= 127: qtab[b] = b
+                if 32 <= b <= 127:
+                    qtab[b] = b
         else:
             for b in safe:
-                if 32 <= b <= 127: qtab[b] = b
-        if not plus:
-            qtab[32] = 0xFF
-    qtab = memoryview(qtab)
-    
-    if isinstance(s, memoryview):
-        src = s
-    else:
-        src = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
-    srclen = len(src)
+                if 32 <= b <= 127:
+                    qtab[b] = b
+        if plus:
+            qtab[32] = 43 # +
     
     reslen = _quote_helper(src, srclen, qtab, 0)
-    if reslen > 0:
-        res = bytearray(reslen)
-        _quote_helper(src, srclen, qtab, res)
-    else:
-        res = s
+    if reslen <= 0:
+        if isinstance(s, str): return s
+        elif isinstance(s, (bytes, bytearray)): return s.decode('ascii')
+        else: return bytes(s).decode('ascii')
     
-    if to_bytes:
-        if isinstance(res, str): return res.encode()
-        elif isinstance(res, bytes): return res
-        elif isinstance(res, (bytearray, memoryview)): return bytes(res)
-        else: return bytes(res)
-    elif isinstance(res, str): return res
-    elif isinstance(res, (bytes, bytearray)): return res.decode('ascii')
-    elif isinstance(res, memoryview): return bytes(res).decode('ascii')
-    else: return str(res)
+    res = bytearray(reslen)
+    _quote_helper(src, srclen, qtab, res)
+    return res.decode('ascii')
 
 def quote(s, safe='/') -> str:
-    return _quote(s, safe=safe)
+    return _quote(s, safe, False)
 
 def quote_plus(s, safe='') -> str:
-    return _quote(s, safe=safe, plus=True)
+    return _quote(s, safe, True)
 
-quote_from_bytes = quote
+def quote_from_bytes(s, safe='/') -> str:
+    return _quote(s, safe, False)
 
 
 
@@ -155,45 +149,53 @@ def _unquote_helper(src: ptr8, srclen: int, plus: int, res: ptr8) -> int:
     
     return reslen if modified else 0
 
-def _unquote(s, *, plus=False, to_bytes=False):
-    # can raise UnicodeError
+def _unquote(s, start, end, plus) -> bytes:
+    # if s is a string, then start and end should be 0 and None
+    # otherwise you're going to have a very bad time
     
-    if not s: # empty input
-        if to_bytes: return b''
-        else: return ''
-    
-    if isinstance(s, memoryview):
+    if isinstance(s, (memoryview, bytes)):
         src = s
     else:
-        src = memoryview(s) # In micropython, memoryview(str) returns read-only UTF-8 bytes
+        src = memoryview(s)
+    
     srclen = len(src)
+    if srclen == 0:
+        return b''
     
-    flag_plus = 1 if plus else 0
-    reslen = _unquote_helper(src, srclen, flag_plus, 0)
-    if reslen:
-        res = bytearray(reslen)
-        _unquote_helper(src, srclen, flag_plus, res)
-    else:
-        res = s
+    noslice = (start == 0 and end is None)
+    if end is None or end > srclen:
+        end = srclen
+    if start < 0:
+        start = 0
+    if start >= end:
+        return b''
     
-    if to_bytes:
-        if isinstance(res, str): return res.encode()
-        elif isinstance(res, bytes): return res
-        elif isinstance(res, (bytearray, memoryview)): return bytes(res)
-        else: return bytes(res)
-    elif isinstance(res, str): return res
-    elif isinstance(res, (bytes, bytearray)): return res.decode('utf-8')
-    elif isinstance(res, memoryview): return bytes(res).decode('utf-8')
-    else: return str(res)
+    adr = addressof(src)
+    reslen = _unquote_helper(adr + start, end - start, int(plus), 0)
+    if reslen <= 0:
+        if isinstance(s, str):
+            res = s.encode('utf-8')
+        elif isinstance(s, bytes):
+            res = s
+        else:
+            res = bytes(s)
+        if noslice:
+            return res
+        else:
+            return res[start:end]
+    
+    res = bytearray(reslen)
+    _unquote_helper(adr + start, end - start, int(plus), res)
+    return bytes(res)
 
-def unquote(s) -> str:
-    return _unquote(s)
+def unquote(s):
+    return _unquote(s, 0, None, False).decode()
 
-def unquote_plus(s) -> str:
-    return _unquote(s, plus=True)
+def unquote_plus(s):
+    return _unquote(s, 0, None, True).decode()
 
 def unquote_to_bytes(s) -> bytes:
-    return _unquote(s, to_bytes=True)
+    return _unquote(s, 0, None, False)
 
 
 
@@ -206,46 +208,75 @@ def _urlencode_generator(query, doseq=False, safe='', *, quote_via=quote_plus):
         
         if isinstance(val, (str, bytes, bytearray)):
             val = quote_via(val, safe)
-            yield f"{key}={val}"
+            yield key + '=' + val
         elif doseq: # trust the caller
             for v in val:
                 if isinstance(v, (str, bytes, bytearray)):
                     v = quote_via(v, safe)
                 else:
                     v = quote_via(str(v), safe)
-                yield f"{key}={v}"
+                yield key + '=' + v
         else:
             val = quote_via(str(val), safe)
-            yield f"{key}={val}"
+            yield key + '=' + val
 
 def urlencode(query, *args, **kwargs) -> str:
     return '&'.join(_urlencode_generator(query, *args, **kwargs))
 
 
 
-def _parse_generator(qs: str, keep_blank_values=False, strict_parsing=False, unquote_via=unquote_plus):
+@micropython.viper
+def _mv_find(mv: ptr8, b: int, start: int, end: int) -> int:
+    i = start
+    while i < end:
+        if mv[i] == b:
+            return i
+        i = i + 1
+    return -1
+
+def _parse_generator(qs, keep_blank_values=False, strict_parsing=False,
+                     *, max_num_fields=None, separator='&'):
     if not qs:
         return
-        
-    j = -1
-    n = len(qs)
+    if not isinstance(qs, (memoryview, bytes)):
+        qs = memoryview(qs)
     
-    while (j + 1) < n:
-        i = j + 1
-        j = qs.find('&', i)
-        if j == -1:
+    sep = ord(separator)
+    n = len(qs)
+    i = 0
+    num_fields = 0
+    
+    while i <= n:
+        num_fields += 1
+        if max_num_fields is not None and num_fields > max_num_fields:
+            raise ValueError('max_num_fields exceeded')
+        
+        j = _mv_find(qs, sep, i, n)
+        if j < 0:
             j = n
+        eq = _mv_find(qs, 61, i, j) # '='
         
-        eq = qs.find('=', i, j)
-        
-        if eq >= 0:
-            if keep_blank_values or (eq + 1 < j):
-                yield unquote_via(qs[i:eq]), unquote_via(qs[eq+1:j])
-        else:
+        try:
+            if eq >= 0:
+                # key=value
+                if keep_blank_values or (eq + 1 < j):
+                    kb = _unquote(qs, i, eq, True)
+                    vb = _unquote(qs, eq + 1, j, True)
+                    yield kb.decode('utf-8'), vb.decode('utf-8')
+            else:
+                # key (no '=')
+                if strict_parsing:
+                    raise ValueError('bad query field')
+                if keep_blank_values:
+                    kb = _unquote(qs, i, j, True)
+                    yield kb.decode('utf-8'), ''
+        except UnicodeError:
             if strict_parsing:
-                raise ValueError("bad query field: %r" % (qs[i:j],))
-            if keep_blank_values:
-                yield unquote_via(qs[i:j]), ''
+                raise
+        
+        if j == n:
+            break
+        i = j + 1
 
 def parse_qs(qs: str, *args, **kwargs) -> dict:
     res = {}
@@ -281,7 +312,7 @@ def _locsplit(netloc: str) -> tuple: # extension
     if hostport.startswith('['): # Handle IPv6 (simple check)
         if (sep := hostport.find(']')) >= 0:
             host, port_string = hostport[1:sep], hostport[sep+1:]
-        else:
+        else: # *shrug*
             host, port_string = hostport, ''
     else:
         if (sep := hostport.rfind(':')) >= 0:
@@ -294,22 +325,7 @@ def _locsplit(netloc: str) -> tuple: # extension
     else:
         host = None
     
-    # Incompatibility:
-    # CPython raises ValueError for bad ports
-    # we return bad ports as the string
-    port = port_string
-    if port_string.startswith(':'):
-        try:
-            port_number = int(port_string[1:], 10)
-        except ValueError:
-            pass
-        else:
-            if (0 <= port_number <= 65535):
-                port = port_number
-    elif port_string == '':
-        port = None
-    
-    return (username, password, host, port)
+    return (username, password, host, port_string or None)
 
 # derived from CPython (all bugs are mine)
 def _urlsplit(url: str, scheme, allow_fragments: bool) -> tuple:
@@ -336,39 +352,47 @@ def _urlsplit(url: str, scheme, allow_fragments: bool) -> tuple:
     
     return (scheme, netloc, url, query, fragment)
 
-class SplitResult:
+class SplitResult(tuple):
     
-    def __init__(self, url: str, scheme, allow_fragments: bool):
-        self.scheme, netloc, path, query, fragment = _urlsplit(url, scheme, allow_fragments)
-        self.netloc = netloc or ''
-        self.path = path or ''
-        self.query = query or ''
-        self.fragment = fragment or ''
-        self.username, self.password, self.hostname, self.port = _locsplit(self.netloc)
+    def __init__(self, scheme, netloc, path, query, fragment):
+        super().__init__((scheme, netloc or '', path or '', query or '', fragment or ''))
+        self.username, self.password, self.hostname, self._port = _locsplit(self[1])
     
-    def __len__(self):
-        return 5
+    @property
+    def scheme(self): return self[0]
     
-    def __iter__(self):
-        yield self.scheme
-        yield self.netloc
-        yield self.path
-        yield self.query
-        yield self.fragment
+    @property
+    def netloc(self): return self[1]
     
-    def __getitem__(self, i):
-        if i == 0: return self.scheme
-        if i == 1: return self.netloc
-        if i == 2: return self.path
-        if i == 3: return self.query
-        if i == 4: return self.fragment
-        raise IndexError('tuple index out of range')
+    @property
+    def path(self): return self[2]
+    
+    @property
+    def query(self): return self[3]
+    
+    @property
+    def fragment(self): return self[4]
+    
+    @property
+    def port(self):
+        if self._port is None:
+            return None
+        if not self._port.startswith(':'):
+            raise ValueError('bad port number')
+        try:
+            port = int(self._port[1:], 10)
+        except ValueError:
+            raise ValueError('bad port number')
+        else:
+            if not (0 <= port <= 65535):
+                raise ValueError('bad port number')
+        return port
     
     def geturl(self):
         return urlunsplit(self)
 
 def urlsplit(url: str, scheme='', allow_fragments=True) -> SplitResult:
-    return SplitResult(url, scheme, allow_fragments)
+    return SplitResult(*_urlsplit(url, scheme, allow_fragments))
 
 
 
