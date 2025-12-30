@@ -1,6 +1,7 @@
 # urllib/parse.py
 
 import micropython
+from array import array
 from uctypes import addressof
 
 __all__ = [
@@ -18,47 +19,78 @@ _USES_NETLOC = frozenset([
     'file', 'ftp', 'http', 'https', 'rtsp', 'rtsps', 'sftp', 'ws', 'wss',
 ])
 
-# Table Size: 128 Bytes
-# Indices 0-15:   Hex Digits '0'-'F' (used for lookup during encoding)
-# Indices 16-31:  Unused/Unsafe (0xFF)
-# Indices 32-127: Mapping (0xFF = Encode, Other = Output Char)
-_QUOTE_PLUS = (
-    b'0123456789ABCDEF' 
-    b'\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff'
-    b'+\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff-.\xff'
-    b'0123456789\xff\xff\xff\xff\xff\xff'
-    b'\xffABCDEFGHIJKLMNO'
-    b'PQRSTUVWXYZ\xff\xff\xff\xff_'
-    b'\xffabcdefghijklmno'
-    b'pqrstuvwxyz\xff\xff\xff~\xff'
-)
+_HEX_DIGITS = b'0123456789ABCDEF'
+
+# Standard masks for ASCII 32-127
+# 0-31:   not used
+# 32-63:  0-9, -, .
+# 64-95:  A-Z, _
+# 96-127: a-z, ~
+_MASKS_BASE = (0, 0x03FF6000, 0x87FFFFFE, 0x47FFFFFE)
+
+_MASKS_QUOTE = array('I', [
+    0,
+    _MASKS_BASE[1] | (1 << 15), # /
+    _MASKS_BASE[2], 
+    _MASKS_BASE[3]
+])
+
+_MASKS_QUOTE_PLUS = array('I', [
+    1, # plus mode
+    _MASKS_BASE[1], 
+    _MASKS_BASE[2], 
+    _MASKS_BASE[3]
+])
 
 @micropython.viper
-def _quote_helper(src: ptr8, srclen: int, qtab: ptr8, res: ptr8) -> int:
+def _quote_helper(src: ptr8, srclen: int, masks: ptr32, res: ptr8) -> int:
+    write = int(res) != 0
     modified = 0
     reslen = 0
+    b = 0
+    
+    # Unpack masks into local variables for speed
+    flags = masks[0]
+    mask1 = masks[1] # 32-63
+    mask2 = masks[2] # 64-95
+    mask3 = masks[3] # 96-127
+    
+    hex_digits = ptr8(addressof(_HEX_DIGITS))
+    
     i = 0
     while i < srclen:
         b = src[i]
         i += 1
         
-        if (32 <= b <= 127) and qtab[b] != 255:
-            if qtab[b] != b:
-                modified = 1
-            if int(res):
-                res[reslen] = qtab[b]
+        if b == 32 and flags == 1:
+            modified = 1
+            if write: res[reslen] = 43 # '+'
+            reslen += 1
+            continue
+        
+        if b < 32:
+            is_safe = 0
+        elif b < 64:
+            is_safe = (mask1 >> (b & 31)) & 1
+        elif b < 96:
+            is_safe = (mask2 >> (b & 31)) & 1
+        elif b < 128:
+            is_safe = (mask3 >> (b & 31)) & 1
+        
+        if is_safe:
+            if write: res[reslen] = b
             reslen += 1
         else:
             modified = 1
-            if int(res):
-                res[reslen+0] = 37 # '%'
-                res[reslen+1] = qtab[(b >> 4) & 0xF]
-                res[reslen+2] = qtab[b & 0xF]
+            if write:
+                res[reslen] = 37 # '%'
+                res[reslen + 1] = hex_digits[b >> 4]
+                res[reslen + 2] = hex_digits[b & 0xF]
             reslen += 3
     
     return reslen if modified else 0
 
-def _quote(s, safe, plus) -> str:
+def _quote(s, safe, flags):
     if isinstance(s, (memoryview, bytes, bytearray)):
         src = s
     else:
@@ -68,26 +100,23 @@ def _quote(s, safe, plus) -> str:
     if srclen == 0:
         return ''
     
-    if safe == '' and plus:
-        # we optimise for quote_plus() with safe='' (the default)
-        qtab = _QUOTE_PLUS
+    if flags == 0 and safe == '/':
+        masks = addressof(_MASKS_QUOTE)
+    elif flags == 1 and safe == '':
+        masks = addressof(_MASKS_QUOTE_PLUS)
     else:
-        # other methods/arguments will have a slight memory churn
-        qtab = bytearray(_QUOTE_PLUS)
-        qtab[32] = 0xFF
-        if isinstance(safe, str):
-            for c in safe:
-                b = ord(c)
-                if 32 <= b <= 127:
-                    qtab[b] = b
-        else:
-            for b in safe:
-                if 32 <= b <= 127:
-                    qtab[b] = b
-        if plus:
-            qtab[32] = 43 # +
+        # Slow path: build custom masks inline
+        masks_custom = [flags, _MASKS_BASE[1], _MASKS_BASE[2], _MASKS_BASE[3]]
+        for c in safe:
+            if isinstance(c, str):
+                c = ord(c)
+            if c < 32 or c > 127:
+                continue
+            masks_custom[(c >> 5)] |= (1 << (c & 31))
+        masks_custom = array('I', masks_custom)
+        masks = addressof(masks_custom)
     
-    reslen = _quote_helper(src, srclen, qtab, 0)
+    reslen = _quote_helper(src, srclen, masks, 0)
     if reslen <= 0:
         if isinstance(s, str):
             return s
@@ -97,25 +126,28 @@ def _quote(s, safe, plus) -> str:
             return bytes(s).decode('ascii')
     
     res = bytearray(reslen)
-    _quote_helper(src, srclen, qtab, res)
+    _quote_helper(src, srclen, masks, res)
     return res.decode('ascii')
 
-def quote(s, safe='/') -> str:
-    return _quote(s, safe, False)
+def quote(string, safe='/'):
+    return _quote(string, safe, 0)
 
-def quote_plus(s, safe='') -> str:
-    return _quote(s, safe, True)
+def quote_plus(string, safe=''):
+    return _quote(string, safe, 1)
 
-def quote_from_bytes(s, safe='/') -> str:
-    return _quote(s, safe, False)
+def quote_from_bytes(string, safe='/'):
+    return _quote(string, safe, 0)
 
 
 
 @micropython.viper
-def _unquote_helper(src: ptr8, srclen: int, plus: int, res: ptr8) -> int:
+def _unquote_helper(src: ptr8, srclen: int, flags: int, res: ptr8) -> int:
+    write = int(res) != 0
     modified = 0
     reslen = 0
-    n1 = n2 = b = i = 0
+    n1 = n2 = b = 0
+    
+    i = 0
     while (i < srclen):
         b = src[i]
         i += 1
@@ -142,17 +174,17 @@ def _unquote_helper(src: ptr8, srclen: int, plus: int, res: ptr8) -> int:
                 b = (n1 << 4) | (n2 << 0)
                 i += 2
         
-        elif b == 43 and plus: # '+'
+        elif b == 43 and flags == 1: # '+'
             modified = 1
             b = 32 # space
         
-        if int(res):
+        if write:
             res[reslen] = b
         reslen += 1
     
     return reslen if modified else 0
 
-def _unquote(s, start, end, plus) -> bytes:
+def _unquote(s, start, end, flags) -> bytes:
     # if s is a string, then start and end should be 0 and None
     # otherwise you're going to have a very bad time
     
@@ -174,7 +206,7 @@ def _unquote(s, start, end, plus) -> bytes:
         return b''
     
     adr = addressof(src)
-    reslen = _unquote_helper(adr + start, end - start, int(plus), 0)
+    reslen = _unquote_helper(adr + start, end - start, flags, 0)
     if reslen <= 0:
         if isinstance(s, str):
             res = s.encode('utf-8')
@@ -188,17 +220,17 @@ def _unquote(s, start, end, plus) -> bytes:
             return res[start:end]
     
     res = bytearray(reslen)
-    _unquote_helper(adr + start, end - start, int(plus), res)
+    _unquote_helper(adr + start, end - start, flags, res)
     return bytes(res)
 
 def unquote(s):
-    return _unquote(s, 0, None, False).decode('utf-8')
+    return _unquote(s, 0, None, 0).decode('utf-8')
 
 def unquote_plus(s):
-    return _unquote(s, 0, None, True).decode('utf-8')
+    return _unquote(s, 0, None, 1).decode('utf-8')
 
 def unquote_to_bytes(s) -> bytes:
-    return _unquote(s, 0, None, False)
+    return _unquote(s, 0, None, 0)
 
 
 
