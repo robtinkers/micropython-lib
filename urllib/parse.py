@@ -378,7 +378,7 @@ def _urlsplit(url: str, scheme, allow_fragments: bool) -> tuple:
     if (colon := url.find(':')) > 0 and url[0].isalpha():
         if (slash := url.find('/')) < 0 or colon < slash:
             scheme, url = url[:colon].lower(), url[colon+1:]
-    if url[:2] == '//': # len(url) >= 2 and url[0] == '/' and url[1] == '//':
+    if url.startswith('//'):
         delim = len(url)
         for c in '/?#':
             if 0 <= (x := url.find(c, 2)) < delim:
@@ -444,7 +444,7 @@ def _urlunsplit(scheme, netloc, url, query, fragment) -> str:
         if url[0] != '/':
             url = '/' + url
         url = '//' + netloc + url
-    elif url[:2] == '//': # len(url) >= 2 and url[0] == '/' and url[1] == '/':
+    elif url.startswith('//'):
         url = '//' + url
     if scheme:
         url = scheme + ':' + url
