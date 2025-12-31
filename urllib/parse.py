@@ -62,7 +62,7 @@ def _quote_helper(src: ptr8, srclen: int, masks: ptr32, res: ptr8) -> int:
         b = src[i]
         i += 1
         
-        if b == 32 and flags == 1:
+        if b == 32 and flags == 1: # space and quote_plus
             modified = 1
             if write: res[reslen] = 43 # '+'
             reslen += 1
@@ -76,6 +76,8 @@ def _quote_helper(src: ptr8, srclen: int, masks: ptr32, res: ptr8) -> int:
             is_safe = (mask2 >> (b & 31)) & 1
         elif b < 128:
             is_safe = (mask3 >> (b & 31)) & 1
+        else:
+            is_safe = 0
         
         if is_safe:
             if write: res[reslen] = b
@@ -100,20 +102,19 @@ def _quote(s, safe, flags):
     if srclen == 0:
         return ''
     
-    if flags == 0 and safe == '/':
+    # Fast path for standard methods with default arguments
+    if flags == 0 and safe == '/': # quote('foo')
         masks = addressof(_MASKS_QUOTE)
-    elif flags == 1 and safe == '':
+    elif flags == 1 and safe == '': # quote_plus('bar')
         masks = addressof(_MASKS_QUOTE_PLUS)
     else:
-        # Slow path: build custom masks inline
-        masks_custom = [flags, _MASKS_BASE[1], _MASKS_BASE[2], _MASKS_BASE[3]]
+        # Slow path: build custom masks
+        masks_custom = array('I', [flags, _MASKS_BASE[1], _MASKS_BASE[2], _MASKS_BASE[3]])
         for c in safe:
             if isinstance(c, str):
                 c = ord(c)
-            if c < 32 or c > 127:
-                continue
-            masks_custom[(c >> 5)] |= (1 << (c & 31))
-        masks_custom = array('I', masks_custom)
+            if 32 <= c <= 127:
+                masks_custom[(c >> 5)] |= (1 << (c & 31))
         masks = addressof(masks_custom)
     
     reslen = _quote_helper(src, srclen, masks, 0)
@@ -129,10 +130,10 @@ def _quote(s, safe, flags):
     _quote_helper(src, srclen, masks, res)
     return res.decode('ascii')
 
-def quote(string, safe='/'):
+def quote(string, safe='/', encoding=None, errors=None): # encoding and errors are unused
     return _quote(string, safe, 0)
 
-def quote_plus(string, safe=''):
+def quote_plus(string, safe='', encoding=None, errors=None): # encoding and errors are unused
     return _quote(string, safe, 1)
 
 def quote_from_bytes(string, safe='/'):
@@ -140,12 +141,16 @@ def quote_from_bytes(string, safe='/'):
 
 
 
+#_HEX_TO_INT = const(b'\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\xff\xff\xff\xff\xff\xff\xff\x0a\x0b\x0c\x0d\x0e\x0f\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x0a\x0b\x0c\x0d\x0e\x0f\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff')
+
 @micropython.viper
 def _unquote_helper(src: ptr8, srclen: int, flags: int, res: ptr8) -> int:
     write = int(res) != 0
     modified = 0
     reslen = 0
     n1 = n2 = b = 0
+    
+#    hex_to_int = ptr8(addressof(_HEX_TO_INT))
     
     i = 0
     while (i < srclen):
@@ -159,12 +164,14 @@ def _unquote_helper(src: ptr8, srclen: int, flags: int, res: ptr8) -> int:
                 elif 65 <= n1 <= 70: n1 -= 55
                 elif 97 <= n1 <=102: n1 -= 87
                 else: n1 = 255
+#                n1 = hex_to_int[n1]
                 
                 n2 = src[i+1]
                 if   48 <= n2 <= 57: n2 -= 48
                 elif 65 <= n2 <= 70: n2 -= 55
                 elif 97 <= n2 <=102: n2 -= 87
                 else: n2 = 255
+#                n2 = hex_to_int[n2]
             else:
                 n1 = 255
                 n2 = 255
@@ -185,12 +192,11 @@ def _unquote_helper(src: ptr8, srclen: int, flags: int, res: ptr8) -> int:
     return reslen if modified else 0
 
 def _unquote(s, start, end, flags) -> bytes:
-    # if s is a string, then start and end should be 0 and None
-    # otherwise you're going to have a very bad time
-    
     if isinstance(s, (memoryview, bytes, bytearray)):
         src = s
     else:
+        # if s is a string, then start and end should be 0 and None
+        # otherwise you're going to have a very bad time
         src = memoryview(s)
     
     srclen = len(src)
@@ -223,25 +229,33 @@ def _unquote(s, start, end, flags) -> bytes:
     _unquote_helper(adr + start, end - start, flags, res)
     return bytes(res)
 
-def unquote(s):
-    return _unquote(s, 0, None, 0).decode('utf-8')
+def unquote(s, encoding='utf-8', errors='replace'): # errors is unused
+    return _unquote(s, 0, None, 0).decode(encoding)
 
-def unquote_plus(s):
-    return _unquote(s, 0, None, 1).decode('utf-8')
+def unquote_plus(s, encoding='utf-8', errors='replace'): # errors is unused
+    return _unquote(s, 0, None, 1).decode(encoding)
 
 def unquote_to_bytes(s) -> bytes:
     return _unquote(s, 0, None, 0)
 
 
 
-def _urlencode_generator(query, doseq=False, safe='', *, quote_via=quote_plus):
-    for key, val in (query.items() if hasattr(query, 'items') else query):
-        key = quote_via(key, safe)
-        if doseq and not isinstance(val, (str, bytes, bytearray)):
+def _urlencode_generator(query, doseq=False, safe='', encoding=None, errors=None, quote_via=quote_plus):
+    if hasattr(query, 'items') and callable(query.items):
+        query = query.items()
+    for key, val in query:
+        if not isinstance(key, (str, bytes, bytearray, memoryview)):
+            key = str(key)
+        key = quote_via(key, safe, encoding, errors)
+        if isinstance(val, (str, bytes, bytearray, memoryview)):
+            yield key + '=' + quote_via(val, safe, encoding, errors)
+        elif doseq:
             for v in val:
-                yield key + '=' + quote_via(v, safe)
+                if not isinstance(v, (str, bytes, bytearray, memoryview)):
+                    v = str(v)
+                yield key + '=' + quote_via(v, safe, encoding, errors)
         else:
-            yield key + '=' + quote_via(val, safe)
+            yield key + '=' + quote_via(str(val), safe, encoding, errors)
 
 def urlencode(query, *args, **kwargs) -> str:
     return '&'.join(_urlencode_generator(query, *args, **kwargs))
@@ -258,7 +272,8 @@ def _mv_find(mv: ptr8, b: int, start: int, end: int) -> int:
     return -1
 
 def _parse_generator(qs, keep_blank_values=False, strict_parsing=False,
-                     *, max_num_fields=None, separator='&'):
+                     encoding='utf-8', errors='replace',
+                     max_num_fields=None, separator='&'):
     if not isinstance(qs, (memoryview, bytes, bytearray)):
         qs = memoryview(qs)
     n = len(qs)
@@ -283,15 +298,15 @@ def _parse_generator(qs, keep_blank_values=False, strict_parsing=False,
             if eq >= 0:
                 # key=value
                 if keep_blank_values or (eq + 1 < j):
-                    key = _unquote(qs, i, eq, True).decode('utf-8')
-                    val = _unquote(qs, eq + 1, j, True).decode('utf-8')
+                    key = _unquote(qs, i, eq, True).decode(encoding)
+                    val = _unquote(qs, eq + 1, j, True).decode(encoding)
                     yield key, val
             else:
                 # key (no '=')
                 if strict_parsing:
                     raise ValueError('bad query field')
                 if keep_blank_values:
-                    key = _unquote(qs, i, j, True).decode('utf-8')
+                    key = _unquote(qs, i, j, True).decode(encoding)
                     yield key, ''
         except UnicodeError:
             if strict_parsing:
