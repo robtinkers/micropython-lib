@@ -350,7 +350,7 @@ def _locsplit(netloc: str) -> tuple: # extension
         hostport = netloc
         username, password = None, None
     
-    if hostport.startswith('['): # Handle IPv6 (simple check)
+    if hostport and hostport[0] == '[': # Handle IPv6 (simple check)
         if (sep := hostport.find(']')) >= 0:
             host, port_string = hostport[1:sep], hostport[sep+1:]
         else: # *shrug*
@@ -418,7 +418,7 @@ class SplitResult(tuple):
     def port(self):
         if self._port is None:
             return None
-        if not self._port.startswith(':'):
+        if not self._port or self._port[0] != ':':
             raise ValueError('bad port number')
         try:
             port = int(self._port[1:], 10)
@@ -440,7 +440,7 @@ def urlsplit(url: str, scheme='', allow_fragments=True) -> SplitResult:
 # derived from CPython (all bugs are mine)
 def _urlunsplit(scheme, netloc, url, query, fragment) -> str:
     if netloc is not None:
-        if url and not url.startswith('/'):
+        if url and url[0] != '/':
             url = '/' + url
         url = '//' + netloc + url
     elif url.startswith('//'):
@@ -456,7 +456,7 @@ def _urlunsplit(scheme, netloc, url, query, fragment) -> str:
 def urlunsplit(components: tuple) -> str:
     scheme, netloc, url, query, fragment = components
     if netloc == '':
-        if not scheme or scheme not in _USES_NETLOC or (url and not url.startswith('/')):
+        if not scheme or scheme not in _USES_NETLOC or (url and url[0] != '/'):
             netloc = None
     return _urlunsplit(scheme, netloc, url or '', query, fragment)
 
@@ -496,7 +496,7 @@ def urljoin(base: str, url: str, allow_fragments: bool=True) -> str:
         del base_parts[-1]
     
     # for rfc3986, ignore all base path should the first character be root.
-    if path.startswith('/'):
+    if path[0] == '/': # 'not path' was already checked earlier
         segments = path.split('/')
     else:
         segments = base_parts + path.split('/')
