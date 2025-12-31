@@ -309,7 +309,7 @@ def _parse_generator(qs, keep_blank_values=False, strict_parsing=False,
                     key = _unquote(qs, i, j, True).decode(encoding)
                     yield key, ''
         except UnicodeError:
-            if strict_parsing:
+            if errors == 'strict':
                 raise
         
         if j == n:
@@ -450,15 +450,12 @@ def _urlunsplit(scheme, netloc, url, query, fragment) -> str:
         url += '#' + fragment
     return url
 
-# derived from CPython (all bugs are mine)
 def urlunsplit(components: tuple) -> str:
     scheme, netloc, url, query, fragment = components
-    if not netloc:
-        if scheme and scheme in _USES_NETLOC and (not url or url.startswith('/')):
-            netloc = ''
-        else:
+    if netloc == '':
+        if not scheme or scheme not in _USES_NETLOC or (url and not url.startswith('/')):
             netloc = None
-    return _urlunsplit(scheme or None, netloc, url, query or None, fragment or None)
+    return _urlunsplit(scheme or '', netloc, url or '', query, fragment)
 
 
 
