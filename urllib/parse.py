@@ -218,6 +218,9 @@ def _unquote(s, start, end, flags) -> bytes:
             res = s.encode('utf-8')
         elif isinstance(s, bytes):
             res = s
+        elif not noslice and isinstance(s, (bytearray, memoryview)):
+            # slight peak memory saving over the default code path
+            return bytes(s[start:end])
         else:
             res = bytes(s)
         if noslice:
@@ -268,7 +271,7 @@ def _mv_find(mv: ptr8, b: int, start: int, end: int) -> int:
     while i < end:
         if mv[i] == b:
             return i
-        i = i + 1
+        i += 1
     return -1
 
 def _parse_generator(qs, keep_blank_values=False, strict_parsing=False,
