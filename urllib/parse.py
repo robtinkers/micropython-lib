@@ -350,7 +350,7 @@ def _locsplit(netloc: str) -> tuple: # extension
         hostport = netloc
         username, password = None, None
     
-    if hostport and hostport[0] == '[': # Handle IPv6 (simple check)
+    if hostport[0] == '[': # Handle IPv6 (simple check)
         if (sep := hostport.find(']')) >= 0:
             host, port_string = hostport[1:sep], hostport[sep+1:]
         else: # *shrug*
@@ -378,7 +378,7 @@ def _urlsplit(url: str, scheme, allow_fragments: bool) -> tuple:
     if (colon := url.find(':')) > 0 and url[0].isalpha():
         if (slash := url.find('/')) < 0 or colon < slash:
             scheme, url = url[:colon].lower(), url[colon+1:]
-    if url.startswith('//'):
+    if url[:2] == '//':
         delim = len(url)
         for c in '/?#':
             if 0 <= (x := url.find(c, 2)) < delim:
@@ -439,11 +439,12 @@ def urlsplit(url: str, scheme='', allow_fragments=True) -> SplitResult:
 
 # derived from CPython (all bugs are mine)
 def _urlunsplit(scheme, netloc, url, query, fragment) -> str:
+    # assert url is not None
     if netloc is not None:
-        if url and url[0] != '/':
+        if url[0] != '/':
             url = '/' + url
         url = '//' + netloc + url
-    elif url.startswith('//'):
+    elif url[:2] == '//':
         url = '//' + url
     if scheme:
         url = scheme + ':' + url
