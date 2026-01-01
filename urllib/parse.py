@@ -353,20 +353,21 @@ def _locsplit(netloc: str) -> tuple: # extension
     if hostport[0] == '[': # Handle IPv6 (simple check)
         if (sep := hostport.find(']')) >= 0:
             host, port_string = hostport[1:sep], hostport[sep+1:]
+            port_string = port_string or None
         else: # *shrug*
-            host, port_string = hostport, ''
+            host, port_string = hostport, None
     else:
         if (sep := hostport.rfind(':')) >= 0:
             host, port_string = hostport[:sep], hostport[sep:]
         else:
-            host, port_string = hostport, ''
+            host, port_string = hostport, None
     
     if host:
         host = host.lower()
     else:
         host = None
     
-    return (username, password, host, port_string or None)
+    return (username, password, host, port_string)
 
 # derived from CPython (all bugs are mine)
 def _urlsplit(url: str, scheme, allow_fragments: bool) -> tuple:
@@ -398,7 +399,7 @@ def _urlsplit(url: str, scheme, allow_fragments: bool) -> tuple:
 class SplitResult(tuple):
     
     def __init__(self, scheme, netloc, path, query, fragment):
-        super().__init__((scheme, netloc or '', path or '', query or '', fragment or ''))
+        super().__init__((scheme, netloc, path, query, fragment))
         self.username, self.password, self.hostname, self._port = _locsplit(self[1])
     
     @property
@@ -435,7 +436,8 @@ class SplitResult(tuple):
         return urlunsplit(self)
 
 def urlsplit(url: str, scheme='', allow_fragments=True) -> SplitResult:
-    return SplitResult(*_urlsplit(url, scheme, allow_fragments))
+    scheme, netloc, path, query, fragment = _urlsplit(url, scheme, allow_fragments)
+    return SplitResult(scheme or '', netloc or '', path, query or '', fragment or '')
 
 
 
