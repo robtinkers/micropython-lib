@@ -370,6 +370,8 @@ def _locsplit(netloc: str) -> tuple: # extension
 
 # derived from CPython (all bugs are mine)
 def _urlsplit(url: str, scheme, allow_fragments: bool) -> tuple:
+#    assert (isinstance(url, str))
+    
     url = url.lstrip()
     if scheme:
         scheme = scheme.strip()
@@ -439,9 +441,10 @@ def urlsplit(url: str, scheme='', allow_fragments=True) -> SplitResult:
 
 # derived from CPython (all bugs are mine)
 def _urlunsplit(scheme, netloc, url, query, fragment) -> str:
-    # assert url is not None
+#    assert (url is not None)
+    
     if netloc is not None:
-        if url[0] != '/':
+        if url and url[0] != '/':
             url = '/' + url
         url = '//' + netloc + url
     elif url.startswith('//'):
