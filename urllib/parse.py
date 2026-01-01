@@ -352,28 +352,29 @@ def _locsplit(netloc: str) -> tuple: # extension
     
     if hostport and hostport[0] == '[': # Handle IPv6 (simple check)
         if (sep := hostport.find(']')) >= 0:
-            host, maybe_port = hostport[1:sep], hostport[sep+1:]
+            host, port = hostport[1:sep], hostport[sep+1:]
         else: # *shrug*
-            host, maybe_port = hostport, ''
+            host, port = hostport, ''
     else:
         if (sep := hostport.rfind(':')) >= 0:
-            host, maybe_port = hostport[:sep], hostport[sep:]
+            host, port = hostport[:sep], hostport[sep:]
         else:
-            host, maybe_port = hostport, ''
+            host, port = hostport, ''
     
     if host:
         host = host.lower()
     else:
         host = None
     
-    port = maybe_port
-    if not maybe_port:
+    if not port:
         port = None
-    elif maybe_port.startswith(':'):
+    elif port.startswith(':'):
         try:
-            port = int(maybe_port[1:], 10)
+            n = int(port[1:], 10)
+            if 0 <= n and n <= 65535:
+                port = n
         except ValueError:
-            pass # port is already maybe_port
+            pass
     
     return (username, password, host, port)
 
@@ -428,11 +429,9 @@ class SplitResult(tuple):
     
     @property
     def port(self):
-        if self._port is None:
-            return None
-        if not isinstance(self._port, int) or not (0 <= port <= 65535):
+        if self._port is not None and not isinstance(self._port, int):
             raise ValueError('bad port number')
-        return port
+        return self._port
     
     def geturl(self):
 #        return urlunsplit(self._args)
