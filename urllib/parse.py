@@ -399,8 +399,9 @@ def _urlsplit(url: str, scheme, allow_fragments: bool) -> tuple:
 class SplitResult(tuple):
     
     def __init__(self, scheme, netloc, path, query, fragment):
-        super().__init__((scheme, netloc, path, query, fragment))
+        super().__init__((scheme or '', netloc or '', path, query or '', fragment or ''))
         self.username, self.password, self.hostname, self._port = _locsplit(self[1])
+#        self._args = (scheme, netloc, path, query, fragment)
     
     @property
     def scheme(self): return self[0]
@@ -433,38 +434,39 @@ class SplitResult(tuple):
         return port
     
     def geturl(self):
+#        return urlunsplit(self._args)
         return urlunsplit(self)
 
 def urlsplit(url: str, scheme='', allow_fragments=True) -> SplitResult:
-    scheme, netloc, path, query, fragment = _urlsplit(url, scheme, allow_fragments)
-    return SplitResult(scheme or '', netloc or '', path, query or '', fragment or '')
+    return SplitResult(*_urlsplit(url, scheme, allow_fragments))
 
 
 
 # derived from CPython (all bugs are mine)
-def _urlunsplit(scheme, netloc, url, query, fragment) -> str:
-#    assert (url is not None)
+def _urlunsplit(scheme, netloc, path, query, fragment) -> str:
+#    assert (path is not None)
     
+    url = path
     if netloc is not None:
-        if url and url[0] != '/':
-            url = '/' + url
-        url = '//' + netloc + url
-    elif url.startswith('//'):
-        url = '//' + url
+        if path and path[0] != '/':
+            path = '/' + path
+        path = '//' + netloc + path
+    elif path.startswith('//'):
+        path = '//' + path
     if scheme:
-        url = scheme + ':' + url
+        path = scheme + ':' + path
     if query is not None:
-        url += '?' + query
+        path += '?' + query
     if fragment is not None:
-        url += '#' + fragment
-    return url
+        path += '#' + fragment
+    return path
 
 def urlunsplit(components: tuple) -> str:
-    scheme, netloc, url, query, fragment = components
+    scheme, netloc, path, query, fragment = components
     if netloc == '':
-        if not scheme or scheme not in _USES_NETLOC or (url and url[0] != '/'):
+        if not scheme or scheme not in _USES_NETLOC or (path and path[0] != '/'):
             netloc = None
-    return _urlunsplit(scheme, netloc, url or '', query, fragment)
+    return _urlunsplit(scheme, netloc, path or '', query, fragment)
 
 
 
