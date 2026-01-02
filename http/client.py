@@ -324,6 +324,7 @@ class HTTPResponse:
                         if line == b'\r\n':
                             # End of Content
                             self.chunk_left = None
+                            self.length = 0
                             break
                         if line == b'':
                             # Malformed data: missing CRLF after final chunk (premature EOF)
