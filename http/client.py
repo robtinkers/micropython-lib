@@ -140,7 +140,7 @@ class HTTPResponse:
         if self.debuglevel > 0:
             print("status:", repr(self.version), repr(self.status), repr(self.reason))
         
-        self.headers, self.cookies = _parse_headers(self._sock, extra_headers, parse_cookies)
+        self.headers, self.cookies = parse_headers(self._sock, extra_headers=extra_headers, parse_cookies=parse_cookies)
         if self.debuglevel > 0:
             for key, val in self.headers.items():
                 print("header:", repr(key), "=", repr(val))
