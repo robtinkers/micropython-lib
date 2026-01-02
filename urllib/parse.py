@@ -12,14 +12,14 @@ __all__ = [
 ]
 
 _USES_RELATIVE = frozenset([
-    'file', 'ftp', 'http', 'https', 'rtsp', 'rtsps', 'sftp', 'ws', 'wss',
+    "file", "ftp", "http", "https", "rtsp", "rtsps", "sftp", "ws", "wss",
 ])
 
 _USES_NETLOC = frozenset([
-    'file', 'ftp', 'http', 'https', 'rtsp', 'rtsps', 'sftp', 'ws', 'wss',
+    "file", "ftp", "http", "https", "rtsp", "rtsps", "sftp", "ws", "wss",
 ])
 
-_HEX_DIGITS = b'0123456789ABCDEF'
+_HEX_DIGITS = b"0123456789ABCDEF"
 
 # Standard masks for ASCII 32-127
 # 0-31:   not used
@@ -100,12 +100,12 @@ def _quote(s, safe, flags):
     
     srclen = len(src)
     if srclen == 0:
-        return ''
+        return ""
     
     # Fast path for standard methods with default arguments
-    if flags == 0 and safe == '/': # quote('foo')
+    if flags == 0 and safe == "/": # quote("foo")
         masks = addressof(_MASKS_QUOTE)
-    elif flags == 1 and safe == '': # quote_plus('bar')
+    elif flags == 1 and safe == "": # quote_plus("bar")
         masks = addressof(_MASKS_QUOTE_PLUS)
     else:
         # Slow path: build custom masks
@@ -122,26 +122,26 @@ def _quote(s, safe, flags):
         if isinstance(s, str):
             return s
         elif isinstance(s, (bytes, bytearray)):
-            return s.decode('ascii')
+            return s.decode("ascii")
         else:
-            return bytes(s).decode('ascii')
+            return bytes(s).decode("ascii")
     
     res = bytearray(reslen)
     _quote_helper(src, srclen, masks, res)
-    return res.decode('ascii')
+    return res.decode("ascii")
 
-def quote(string, safe='/', encoding=None, errors=None): # encoding and errors are unused
+def quote(string, safe="/", encoding=None, errors=None): # encoding and errors are unused
     return _quote(string, safe, 0)
 
-def quote_plus(string, safe='', encoding=None, errors=None): # encoding and errors are unused
+def quote_plus(string, safe="", encoding=None, errors=None): # encoding and errors are unused
     return _quote(string, safe, 1)
 
-def quote_from_bytes(string, safe='/'):
+def quote_from_bytes(string, safe="/"):
     return _quote(string, safe, 0)
 
 
 
-#_HEX_TO_INT = const(b'\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\xff\xff\xff\xff\xff\xff\xff\x0a\x0b\x0c\x0d\x0e\x0f\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x0a\x0b\x0c\x0d\x0e\x0f\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff')
+#_HEX_TO_INT = const(b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\xff\xff\xff\xff\xff\xff\xff\x0a\x0b\x0c\x0d\x0e\x0f\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x0a\x0b\x0c\x0d\x0e\x0f\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff")
 
 @micropython.viper
 def _unquote_helper(src: ptr8, srclen: int, flags: int, res: ptr8) -> int:
@@ -201,7 +201,7 @@ def _unquote(s, start, end, flags) -> bytes:
     
     srclen = len(src)
     if srclen == 0:
-        return b''
+        return b""
     
     noslice = (start == 0 and end is None)
     if end is None or end > srclen:
@@ -209,13 +209,13 @@ def _unquote(s, start, end, flags) -> bytes:
     if start < 0:
         start = 0
     if start >= end:
-        return b''
+        return b""
     
     adr = addressof(src)
     reslen = _unquote_helper(adr + start, end - start, flags, 0)
     if reslen <= 0:
         if isinstance(s, str):
-            res = s.encode('utf-8')
+            res = s.encode("utf-8")
         elif isinstance(s, bytes):
             res = s
         elif not noslice and isinstance(s, (bytearray, memoryview)):
@@ -232,10 +232,10 @@ def _unquote(s, start, end, flags) -> bytes:
     _unquote_helper(adr + start, end - start, flags, res)
     return bytes(res)
 
-def unquote(s, encoding='utf-8', errors='replace'): # errors is unused
+def unquote(s, encoding="utf-8", errors="replace"): # errors is unused
     return _unquote(s, 0, None, 0).decode(encoding)
 
-def unquote_plus(s, encoding='utf-8', errors='replace'): # errors is unused
+def unquote_plus(s, encoding="utf-8", errors="replace"): # errors is unused
     return _unquote(s, 0, None, 1).decode(encoding)
 
 def unquote_to_bytes(s) -> bytes:
@@ -243,7 +243,7 @@ def unquote_to_bytes(s) -> bytes:
 
 
 
-def _urlencode_generator(query, doseq=False, safe='', encoding=None, errors=None, quote_via=quote_plus):
+def _urlencode_generator(query, doseq=False, safe="", encoding=None, errors=None, quote_via=quote_plus):
     if isinstance(query, dict):
         query = query.items()
     for key, val in query:
@@ -251,17 +251,17 @@ def _urlencode_generator(query, doseq=False, safe='', encoding=None, errors=None
             key = str(key)
         key = quote_via(key, safe, encoding, errors)
         if isinstance(val, (str, bytes, bytearray, memoryview)):
-            yield key + '=' + quote_via(val, safe, encoding, errors)
+            yield key + "=" + quote_via(val, safe, encoding, errors)
         elif doseq:
             for v in val:
                 if not isinstance(v, (str, bytes, bytearray, memoryview)):
                     v = str(v)
-                yield key + '=' + quote_via(v, safe, encoding, errors)
+                yield key + "=" + quote_via(v, safe, encoding, errors)
         else:
-            yield key + '=' + quote_via(str(val), safe, encoding, errors)
+            yield key + "=" + quote_via(str(val), safe, encoding, errors)
 
 def urlencode(query, *args, **kwargs) -> str:
-    return '&'.join(_urlencode_generator(query, *args, **kwargs))
+    return "&".join(_urlencode_generator(query, *args, **kwargs))
 
 
 
@@ -275,7 +275,7 @@ def _mv_find(mv: ptr8, b: int, start: int, end: int) -> int:
     return -1
 
 def _parse_generator(qs, keep_blank_values=False, strict_parsing=False,
-                     encoding='utf-8', errors='replace',
+                     encoding="utf-8", errors="replace",
                      max_num_fields=None, separator='&'):
     if not isinstance(qs, (memoryview, bytes, bytearray)):
         qs = memoryview(qs)
@@ -290,7 +290,7 @@ def _parse_generator(qs, keep_blank_values=False, strict_parsing=False,
     while i <= n:
         num_fields += 1
         if max_num_fields is not None and num_fields > max_num_fields:
-            raise ValueError('max_num_fields exceeded')
+            raise ValueError("max_num_fields exceeded")
         
         j = _mv_find(qs, sep, i, n)
         if j < 0:
@@ -307,12 +307,12 @@ def _parse_generator(qs, keep_blank_values=False, strict_parsing=False,
             else:
                 # key (no '=')
                 if strict_parsing:
-                    raise ValueError('bad query field')
+                    raise ValueError("bad query field")
                 if keep_blank_values:
                     key = _unquote(qs, i, j, True).decode(encoding)
-                    yield key, ''
+                    yield key, ""
         except UnicodeError:
-            if errors == 'strict':
+            if errors == "strict":
                 raise
         
         if j == n:
@@ -354,12 +354,12 @@ def _locsplit(netloc: str) -> tuple: # extension
         if (sep := hostport.find(']')) >= 0:
             host, port = hostport[1:sep], hostport[sep+1:]
         else: # *shrug*
-            host, port = hostport, ''
+            host, port = hostport, ""
     else:
         if (sep := hostport.rfind(':')) >= 0:
             host, port = hostport[:sep], hostport[sep:]
         else:
-            host, port = hostport, ''
+            host, port = hostport, ""
     
     if host:
         host = host.lower()
@@ -390,9 +390,9 @@ def _urlsplit(url: str, scheme, allow_fragments: bool) -> tuple:
     if (colon := url.find(':')) > 0 and url[0].isalpha():
         if (slash := url.find('/')) < 0 or colon < slash:
             scheme, url = url[:colon].lower(), url[colon+1:]
-    if url.startswith('//'):
+    if url.startswith("//"):
         delim = len(url)
-        for c in '/?#':
+        for c in "/?#":
             if 0 <= (x := url.find(c, 2)) < delim:
                 delim = x
         netloc, url = url[2:delim], url[delim:]
@@ -408,7 +408,7 @@ def _urlsplit(url: str, scheme, allow_fragments: bool) -> tuple:
 class SplitResult(tuple):
     
     def __init__(self, scheme, netloc, path, query, fragment):
-        super().__init__((scheme or '', netloc or '', path, query or '', fragment or ''))
+        super().__init__((scheme or "", netloc or "", path, query or "", fragment or ""))
         self.username, self.password, self.hostname, self._port = _locsplit(self[1])
 #        self._args = (scheme, netloc, path, query, fragment)
     
@@ -430,14 +430,14 @@ class SplitResult(tuple):
     @property
     def port(self):
         if self._port is not None and not isinstance(self._port, int):
-            raise ValueError('bad port number')
+            raise ValueError("bad port number")
         return self._port
     
     def geturl(self):
 #        return urlunsplit(self._args)
         return urlunsplit(self)
 
-def urlsplit(url: str, scheme='', allow_fragments=True) -> SplitResult:
+def urlsplit(url: str, scheme="", allow_fragments=True) -> SplitResult:
     return SplitResult(*_urlsplit(url, scheme, allow_fragments))
 
 
@@ -448,24 +448,24 @@ def _urlunsplit(scheme, netloc, path: str, query, fragment) -> str:
     
     if netloc is not None:
         if path and path[0] != '/':
-            path = '/' + path
-        path = '//' + netloc + path
-    elif path.startswith('//'):
-        path = '//' + path
+            path = "/" + path
+        path = "//" + netloc + path
+    elif path.startswith("//"):
+        path = "//" + path
     if scheme:
-        path = scheme + ':' + path
+        path = scheme + ":" + path
     if query is not None:
-        path += '?' + query
+        path += "?" + query
     if fragment is not None:
-        path += '#' + fragment
+        path += "#" + fragment
     return path
 
 def urlunsplit(components: tuple) -> str:
     scheme, netloc, path, query, fragment = components
-    if netloc == '':
+    if netloc == "":
         if not scheme or scheme not in _USES_NETLOC or (path and path[0] != '/'):
             netloc = None
-    return _urlunsplit(scheme, netloc, path or '', query, fragment)
+    return _urlunsplit(scheme, netloc, path or "", query, fragment)
 
 
 
@@ -497,13 +497,13 @@ def urljoin(base: str, url: str, allow_fragments: bool=True) -> str:
         return _urlunsplit(scheme, netloc, path, query, fragment)
     
     base_parts = bpath.split('/')
-    if base_parts[-1] != '':
+    if base_parts[-1] != "":
         # the last item is not a directory, so will not be taken into account
         # in resolving the relative path
         del base_parts[-1]
     
     # for rfc3986, ignore all base path should the first character be root.
-    if path[0] == '/': # 'not path' was already checked earlier
+    if path[0] == '/': # `not path` was already checked earlier
         segments = path.split('/')
     else:
         segments = base_parts + path.split('/')
@@ -519,16 +519,16 @@ def urljoin(base: str, url: str, allow_fragments: bool=True) -> str:
     
     resolved_path = []
     for seg in segments:
-        if seg == '..':
+        if seg == "..":
             if resolved_path:
                 resolved_path.pop()
-        elif seg != '.':
+        elif seg != ".":
             resolved_path.append(seg)
     
-    if segments[-1] in ('.', '..'):
+    if segments[-1] in (".", ".."):
         # do some post-processing here. if the last segment was a relative dir,
         # then we need to append the trailing '/'
-        resolved_path.append('')
+        resolved_path.append("")
     
-    return _urlunsplit(scheme, netloc, '/'.join(resolved_path) or '/', query, fragment)
+    return _urlunsplit(scheme, netloc, "/".join(resolved_path) or "/", query, fragment)
 
