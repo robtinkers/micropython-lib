@@ -31,8 +31,8 @@ _IMPORTANT_HEADERS = frozenset({
 })
 
 _DECODE_HEAD = const('iso-8859-1')
-_DECODE_BODY = const('utf-8')
 _ENCODE_HEAD = const('iso-8859-1')
+_DECODE_BODY = const('utf-8')
 _ENCODE_BODY = const('utf-8')
 
 @micropython.viper
