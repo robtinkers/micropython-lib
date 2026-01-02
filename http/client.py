@@ -74,6 +74,7 @@ def create_connection(address, timeout=None):
                 sock.close()
     raise OSError("create_connection() failed")
 
+# derived from CPython (all bugs are mine)
 def parse_host_port(host, port):
     if port is None:
         i = host.rfind(':')
