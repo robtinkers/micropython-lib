@@ -45,14 +45,10 @@ def _has_C0_control(buf:ptr8, buflen:int) -> int:
     return 0
 
 def encode_and_validate(b, *args):
-    if isinstance(b, bytes):
-        pass
-    elif isinstance(b, str):
+    if isinstance(b, str):
         b = b.encode(*args)
-    elif isinstance(b, (bytearray, memoryview)):
+    elif not isinstance(b, bytes):
         b = bytes(b)
-    else:
-        raise TypeError('must be bytes-like')
     if _has_C0_control(b, len(b)) == 1:
         raise ValueError('can\'t contain control characters')
     return b
