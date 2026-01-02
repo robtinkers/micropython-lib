@@ -74,6 +74,21 @@ def create_connection(address, timeout=None):
                 sock.close()
     raise OSError("create_connection() failed")
 
+def parse_host_port(host, port):
+    if port is None:
+        i = host.rfind(':')
+        j = host.rfind(']')         # ipv6 addresses have [...]
+        if i > j:
+            try:
+                port = int(host[i+1:], 10)
+            except ValueError:
+                if host[i+1:] != "":
+                    raise
+            host = host[:i]
+    if host and host[0] == '[' and host[-1] == ']':
+        host = host[1:-1]
+    return (host, port)
+
 def parse_headers(sock, *, extra_headers=True, parse_cookies=None):  # returns dict/s {bytes:bytes, ...}
     # parse_cookies is tri-state:
     # parse_cookies == True? parse set-cookie headers and return as a dict
@@ -495,9 +510,11 @@ class HTTPConnection:
         return False
     
     def __init__(self, host, port=None, timeout=None, source_address=None, blocksize=1024):
-        self.host, self.port = self._get_hostport(host, port)
+        self.host, self.port = parse_host_port(host, port)
         if not self.host:
             raise ValueError("invalid host")
+        if self.port is None:
+            self.port = self.default_port
         self.timeout = timeout
 #        self.source_address = source_address  # not used
         self.blocksize = blocksize
@@ -508,26 +525,6 @@ class HTTPConnection:
     
     def set_debuglevel(self, level):
         self.debuglevel = level
-    
-    # derived from CPython (all bugs are mine)
-    def _get_hostport(self, host, port):
-        if port is None:
-            i = host.rfind(':')
-            j = host.rfind(']')         # ipv6 addresses have [...]
-            if i > j:
-                try:
-                    port = int(host[i+1:], 10)
-                except ValueError:
-                    if host[i+1:] == "": # http://foo.com:/ == http://foo.com/
-                        port = self.default_port
-                    else:
-                        raise
-                host = host[:i]
-            else:
-                port = self.default_port
-        if host and host[0] == '[' and host[-1] == ']':
-            host = host[1:-1]
-        return (host, port)
     
     def connect(self):
         self.sock = create_connection((self.host, self.port), self.timeout)
