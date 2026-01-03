@@ -438,7 +438,6 @@ class HTTPResponse:
                 return 0
             return b""
         
-        # Read the data (single read operation)
         if arg_is_memoryview:
             nread = self._sock.readinto(arg[:to_read])
         elif arg is None:
@@ -456,7 +455,6 @@ class HTTPResponse:
             if self.length <= 0:
                 self.close()
         
-        # Return result in appropriate format
         if arg_is_memoryview:
             return nread
         else:
