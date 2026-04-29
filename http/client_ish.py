@@ -399,6 +399,7 @@ class HTTPResponse:
                 if arg < 0:
                     arg = None
         total = 0
+        incomplete_read = False
         
         while True:
             if self.isclosed():
@@ -408,6 +409,7 @@ class HTTPResponse:
                 line = self._sock.readline()
                 if not line:
                     self.close(_CR_EOF)
+                    incomplete_read = True
                     break
                 sep = line.find(b';')
                 if sep >= 0:
@@ -416,9 +418,11 @@ class HTTPResponse:
                     chunk_size = int(line, 16)
                 except ValueError:
                     self.close(_CR_MALFORMED)
+                    incomplete_read = True
                     break
                 if chunk_size < 0:
                     self.close(_CR_MALFORMED)
+                    incomplete_read = True
                     break
                 self.chunk_left = chunk_size
                 if chunk_size == 0:
@@ -445,6 +449,7 @@ class HTTPResponse:
                     nread = self._sock.readinto(res[total:total+to_read])
                 if not nread:
                     self.close(_CR_EOF)
+                    incomplete_read = True
                     break
                 self._bytes_read += nread
                 total += nread
@@ -460,6 +465,7 @@ class HTTPResponse:
                 chunk = self._sock.read(to_read)
                 if not chunk:
                     self.close(_CR_EOF)
+                    incomplete_read = True
                     break
                 self._bytes_read += len(chunk)
                 total += len(chunk)
@@ -471,9 +477,11 @@ class HTTPResponse:
                 line = self._sock.readline()
                 if not line:
                     self.close(_CR_EOF)
+                    incomplete_read = True
                     break
                 if line != _CRLF and line != b"\n":
                     self.close(_CR_MALFORMED)
+                    incomplete_read = True
                     break
                 self.chunk_left = None
             
@@ -485,6 +493,9 @@ class HTTPResponse:
                 if total >= arg:
                     break
             # arg is None -> drain until the final 0-size chunk.
+        
+#        if incomplete_read:
+#            raise IncompleteRead(self._bytes_read)
         
         if arg_is_memoryview:
             return total
@@ -544,6 +555,7 @@ class HTTPResponse:
         chunk = None
         total = 0
         got_eof = False
+        incomplete_read = False
         
         # to_read can be 0 when CL is already satisfied (e.g. HEAD, 204, 304).
         # Skip the socket call in that case; the CL-satisfied close block below
@@ -563,22 +575,28 @@ class HTTPResponse:
                     chunk = None
                 else:
                     self._bytes_read += len(chunk)
-        
-        if got_eof:
-            if self.length is not None and self._bytes_read < self.length:
-                self.close(_CR_EOF)
-            else:
-                self.close(_CR_DONE)
+            
+            if got_eof:
+                if self.length is not None and self._bytes_read < self.length:
+                    self.close(_CR_EOF)
+                    incomplete_read = True
+                else:
+                    self.close(_CR_DONE)
         
         if self.length is not None:
             if self._bytes_read == self.length:
                 self.close(_CR_DONE)
             elif self._bytes_read > self.length:
                 self.close(_CR_MALFORMED)
+                incomplete_read = True
             elif arg is None:
                 # Blocking "no short reads" means this path is unreachable
                 # in practice; treat as incomplete if it ever happens.
                 self.close(_CR_EOF)
+                incomplete_read = True
+        
+#        if incomplete_read:
+#            raise IncompleteRead(self._bytes_read, self.length)
         
         if arg_is_memoryview:
             return total
