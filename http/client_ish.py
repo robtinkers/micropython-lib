@@ -688,7 +688,6 @@ class HTTPConnection:
         self.__response = None
         self.__state = _CS_IDLE
         self._auto_open = False
-        self._sent_data = False
         if self._buffer_size:
             self._buffmv = memoryview(bytearray(self._buffer_size))
         else:
@@ -789,7 +788,6 @@ class HTTPConnection:
         self.__state = _CS_REQ_STARTED
         
         self._auto_open = self.auto_open
-        self._sent_data = False
         self._filled = 0
         
         method = _encode_and_validate(method, "ascii", deny_flags=1, force_bytes=True)
@@ -876,12 +874,11 @@ class HTTPConnection:
         if not data:
             return
         
-        if self._auto_open and not self._sent_data:
+        if self._auto_open:
             try:
                 if self.sock is not None:
                     self.sock.sendall(data)
-                    if data:
-                        self._sent_data = True
+                    self._auto_open = False
                     return
             except OSError:
                 try: self.sock.close()
@@ -892,13 +889,13 @@ class HTTPConnection:
             except OSError:
                 raise NotConnected()
             self.sock.sendall(data)
-            self._sent_data = True
+            self._auto_open = False
             return
         
         if self.sock is None:
             raise NotConnected()
         self.sock.sendall(data)
-        self._sent_data = True
+        self._auto_open = False
     
     def _send_chunk(self, data):
         # None -> final (terminating) chunk.
