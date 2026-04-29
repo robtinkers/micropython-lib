@@ -217,7 +217,7 @@ class HTTPResponse:
         self.will_close = True
         self.length = None
         self._bytes_read = 0
-        self._incomplete = False
+        self.incomplete = False
     
     def begin(self, *, extra_headers=True):
         self.version, self.status, self.reason = self._read_status()
@@ -329,10 +329,10 @@ class HTTPResponse:
         
         if reason == _CR_EOF:
             if partial_body:
-                self._incomplete = True
+                self.incomplete = True
             force_close = True
         elif reason == _CR_MALFORMED:
-            self._incomplete = True
+            self.incomplete = True
             force_close = True
         else:
             force_close = partial_body
@@ -349,10 +349,6 @@ class HTTPResponse:
     @property
     def closed(self):
         return self.isclosed()
-    
-    @property
-    def incomplete(self):
-        return self._incomplete
     
     def readinto(self, buf):
         if isinstance(buf, memoryview):
