@@ -210,7 +210,7 @@ class HTTPResponse:
         self._sock = sock
         self.debuglevel = debuglevel
         self._method = method
-        self._url = url
+        self.url = url
         self.version = None
         self.status = None
         self.reason = None
@@ -218,8 +218,8 @@ class HTTPResponse:
         self.chunked = False
         self.chunk_left = None
         self.will_close = True
-        self.content_length = None
-        self.content_read = 0
+        self.length = None
+        self._bytes_read = 0
         self._incomplete = False
     
     def begin(self, *, extra_headers=True):
@@ -249,30 +249,30 @@ class HTTPResponse:
             self.will_close = b"close" in conn
         
         # Content-Length is ignored when chunked (RFC 2616 S4.4 #3).
-        self.content_length = None
+        self.length = None
         length = self._getheader(b"content-length", None)
         if length and not self.chunked:
             try:
-                self.content_length = int(length, 10)
+                self.length = int(length, 10)
             except ValueError:
                 pass
             else:
-                if self.content_length < 0:
-                    self.content_length = None
-        self.content_read = 0
+                if self.length < 0:
+                    self.length = None
+        self._bytes_read = 0
         
         # Responses that must have no body.
         if (100 <= self.status < 200
             or self.status == 204 or self.status == 304
             or self._method == "HEAD"):
-            self.content_length = 0
+            self.length = 0
             self.chunked = False
             self.chunk_left = None
         
         # Unknown framing on a keep-alive connection -> must close.
         if (not self.will_close and
             not self.chunked and
-            self.content_length is None):
+            self.length is None):
             self.will_close = True
     
     def _read_status(self):
@@ -327,7 +327,7 @@ class HTTPResponse:
         
         partial_body = (
             self.chunk_left is not None
-            or (self.content_length is not None and self.content_read < self.content_length)
+            or (self.length is not None and self._bytes_read < self.length)
         )
         
         if reason == _CR_EOF:
@@ -352,10 +352,6 @@ class HTTPResponse:
     @property
     def closed(self):
         return self.isclosed()
-    
-    @property
-    def length(self):
-        return self.content_length
     
     @property
     def incomplete(self):
@@ -457,7 +453,7 @@ class HTTPResponse:
                 if not nread:
                     self.close(_CR_EOF)
                     break
-                self.content_read += nread
+                self._bytes_read += nread
                 total += nread
                 self.chunk_left -= nread
             else:
@@ -472,7 +468,7 @@ class HTTPResponse:
                 if not chunk:
                     self.close(_CR_EOF)
                     break
-                self.content_read += len(chunk)
+                self._bytes_read += len(chunk)
                 total += len(chunk)
                 self.chunk_left -= len(chunk)
                 parts.append(chunk)
@@ -524,19 +520,19 @@ class HTTPResponse:
                 return None
         
         # Read-until-EOF framing: unbounded drain.
-        if arg is None and self.content_length is None:
+        if arg is None and self.length is None:
             chunk = self._sock.read()
-            self.content_read += len(chunk)
+            self._bytes_read += len(chunk)
             self.close(_CR_DONE)
             return chunk
         
-        if self.content_length is None:
+        if self.length is None:
             if arg_is_memoryview:
                 to_read = len(res)
             else:
                 to_read = arg
         else:
-            remaining = self.content_length - self.content_read
+            remaining = self.length - self._bytes_read
             if arg is None:
                 to_read = remaining
             elif arg_is_memoryview:
@@ -565,7 +561,7 @@ class HTTPResponse:
                 if not nread:
                     got_eof = True
                 else:
-                    self.content_read += nread
+                    self._bytes_read += nread
                     total = nread
             else:
                 chunk = self._sock.read(to_read)
@@ -573,18 +569,18 @@ class HTTPResponse:
                     got_eof = True
                     chunk = None
                 else:
-                    self.content_read += len(chunk)
+                    self._bytes_read += len(chunk)
         
         if got_eof:
-            if self.content_length is not None and self.content_read < self.content_length:
+            if self.length is not None and self._bytes_read < self.length:
                 self.close(_CR_EOF)
             else:
                 self.close(_CR_DONE)
         
-        if self.content_length is not None:
-            if self.content_read == self.content_length:
+        if self.length is not None:
+            if self._bytes_read == self.length:
                 self.close(_CR_DONE)
-            elif self.content_read > self.content_length:
+            elif self._bytes_read > self.length:
                 self.close(_CR_MALFORMED)
             elif arg is None:
                 # Blocking "no short reads" means this path is unreachable
@@ -597,7 +593,7 @@ class HTTPResponse:
             return chunk
     
     def geturl(self):
-        return self._url
+        return self.url
     
     def getcode(self):
         return self.status
@@ -642,8 +638,8 @@ class HTTPResponse:
         chunk_size = int(chunk_size)
         if chunk_size <= 0:
             raise ValueError("chunk_size must be > 0")
-        if self.content_length is not None:
-            remaining = self.content_length - self.content_read
+        if self.length is not None:
+            remaining = self.length - self._bytes_read
             if chunk_size > remaining:
                 chunk_size = remaining
         buf = bytearray(chunk_size)
