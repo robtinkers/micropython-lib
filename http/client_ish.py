@@ -112,7 +112,7 @@ def _encode_and_validate(b, charset, *, deny_flags=0, force_bytes=False):
         b = bytes(b)
     return b
 
-def _create_connection(address, timeout):
+def create_connection(address, timeout=None):
     host, port = address
     for f, t, p, n, a in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
         sock = None
@@ -135,9 +135,6 @@ def _create_connection(address, timeout):
             if not isinstance(e, OSError):
                 raise e
     raise OSError(2)  # ENOENT
-
-def create_connection(address, timeout=None):
-    return _create_connection(address, timeout)
 
 def parse_host_port(host, port, default_port=None):
     if port is None:
@@ -592,6 +589,13 @@ class HTTPResponse:
         else:
             return chunk
     
+    def info(self):
+        return self.headers
+    
+    @property
+    def msg(self):
+        return self.headers
+    
     def geturl(self):
         return self.url
     
@@ -662,6 +666,9 @@ class HTTPResponse:
             if n <= 0:
                 break
             yield n
+    
+    def flush(self):
+        pass
     
     def readable(self):
         return True
