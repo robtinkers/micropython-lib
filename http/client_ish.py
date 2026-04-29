@@ -85,18 +85,15 @@ def _lower(buf:ptr8, buflen:int, inplace:bool) -> int:
 
 @micropython.viper
 def _validate_ascii(buf:ptr8, buflen:int, deny_flags:int) -> int:
-    # Rejects ctrl chars and bytes >= 127. deny_flags bit 0 also rejects space,
-    # bit 1 also rejects comma.
+    # Rejects ctrl chars and bytes >= 127.
+    # deny_flags bit 0 also rejects space
     deny_space = (deny_flags & 1)
-    deny_comma = (deny_flags & 2)
     i = 0
     while i < buflen:
         b = buf[i]
         if b < 32 or b >= 127:
             return 0
         if b == 32 and deny_space:
-            return 0
-        if b == 44 and deny_comma:
             return 0
         i += 1
     return 1
@@ -141,25 +138,6 @@ def create_connection(address, timeout=None):
             if not isinstance(e, OSError):
                 raise e
     raise OSError(2)  # ENOENT
-
-def parse_host_port(host, port, default_port=None):
-    if port is None:
-        i = host.rfind(':')
-        j = host.rfind(']')
-        if i > j:
-            port_str = host[i+1:]
-            if port_str == "":
-                port = default_port
-            elif not port_str[0].isdigit():
-                raise ValueError("invalid port")
-            else:
-                port = int(port_str, 10)
-            host = host[:i]
-        else:
-            port = default_port
-    if host and host[0] == '[' and host[-1] == ']':
-        host = host[1:-1]
-    return (host, port)
 
 def _normalize_key(key):
     # Strip surrounding whitespace, lowercase, return immutable bytes.
@@ -348,7 +326,7 @@ class HTTPResponse:
                 pass
         
         if incomplete_read:
-            raise IncompleteRead(self._bytes_read, self.length)
+            raise IncompleteRead(None, None if self.length is None else self.length - self._bytes_read)
     
     def isclosed(self):
         return self._sock is None
@@ -602,22 +580,31 @@ class HTTPResponse:
         if self.headers is None:
             raise ResponseNotReady()
         key = _normalize_key(key)
-        numv = 0
+        
+        numheaders = 0
         for k, v in self.headers:
-            if k == key:
-                if numv == 0:
-                    vals = v
-                    numv = 1
-                elif numv == 1:
-                    vals = [vals, v]
-                    numv = 2
-                else:
-                    vals.append(v)
-        if numv == 0:
+            if k != key:
+                continue
+            if numheaders == 0:
+                headers = v
+            elif numheaders == 1:
+                headers = [headers, v]
+            else:
+                headers.append(v)
+            numheaders += 1
+        if numheaders == 1:
+            return headers
+        if numheaders > 1:
+            return b", ".join(headers)
+        
+        # No headers found.
+        if isinstance(default, str):
+            default = default.encode(_ENCODE_HEAD)
+        if isinstance(default, bytes):
             return default
-        if numv == 1:
-            return vals
-        return b", ".join(vals)
+        if _iterable(default):
+            return b", ".join(default)
+        return default
     
     def _getheader(self, key, default=None):
         # Internal fast path: assumes key is already normalized bytes and
@@ -679,9 +666,7 @@ class HTTPConnection:
         return False
     
     def __init__(self, host, port=None, timeout=None, source_address=None, blocksize=1024):
-        self.host, self.port = parse_host_port(host, port, self.default_port)
-        if not self.host:
-            raise ValueError("invalid host")
+        self.host, self.port = self._parse_host_port(host, port)  # raise ValueError on failure (CPython raises InvalidURL)
         self.timeout = timeout
         self.blocksize = blocksize
         self.sock = None
@@ -719,7 +704,27 @@ class HTTPConnection:
             if response is not None:
                 response.close(_CR_EOF)
     
-    # Derived from CPython.
+    def _parse_host_port(self, host, port):
+        if port is None:
+            i = host.rfind(':')
+            j = host.rfind(']')
+            if i > j:
+                port_str = host[i+1:]
+                if port_str == "":
+                    port = self.default_port
+                elif not port_str[0].isdigit():
+                    raise ValueError("invalid port")
+                else:
+                    port = int(port_str, 10)
+                host = host[:i]
+            else:
+                port = self.default_port
+        if host and host[0] == '[' and host[-1] == ']':
+            host = host[1:-1]
+        if not host:
+            raise ValueError("invalid host")
+        return (host, port)
+    
     def request(self, method, url, body=None, headers=None, *, encode_chunked=False):
         have_accept_encoding = False
         have_content_length = False
@@ -777,7 +782,6 @@ class HTTPConnection:
             self.putheaders(items)
         self.endheaders(body, encode_chunked=encode_chunked)
     
-    # Derived from CPython.
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
         if self.__response is not None:
             if not self.__response.isclosed():
@@ -829,7 +833,7 @@ class HTTPConnection:
         if len(values) == 1:
             self._putheaderparts(False, header, b": ", _encode_and_validate(values[0], _ENCODE_HEAD), _CRLF)
         else:
-            self._putheaderparts(False, header, b": ", b", ".join(_encode_and_validate(v, _ENCODE_HEAD, deny_flags=2) for v in values), _CRLF)
+            self._putheaderparts(False, header, b": ", b"\r\n\t".join(_encode_and_validate(v, _ENCODE_HEAD) for v in values), _CRLF)
     
     def _putheaderparts(self, last, *parts):
         # Buffers header bytes until full or `last` flushes.
@@ -984,8 +988,8 @@ class HTTPConnection:
         if self.__state != _CS_REQ_SENT or self.__response is not None:
             raise ResponseNotReady()
         
+        response = HTTPResponse(self.sock, self.debuglevel, self._method, self._url)
         try:
-            response = HTTPResponse(self.sock, self.debuglevel, self._method, self._url)
             response.begin(**kwargs)
             self.__state = _CS_IDLE
             if response.will_close:
@@ -995,8 +999,11 @@ class HTTPConnection:
             else:
                 self.__response = response
             return response
-        except Exception:
-            self.close()
+        except Exception as e:
+            if isinstance(e, OSError):
+                self.close()
+            else:
+                response.close(_CR_EOF)
             raise
     
     def detach(self):
