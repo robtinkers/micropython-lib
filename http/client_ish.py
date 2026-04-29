@@ -1,3 +1,5 @@
+# http/client_ish.py
+
 import micropython, socket, time
 
 HTTP_PORT = const(80)
@@ -52,6 +54,13 @@ class CannotSendHeader(ImproperConnectionState): pass
 class ResponseNotReady(ImproperConnectionState): pass
 class BadStatusLine(HTTPException): pass
 class RemoteDisconnected(ConnectionResetError, BadStatusLine): pass
+
+def _iterable(obj):
+    try:
+        iter(obj)
+        return True
+    except TypeError:
+        return False
 
 @micropython.viper
 def _lower(buf:ptr8, buflen:int, inplace:bool) -> int:
@@ -125,7 +134,7 @@ def _create_connection(address, timeout):
                     pass
             if not isinstance(e, OSError):
                 raise e
-    raise OSError(128)  # ENOTCONN
+    raise OSError(2)  # ENOENT
 
 def create_connection(address, timeout=None):
     return _create_connection(address, timeout)
@@ -205,7 +214,7 @@ class HTTPResponse:
         self.version = None
         self.status = None
         self.reason = None
-        self.headers = []
+        self.headers = None
         self.chunked = False
         self.chunk_left = None
         self.will_close = True
@@ -217,6 +226,9 @@ class HTTPResponse:
         self.version, self.status, self.reason = self._read_status()
         if self.debuglevel > 0:
             print("status:", repr(self.version), repr(self.status), repr(self.reason))
+        
+        if self.headers is not None:
+            return
         
         self.headers = parse_headers(self._sock, extra_headers=extra_headers)
         if self.debuglevel > 0:
@@ -268,9 +280,9 @@ class HTTPResponse:
             line = self._sock.readline()
             if self.debuglevel > 0:
                 print("status:", repr(line))
-            if not line or not line.endswith(b'\n'):
+            if not line:
                 raise RemoteDisconnected()
-            if not line.startswith(b"HTTP/"):
+            if not line.startswith(b"HTTP/") or not line.endswith(b'\n'):
                 raise BadStatusLine()
             
             try:
@@ -424,10 +436,7 @@ class HTTPResponse:
                     # Consume trailers until blank line.
                     while True:
                         line = self._sock.readline()
-                        if not line:
-                            self.close(_CR_EOF)
-                            break
-                        if line == _CRLF or line == b"\n":
+                        if not line or line == _CRLF or line == b"\n":
                             self.chunk_left = None
                             self.close(_CR_DONE)
                             break
@@ -594,10 +603,14 @@ class HTTPResponse:
         return self.status
     
     def getheaders(self):
+        if self.headers is None:
+            raise ResponseNotReady()
         return self.headers
     
     def getheader(self, key, default=None):
         # Duplicate header values are joined with b", ".
+        if self.headers is None:
+            raise ResponseNotReady()
         key = _normalize_key(key)
         numv = 0
         for k, v in self.headers:
@@ -716,9 +729,6 @@ class HTTPConnection:
     
     # Derived from CPython.
     def request(self, method, url, body=None, headers=None, *, encode_chunked=False):
-        if isinstance(body, str):
-            body = body.encode(_ENCODE_BODY)
-        
         have_accept_encoding = False
         have_content_length = False
         have_host = False
@@ -744,6 +754,9 @@ class HTTPConnection:
                     have_transfer_encoding = True
         
         self.putrequest(method, url, skip_accept_encoding=have_accept_encoding, skip_host=have_host)
+        
+        if isinstance(body, str):
+            body = body.encode(_ENCODE_BODY)
         
         if not have_content_length:
             if not have_transfer_encoding:
@@ -867,8 +880,8 @@ class HTTPConnection:
     def _send_raw(self, data):
         # Blocking socket assumed. On first call of a request, may transparently
         # (re)connect if an existing keep-alive socket is dead.
-        if data is None:
-            data = _BLANK
+        if not data:
+            return
         
         if self._auto_open and not self._sent_data:
             try:
@@ -886,27 +899,26 @@ class HTTPConnection:
             except OSError:
                 raise NotConnected()
             self.sock.sendall(data)
-            if data:
-                self._sent_data = True
+            self._sent_data = True
             return
         
         if self.sock is None:
             raise NotConnected()
         self.sock.sendall(data)
-        if data:
-            self._sent_data = True
+        self._sent_data = True
     
     def _send_chunk(self, data):
         # None -> final (terminating) chunk.
         if data is None:
             self._send_raw(b"0\r\n\r\n")
+        if not data:
             return
         self._send_raw(b"%X\r\n" % (len(data),))
         self._send_raw(data)
         self._send_raw(_CRLF)
     
     # encode_chunked and final_chunk are extensions beyond CPython.
-    def send(self, data, *, encode_chunked=False, final_chunk=True, _descend=True, _buf=None):
+    def send(self, data, *, encode_chunked=False, final_chunk=True):
         send = self._send_chunk if encode_chunked else self._send_raw
         
         if isinstance(data, str):
@@ -915,6 +927,7 @@ class HTTPConnection:
         if data is None:
             if self.debuglevel > 0:
                 print("send: None")
+            pass
         
         elif isinstance(data, (bytes, bytearray, memoryview)):
             if self.debuglevel > 0:
@@ -923,26 +936,25 @@ class HTTPConnection:
                 send(data)
         
         elif hasattr(data, "readinto"):
-            if _buf is None:
-                _buf = memoryview(bytearray(self.blocksize))
+            if self.debuglevel > 0:
+                print("send: readinto()")
+            buf = bytearray(self.blocksize)
             while True:
-                n = data.readinto(_buf)
-                if self.debuglevel > 0:
-                    print("send:", type(data).__name__, None if n is None else n)
+                n = data.readinto(buf)
                 if n is None:
                     time.sleep_ms(1)
                     continue
                 if not n:
                     break
-                send(_buf[:n])
+                send(buf[:n])
         
         elif hasattr(data, "read"):
+            if self.debuglevel > 0:
+                print("send: read()")
             while True:
                 d = data.read(self.blocksize)
                 if isinstance(d, str):
                     d = d.encode(_ENCODE_BODY)
-                if self.debuglevel > 0:
-                    print("send:", type(d).__name__, None if d is None else len(d))
                 if d is None:
                     time.sleep_ms(1)
                     continue
@@ -950,19 +962,30 @@ class HTTPConnection:
                     break
                 send(d)
         
-        elif _descend:
-            # Iterable of bytes-likes / file-likes. One level of descent only.
+        elif callable(data):
+            if self.debuglevel > 0:
+                print("send: callable!")
+            for d in data():
+                if isinstance(d, str):
+                    d = d.encode(_ENCODE_BODY)
+                if d is not None:
+                    send(d)
+        
+        elif _iterable(data):
+            if self.debuglevel > 0:
+                print("send: iterable!")
             for d in data:
-                if _buf is None and hasattr(d, "readinto"):
-                    _buf = memoryview(bytearray(self.blocksize))
-                self.send(d, encode_chunked=encode_chunked, final_chunk=False, _descend=False, _buf=_buf)
+                if isinstance(d, str):
+                    d = d.encode(_ENCODE_BODY)
+                if d is not None:
+                    send(d)
         
         else:
             raise TypeError("unexpected data")
         
         if encode_chunked and final_chunk:
             if self.debuglevel > 0:
-                print("send: terminating chunk")
+                print("send: terminator")
             send(None)
     
     def getresponse(self, **kwargs):
