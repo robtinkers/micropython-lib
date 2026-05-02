@@ -215,22 +215,22 @@ class HTTPResponse:
             for key, val in self.headers:
                 print("header:", repr(key), "=", repr(val))
         
-        transfer_encoding = self._getheader(b"transfer-encoding", b"")
+        transfer_encoding = self._getheaderbytes(b"transfer-encoding", b"")
         self.chunked = (b"chunked" in transfer_encoding.lower())
         self.chunk_left = None
         
-        conn = self._getheader(b"connection", b"").lower()
+        conn = self._getheaderbytes(b"connection", b"").lower()
         if self.version == 10:
             if b"keep-alive" in conn:
                 self.will_close = False
             else:
-                self.will_close = (self._getheader(b"keep-alive", _MISSING) is _MISSING)
+                self.will_close = (self._getheaderbytes(b"keep-alive", _MISSING) is _MISSING)
         else:
             self.will_close = b"close" in conn
         
         # Content-Length is ignored when chunked (RFC 2616 S4.4 #3).
         self.length = None
-        length = self._getheader(b"content-length", None)
+        length = self._getheaderbytes(b"content-length", None)
         if length and not self.chunked:
             try:
                 self.length = int(length, 10)
@@ -305,6 +305,9 @@ class HTTPResponse:
         sock = self._sock
         self._sock = None
         
+        if sock is None:
+            return
+        
         incomplete_read = (
             self.chunk_left is not None
             or (self.length is not None and self._bytes_read < self.length)
@@ -319,14 +322,20 @@ class HTTPResponse:
             force_close = incomplete_read
             incomplete_read = False
         
-        if sock is not None and (force_close or self.will_close):
+        if force_close or self.will_close:
             try:
                 sock.close()
             except OSError:
                 pass
         
+        shortfall = None if self.length is None else self.length - self._bytes_read
+        
+        self.chunk_left = None
+        if self.length is not None:
+            self._bytes_read = self.length
+        
         if incomplete_read:
-            raise IncompleteRead(None, None if self.length is None else self.length - self._bytes_read)
+            raise IncompleteRead(None, shortfall)
     
     def isclosed(self):
         return self._sock is None
@@ -573,9 +582,13 @@ class HTTPResponse:
     def getheaders(self):
         if self.headers is None:
             raise ResponseNotReady()
-        return self.headers
+        return [(k.decode(_DECODE_HEAD), v.decode(_DECODE_HEAD)) for k, v in self.headers]
     
     def getheader(self, key, default=None):
+        val = self.getheaderbytes(key, default)
+        return val.decode(_DECODE_HEAD) if isinstance(val, bytes) else val
+    
+    def getheaderbytes(self, key, default=None):
         # Duplicate header values are joined with b", ".
         if self.headers is None:
             raise ResponseNotReady()
@@ -606,7 +619,7 @@ class HTTPResponse:
             return b", ".join(default)
         return default
     
-    def _getheader(self, key, default=None):
+    def _getheaderbytes(self, key, default=None):
         # Internal fast path: assumes key is already normalized bytes and
         # returns only the first match.
         for k, v in self.headers:
@@ -702,7 +715,7 @@ class HTTPConnection:
             response = self.__response
             self.__response = None
             if response is not None:
-                response.close(_CR_EOF)
+                response.close(_CR_DONE)
     
     def _parse_host_port(self, host, port):
         if port is None:
