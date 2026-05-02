@@ -415,11 +415,16 @@ class HTTPResponse:
                     self.close(_CR_MALFORMED)
                     break
                 self.chunk_left = chunk_size
+
                 if chunk_size == 0:
                     # Consume trailers until blank line.
                     while True:
                         line = self._sock.readline()
-                        if not line or line == _CRLF or line == b"\n":
+                        if not line:
+                            self.chunk_left = None
+                            self.close(_CR_EOF)
+                            break
+                        if line == _CRLF or line == b"\n":
                             self.chunk_left = None
                             self.close(_CR_DONE)
                             break
@@ -788,8 +793,8 @@ class HTTPConnection:
                         self.putheader(b"Transfer-Encoding", b"chunked")
                 else:
                     self.putheader(b"Content-Length", content_length)
-        else:
-            encode_chunked = False
+            else:
+                encode_chunked = True
         
         if headers is not None:
             self.putheaders(items)
@@ -882,7 +887,7 @@ class HTTPConnection:
         self._putheaderparts(True, _CRLF)
         self._auto_open = False
         self.__state = _CS_REQ_SENT
-        if message_body is not None:
+        if message_body is not None or encode_chunked:
             self.send(message_body, encode_chunked=encode_chunked)
     
     def _send_raw(self, data):
