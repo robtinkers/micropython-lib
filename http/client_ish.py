@@ -590,11 +590,22 @@ class HTTPResponse:
         return [(k.decode(_DECODE_HEAD), v.decode(_DECODE_HEAD)) for k, v in self.headers]
     
     def getheader(self, key, default=None):
-        val = self.getheaderbytes(key, default)
-        return val.decode(_DECODE_HEAD) if isinstance(val, bytes) else val
+        val = self.getheaderbytes(key)
+        if val is not None:
+            return val.decode(_DECODE_HEAD)
+        
+        # No headers found.
+        if isinstance(default, str):
+            return default
+        if isinstance(default, (bytes, bytearray)):
+            return default.decode(_DECODE_HEAD)
+        if isinstance(default, memoryview):
+            return bytes(default).decode(_DECODE_HEAD)
+        if _iterable(default):
+            return ", ".join(x if isinstance(x, str) else x.decode(_DECODE_HEAD) for x in default)
+        return default
     
     def getheaderbytes(self, key, default=None):
-        # Duplicate header values are joined with b", ".
         if self.headers is None:
             raise ResponseNotReady()
         key = _normalize_key(key)
@@ -617,11 +628,11 @@ class HTTPResponse:
         
         # No headers found.
         if isinstance(default, str):
-            default = default.encode(_ENCODE_HEAD)
-        if isinstance(default, bytes):
+            return default.encode(_ENCODE_HEAD)
+        if isinstance(default, (bytes, bytearray, memoryview)):
             return default
         if _iterable(default):
-            return b", ".join(default)
+            return b", ".join(x.encode(_ENCODE_HEAD) if isinstance(x, str) else x for x in default)
         return default
     
     def _getheaderbytes(self, key, default=None):
