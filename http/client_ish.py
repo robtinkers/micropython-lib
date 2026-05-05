@@ -35,12 +35,7 @@ _CRLF = const(b"\r\n")
 
 class HTTPException(Exception): pass
 class NotConnected(HTTPException): pass
-class ImproperConnectionState(HTTPException): pass
-class CannotSendRequest(ImproperConnectionState): pass
-class CannotSendHeader(ImproperConnectionState): pass
-class ResponseNotReady(ImproperConnectionState): pass
 class BadStatusLine(HTTPException): pass
-class RemoteDisconnected(ConnectionResetError, BadStatusLine): pass
 
 class IncompleteRead(HTTPException):
     def __init__(self, partial, expected=None):
@@ -221,9 +216,7 @@ class HTTPResponse:
             line = self._sock.readline()
             if self.debuglevel > 0:
                 print("status:", repr(line))
-            if not line:
-                raise RemoteDisconnected()
-            if not line.startswith(b"HTTP/") or not line.endswith(b'\n'):
+            if not line or not line.startswith(b"HTTP/") or not line.endswith(b'\n'):
                 raise BadStatusLine()
             
             line = line.split(None, 2)
@@ -722,10 +715,9 @@ class HTTPConnection:
         self.endheaders(body, encode_chunked=encode_chunked)
     
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
-        if self.__response is not None:
-            if not self.__response.isclosed():
-                raise CannotSendRequest()
-            self.__response = None
+        if self.__response is not None and not self.__response.isclosed():
+            self.close()
+        self.__response = None
         
         self._auto_open = self.auto_open
         self._filled = 0
@@ -759,9 +751,6 @@ class HTTPConnection:
     
     def _putheaderparts(self, last, *parts):
         # Buffers header bytes until full or `last` flushes.
-        if self.__response is not None:
-            raise CannotSendHeader()
-        
         if self._buffmv is None:
             self._send_raw(_BLANK.join(parts))
         else:
@@ -785,9 +774,6 @@ class HTTPConnection:
             self._filled = 0
     
     def endheaders(self, message_body=None, *, encode_chunked=False):
-        if self.__response is not None:
-            raise CannotSendHeader()
-        
         self._putheaderparts(True, _CRLF)
         self._auto_open = False
         if message_body is not None or encode_chunked:
@@ -865,11 +851,11 @@ class HTTPConnection:
             send(None)
     
     def getresponse(self, **kwargs):
-        if self.__response is not None and self.__response.isclosed():
-            self.__response = None
-        if self.__response is not None:
-            raise ResponseNotReady()
-        
+        if self.__response is not None and not self.__response.isclosed():
+            self.close()
+            raise NotConnected()
+        self.__response = None
+
         response = HTTPResponse(self.sock, self.debuglevel, self._method, self._url)
         try:
             response.begin(**kwargs)
