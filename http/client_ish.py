@@ -1,6 +1,6 @@
 # http/client_ish.py
 
-import micropython, socket
+import micropython, socket, errno
 
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
@@ -36,12 +36,6 @@ _CRLF = const(b"\r\n")
 class HTTPException(Exception): pass
 class NotConnected(HTTPException): pass
 class BadStatusLine(HTTPException): pass
-
-class IncompleteRead(HTTPException):
-    def __init__(self, partial, expected=None):
-        self.args = partial,
-        self.partial = partial
-        self.expected = expected
 
 @micropython.viper
 def _lower(buf:ptr8, buflen:int, inplace:bool) -> int:
@@ -106,7 +100,7 @@ def create_connection(address, timeout=None):
                     pass
             if not isinstance(e, OSError):
                 raise e
-    raise OSError(2)  # ENOENT
+    raise OSError(errno.EHOSTUNREACH)
 
 def _normalize_key(key):
     # Strip surrounding whitespace, lowercase, return immutable bytes.
@@ -281,14 +275,12 @@ class HTTPResponse:
             except OSError:
                 pass
         
-        shortfall = None if self.length is None else self.length - self._bytes_read
-        
         self.chunk_left = None
         if self.length is not None:
             self._bytes_read = self.length
         
         if incomplete_read:
-            raise IncompleteRead(None, shortfall)
+            raise OSError(errno.EIO)
     
     def isclosed(self):
         return self._sock is None
