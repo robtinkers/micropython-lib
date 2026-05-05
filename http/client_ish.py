@@ -916,8 +916,8 @@ else:
         def connect(self):
             super().connect()
             raw = self.sock
-            is_ip = ':' in self.host or all(c.isdigit() or c == '.' for c in self.host)
             try:
+                is_ip = ':' in self.host or all(c.isdigit() or c == '.' for c in self.host)
                 self.sock = self._context.wrap_socket(raw, server_hostname=None if is_ip else self.host)
             except Exception:
                 self.sock = None
