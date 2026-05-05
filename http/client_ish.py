@@ -7,9 +7,8 @@ HTTPS_PORT = const(443)
 
 # HTTPResponse.close() reasons: controls whether the socket is actually closed
 # and whether the response is flagged as incomplete.
-_CR_DONE = const(0)       # clean finish (or user close mid-body)
-_CR_EOF = const(1)        # unexpected EOF; socket closed, possibly incomplete
-_CR_MALFORMED = const(2)  # protocol violation; socket closed, incomplete
+_CR_DONE = const(0)
+_CR_ABNORMAL = const(1)
 
 _IMPORTANT_HEADERS = frozenset((
     b"connection",
@@ -36,6 +35,12 @@ _CRLF = const(b"\r\n")
 class HTTPException(Exception): pass
 class NotConnected(HTTPException): pass
 class BadStatusLine(HTTPException): pass
+class RemoteDisconnected(BadStatusLine): pass
+class ImproperConnectionState(HTTPException): pass
+class CannotSendRequest(ImproperConnectionState): pass
+class CannotSendHeader(ImproperConnectionState): pass
+class ResponseNotReady(ImproperConnectionState): pass
+class IncompleteRead(HTTPException): pass
 
 @micropython.viper
 def _lower(buf:ptr8, buflen:int, inplace:bool) -> int:
@@ -210,7 +215,9 @@ class HTTPResponse:
             line = self._sock.readline()
             if self.debuglevel > 0:
                 print("status:", repr(line))
-            if not line or not line.startswith(b"HTTP/") or not line.endswith(b'\n'):
+            if not line:
+                raise RemoteDisconnected()
+            if not line.startswith(b"HTTP/") or not line.endswith(b'\n'):
                 raise BadStatusLine()
             
             line = line.split(None, 2)
@@ -255,21 +262,15 @@ class HTTPResponse:
         if sock is None:
             return
         
-        incomplete_read = (
-            self.chunk_left is not None
-            or (self.length is not None and self._bytes_read < self.length)
-        )
-        
-        if reason == _CR_EOF:
-            force_close = True
-        elif reason == _CR_MALFORMED:
-            force_close = True
+        if reason == _CR_ABNORMAL:
             incomplete_read = True
         else:
-            force_close = incomplete_read
-            incomplete_read = False
+            incomplete_read = (
+                self.chunk_left is not None
+                or (self.length is not None and self._bytes_read < self.length)
+            )
         
-        if force_close or self.will_close:
+        if incomplete_read or self.will_close:
             try:
                 sock.close()
             except OSError:
@@ -280,7 +281,7 @@ class HTTPResponse:
             self._bytes_read = self.length
         
         if incomplete_read:
-            raise OSError(errno.EIO)
+            raise IncompleteRead()
     
     def isclosed(self):
         return self._sock is None
@@ -334,7 +335,7 @@ class HTTPResponse:
             if self.chunk_left is None:
                 line = self._sock.readline()
                 if not line:
-                    self.close(_CR_EOF)
+                    self.close(_CR_ABNORMAL)
                     break
                 sep = line.find(b';')
                 if sep >= 0:
@@ -342,10 +343,10 @@ class HTTPResponse:
                 try:
                     chunk_size = int(line, 16)
                 except ValueError:
-                    self.close(_CR_MALFORMED)
+                    self.close(_CR_ABNORMAL)
                     break
                 if chunk_size < 0:
-                    self.close(_CR_MALFORMED)
+                    self.close(_CR_ABNORMAL)
                     break
                 self.chunk_left = chunk_size
 
@@ -353,11 +354,7 @@ class HTTPResponse:
                     # Consume trailers until blank line.
                     while True:
                         line = self._sock.readline()
-                        if not line:
-                            self.chunk_left = None
-                            self.close(_CR_EOF)
-                            break
-                        if line == _CRLF or line == b"\n":
+                        if not line or line == _CRLF or line == b"\n":
                             self.chunk_left = None
                             self.close(_CR_DONE)
                             break
@@ -376,7 +373,7 @@ class HTTPResponse:
                 else:
                     nread = self._sock.readinto(res[total:total+to_read])
                 if not nread:
-                    self.close(_CR_EOF)
+                    self.close(_CR_ABNORMAL)
                     break
                 self._bytes_read += nread
                 total += nread
@@ -391,7 +388,7 @@ class HTTPResponse:
                         to_read = remaining_req
                 chunk = self._sock.read(to_read)
                 if not chunk:
-                    self.close(_CR_EOF)
+                    self.close(_CR_ABNORMAL)
                     break
                 self._bytes_read += len(chunk)
                 total += len(chunk)
@@ -402,10 +399,10 @@ class HTTPResponse:
             if self.chunk_left == 0:
                 line = self._sock.readline()
                 if not line:
-                    self.close(_CR_EOF)
+                    self.close(_CR_ABNORMAL)
                     break
                 if line != _CRLF and line != b"\n":
-                    self.close(_CR_MALFORMED)
+                    self.close(_CR_ABNORMAL)
                     break
                 self.chunk_left = None
             
@@ -467,7 +464,7 @@ class HTTPResponse:
         
         if to_read < 0:
             # Already over CL -- body is untrustworthy.
-            self.close(_CR_MALFORMED)
+            self.close(_CR_ABNORMAL)
             if arg_is_memoryview:
                 return 0
             else:
@@ -498,7 +495,7 @@ class HTTPResponse:
             
             if got_eof:
                 if self.length is not None and self._bytes_read < self.length:
-                    self.close(_CR_EOF)
+                    self.close(_CR_ABNORMAL)
                 else:
                     self.close(_CR_DONE)
         
@@ -506,11 +503,11 @@ class HTTPResponse:
             if self._bytes_read == self.length:
                 self.close(_CR_DONE)
             elif self._bytes_read > self.length:
-                self.close(_CR_MALFORMED)
+                self.close(_CR_ABNORMAL)
             elif arg is None:
                 # Blocking "no short reads" means this path is unreachable
                 # in practice; treat as incomplete if it ever happens.
-                self.close(_CR_EOF)
+                self.close(_CR_ABNORMAL)
         
         if arg_is_memoryview:
             return total
@@ -518,6 +515,8 @@ class HTTPResponse:
             return chunk
     
     def getheaders(self):
+        if self.headers is None:
+            raise ResponseNotReady()
         return [(k.decode(_DECODE_HEAD), v.decode(_DECODE_HEAD)) for k, v in self.headers]
     
     def getheader(self, key, default=None):
@@ -528,6 +527,8 @@ class HTTPResponse:
     
     # Extension
     def getheaderbytes(self, key, default=None):
+        if self.headers is None:
+            raise ResponseNotReady()
         key = _normalize_key(key)
         matches = [v for k, v in self.headers if k == key]
         if not matches:
@@ -708,7 +709,7 @@ class HTTPConnection:
     
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
         if self.__response is not None and not self.__response.isclosed():
-            self.close()
+            raise CannotSendRequest()
         self.__response = None
         
         self._auto_open = self.auto_open
@@ -739,6 +740,8 @@ class HTTPConnection:
     def putheader(self, header, value):
         if isinstance(header, str):
             header = header.encode(_ENCODE_HEAD)
+        if self.__response is not None:
+            raise CannotSendHeader()
         self._putheaderparts(False, header, b": ", _encode_and_validate(value, _ENCODE_HEAD, 0), _CRLF)
     
     def _putheaderparts(self, last, *parts):
@@ -766,6 +769,8 @@ class HTTPConnection:
             self._filled = 0
     
     def endheaders(self, message_body=None, *, encode_chunked=False):
+        if self.__response is not None:
+            raise CannotSendHeader()
         self._putheaderparts(True, _CRLF)
         self._auto_open = False
         if message_body is not None or encode_chunked:
@@ -844,8 +849,7 @@ class HTTPConnection:
     
     def getresponse(self, **kwargs):
         if self.__response is not None and not self.__response.isclosed():
-            self.close()
-            raise NotConnected()
+            raise ResponseNotReady()
         self.__response = None
 
         response = HTTPResponse(self.sock, self.debuglevel, self._method, self._url)
@@ -862,7 +866,7 @@ class HTTPConnection:
             if isinstance(e, OSError):
                 self.close()
             else:
-                response.close(_CR_EOF)
+                response.close(_CR_ABNORMAL)
             raise
     
     def detach(self):
@@ -895,8 +899,8 @@ else:
             super().connect()
             raw = self.sock
             try:
-                is_ip = ':' in self.host or all(c.isdigit() or c == '.' for c in self.host)
-                self.sock = self._context.wrap_socket(raw, server_hostname=None if is_ip else self.host)
+                use_sni = not (':' in self.host or all(c.isdigit() or c == '.' for c in self.host))
+                self.sock = self._context.wrap_socket(raw, server_hostname=self.host if use_sni else None)
             except Exception:
                 self.sock = None
                 try:
