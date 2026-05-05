@@ -1,3 +1,5 @@
+# http/client_ish.py
+
 import micropython, socket, errno
 
 HTTP_PORT = const(80)
