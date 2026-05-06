@@ -889,8 +889,8 @@ else:
             raw = self.sock
             try:
                 # SNI is omitted for IP literals (per RFC 6066).
-                use_sni = not (':' in self.host or all(c.isdigit() or c == '.' for c in self.host))
-                self.sock = self._context.wrap_socket(raw, server_hostname=self.host if use_sni else None)
+                omit_sni = ':' in self.host or all(c.isdigit() or c == '.' for c in self.host)
+                self.sock = self._context.wrap_socket(raw, server_hostname=None if omit_sni else self.host)
             except Exception:
                 self.sock = None
                 try:
