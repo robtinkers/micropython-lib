@@ -535,8 +535,8 @@ class HTTPResponse:
             raise ResponseNotReady()
         return [v for k, v in self.headers if k == b"set-cookie"]
 
-    # Yields fresh bytes chunks of up to chunk_size each.
-    def iter_content(self, chunk_size=1024):
+    # Yields fresh bytes or memoryview chunks of up to chunk_size each.
+    def iter_content(self, chunk_size=1024, return_memoryview=False):
         chunk_size = int(chunk_size)
         if chunk_size <= 0:
             raise ValueError("chunk_size must be > 0")
@@ -553,9 +553,9 @@ class HTTPResponse:
             if n <= 0:
                 break
             if n == chunk_size:
-                yield bytes(buf)
+                yield bmv if return_memoryview else bytes(buf)
             else:
-                yield bytes(bmv[:n])
+                yield bmv[:n] if return_memoryview else bytes(bmv[:n])
 
     # Fills the caller's buffer in place, yields bytes-written counts.
     def iter_content_into(self, bmv):
@@ -572,7 +572,8 @@ class HTTPConnection:
     default_port = HTTP_PORT
     auto_open = True
     debuglevel = 0
-    _buffer_size = 1024
+    _header_buffer_size = 1024
+    _inline_chunk_size = 0
 
     def __enter__(self):
         return self
@@ -588,8 +589,8 @@ class HTTPConnection:
         self.sock = None
         self.__response = None
         self._can_reconnect = False
-        if self._buffer_size:
-            self._buffmv = memoryview(bytearray(self._buffer_size))
+        if self._header_buffer_size:
+            self._buffmv = memoryview(bytearray(self._header_buffer_size))
         else:
             self._buffmv = None
         self._filled = 0
@@ -738,12 +739,12 @@ class HTTPConnection:
         else:
             for part in parts:
                 len_part = len(part)
-                if len_part >= self._buffer_size:
+                if len_part >= self._header_buffer_size:
                     if self._filled:
                         self._send_raw(self._buffmv[:self._filled])
                         self._filled = 0
                     self._send_raw(part)
-                elif self._filled + len_part <= self._buffer_size:
+                elif self._filled + len_part <= self._header_buffer_size:
                     self._buffmv[self._filled:self._filled+len_part] = part
                     self._filled += len_part
                 else:
@@ -799,8 +800,13 @@ class HTTPConnection:
         if data is None:
             self._send_raw(b"0\r\n\r\n")
             return
-        if data:
-            self._send_raw(b"%X\r\n" % (len(data),))
+        len_data = len(data)
+        if len_data == 0:
+            return
+        if len_data <= self._inline_chunk_size:
+            self._send_raw(b"%X\r\n%s\r\n" % (len_data, data))
+        else:
+            self._send_raw(b"%X\r\n" % len_data)
             self._send_raw(data)
             self._send_raw(_CRLF)
 
@@ -882,6 +888,8 @@ except ImportError:
 else:
     class HTTPSConnection(HTTPConnection):
         default_port = HTTPS_PORT
+        _header_buffer_size = 1400
+        _inline_chunk_size = 1400
 
         def __init__(self, *args, context=None, **kwargs):
             super().__init__(*args, **kwargs)
