@@ -182,11 +182,11 @@ class HTTPResponse:
             for key, val in self.headers:
                 print("header:", repr(key), "=", repr(val))
 
-        transfer_encoding = self._getheaderbytes(b"transfer-encoding", b"")
+        transfer_encoding = self._getheader_bytes(b"transfer-encoding", b"")
         self.chunked = (b"chunked" in transfer_encoding.lower())
         self.chunk_left = None
 
-        conn = self._getheaderbytes(b"connection", b"").lower()
+        conn = self._getheader_bytes(b"connection", b"").lower()
         if self.version == 10:
             self.will_close = b"keep-alive" not in conn
         else:
@@ -194,7 +194,7 @@ class HTTPResponse:
 
         # Content-Length is ignored when chunked (RFC 7230 S3.3.3).
         self.length = None
-        length = self._getheaderbytes(b"content-length", None)
+        length = self._getheader_bytes(b"content-length", None)
         if length and not self.chunked:
             try:
                 self.length = int(length, 10)
@@ -504,12 +504,12 @@ class HTTPResponse:
         return [(k.decode(_DECODE_HEAD), v.decode(_DECODE_HEAD)) for k, v in self.headers]
 
     def getheader(self, key, default=None):
-        val = self.getheaderbytes(key)
+        val = self.getheader_bytes(key)
         if val is not None:
             return val.decode(_DECODE_HEAD)
         return default
 
-    def getheaderbytes(self, key, default=None):
+    def getheader_bytes(self, key, default=None):
         if self.headers is None:
             raise ResponseNotReady()
         key = _normalize_key(key)
@@ -520,12 +520,17 @@ class HTTPResponse:
             return matches[0]
         return b", ".join(matches)
 
-    def _getheaderbytes(self, key, default=None):
+    def _getheader_bytes(self, key, default=None):
         # First-match fast path; assumes key already normalized.
         for k, v in self.headers:
             if k == key:
                 return v
         return default
+
+    def getcookies_bytes(self):
+        if self.headers is None:
+            raise ResponseNotReady()
+        return [v for k, v in self.headers if k == b"set-cookie"]
 
     # Yields fresh bytes chunks of up to chunk_size each.
     def iter_content(self, chunk_size=1024):
@@ -608,36 +613,32 @@ class HTTPConnection:
             response.close()
 
     def _parse_host_port(self, host, port):
+        parsed_port = None
+        if host.startswith('['):
+            close = host.rfind(']')
+            if close == -1:
+                raise ValueError("invalid host")
+            host, rest = host[1:close], host[close+1:]
+            if rest.startswith(':'):
+                if len(rest) > 1:
+                    parsed_port = rest[1:]
+            elif rest:
+                raise ValueError("invalid host")
+        elif host.count(':') == 1:
+            host, parsed_port = host.rsplit(':', 1)
         if port is None:
-            # Bracketed IPv6: [::1] or [::1]:8080
-            if host.startswith('['):
-                close = host.rfind(']')
-                if close == -1:
-                    raise ValueError("invalid host")
-                host_part = host[1:close]
-                rest = host[close+1:]
-                if rest == "":
-                    port = self.default_port
-                elif rest.startswith(':'):
-                    port = rest[1:]
-                    if not port or not port[0].isdigit():
-                        raise ValueError("invalid port")
-                    port = int(port, 10)
-                else:
-                    raise ValueError("invalid host")
-                host = host_part
-            elif host.count(':') > 1:
-                # Bare IPv6 like "::1"; no port allowed without brackets.
-                port = self.default_port
-            elif ':' in host:
-                host, port = host.rsplit(':', 1)
-                if not port or not port[0].isdigit():
-                    raise ValueError("invalid port")
-                port = int(port, 10)
-            else:
-                port = self.default_port
+            port = parsed_port
         if not host:
             raise ValueError("invalid host")
+        if not port:
+            port = self.default_port
+        if isinstance(port, str):
+            try:
+                port = int(port, 10)
+            except ValueError:
+                port = -1
+        if isinstance(port, int) and not (0 <= port <= 65535):
+            raise ValueError("invalid port")
         return (host, port)
 
     def request(self, method, url, body=None, headers=None, *, encode_chunked=None):
