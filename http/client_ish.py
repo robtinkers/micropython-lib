@@ -179,14 +179,14 @@ class HTTPResponse:
                 print("header:", repr(key), "=", repr(val))
 
         transfer_encoding = self._getheaderbytes(b"transfer-encoding", b"")
-        self.chunked = b"chunked" in transfer_encoding
+        self.chunked = bool(transfer_encoding) and b"chunked" in transfer_encoding
         self.chunk_left = None
 
         conn = self._getheaderbytes(b"connection", b"")
         if self.version == 10:
-            self.will_close = b"keep-alive" not in conn
+            self.will_close = (not conn) or b"keep-alive" not in conn
         else:
-            self.will_close = b"close" in conn
+            self.will_close = bool(conn) and b"close" in conn
 
         # Content-Length is ignored when chunked (RFC 7230 S3.3.3).
         self.length = None
