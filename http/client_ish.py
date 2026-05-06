@@ -501,12 +501,21 @@ class HTTPResponse:
     def getheaders(self):
         if self.headers is None:
             raise ResponseNotReady()
-        return [(k.decode(_DECODE_HEAD), v.decode(_DECODE_HEAD)) for k, v in self.headers]
+        out = []
+        for k, v in self.headers:
+            try:
+                out.append((k.decode(_DECODE_HEAD), v.decode(_DECODE_HEAD)))
+            except UnicodeError:
+                pass
+        return out
 
     def getheader(self, key, default=None):
         val = self.getheaderbytes(key)
         if val is not None:
-            return val.decode(_DECODE_HEAD)
+            try:
+                return val.decode(_DECODE_HEAD)
+            except UnicodeError:
+                return default
         return default
 
     def getheaderbytes(self, key, default=None):
@@ -528,7 +537,13 @@ class HTTPResponse:
         return default
 
     def getcookies(self):
-        return [v.decode(_DECODE_HEAD) for v in self.getcookiesbytes()]
+        out = []
+        for v in self.getcookiesbytes():
+            try:
+                out.append(v.decode(_DECODE_HEAD))
+            except UnicodeError:
+                pass
+        return out
 
     def getcookiesbytes(self):
         if self.headers is None:
