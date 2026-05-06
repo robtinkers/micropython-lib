@@ -19,6 +19,8 @@ _IMPORTANT_HEADERS = frozenset((
     b"www-authenticate",
 ))
 
+_METHODS_EXPECTING_BODY = frozenset((b"PATCH", b"POST", b"PUT"))
+
 # MicroPython lacks iso-8859-1; use utf-8 throughout.
 _DECODE_HEAD = const("utf-8")
 _ENCODE_HEAD = const("utf-8")
@@ -36,13 +38,7 @@ class ImproperConnectionState(HTTPException): pass
 class CannotSendRequest(ImproperConnectionState): pass
 class CannotSendHeader(ImproperConnectionState): pass
 class ResponseNotReady(ImproperConnectionState): pass
-class IncompleteRead(HTTPException):
-    def __init__(self, bytes_read, content_length):
-        self.args = (bytes_read, content_length)
-    def __repr__(self):
-        return "IncompleteRead(%s, %s)" % (self.args[0], self.args[1])
-    def __str__(self):
-        return self.__repr__()
+class IncompleteRead(HTTPException): pass
 
 @micropython.viper
 def _lower(buf:ptr8, buflen:int, inplace:bool) -> int:
@@ -183,10 +179,10 @@ class HTTPResponse:
                 print("header:", repr(key), "=", repr(val))
 
         transfer_encoding = self._getheaderbytes(b"transfer-encoding", b"")
-        self.chunked = (b"chunked" in transfer_encoding.lower())
+        self.chunked = b"chunked" in transfer_encoding
         self.chunk_left = None
 
-        conn = self._getheaderbytes(b"connection", b"").lower()
+        conn = self._getheaderbytes(b"connection", b"")
         if self.version == 10:
             self.will_close = b"keep-alive" not in conn
         else:
@@ -194,7 +190,7 @@ class HTTPResponse:
 
         # Content-Length is ignored when chunked (RFC 7230 S3.3.3).
         self.length = None
-        length = self._getheaderbytes(b"content-length", None)
+        length = self._getheaderbytes(b"content-length")
         if length and not self.chunked:
             try:
                 self.length = int(length, 10)
@@ -572,10 +568,11 @@ class HTTPResponse:
             yield n
 
 class HTTPConnection:
-    _buffer_size = 1024
+    response_class = HTTPResponse
     default_port = HTTP_PORT
     auto_open = True
     debuglevel = 0
+    _buffer_size = 1024
 
     def __enter__(self):
         return self
@@ -590,7 +587,7 @@ class HTTPConnection:
         self.blocksize = blocksize
         self.sock = None
         self.__response = None
-        self._auto_open = False
+        self._can_reconnect = False
         if self._buffer_size:
             self._buffmv = memoryview(bytearray(self._buffer_size))
         else:
@@ -680,6 +677,8 @@ class HTTPConnection:
         if encode_chunked is None:
             if body is None:
                 encode_chunked = False
+                if not have_content_length and self._method in _METHODS_EXPECTING_BODY:
+                    self.putheader(b"Content-Length", b"0")
             elif isinstance(body, (bytes, bytearray, memoryview)):
                 encode_chunked = False
                 if not have_content_length:
@@ -700,7 +699,7 @@ class HTTPConnection:
             raise CannotSendRequest()
         self.__response = None
 
-        self._auto_open = self.auto_open
+        self._can_reconnect = self.auto_open
         self._filled = 0
 
         self._method = _encode_and_validate(method, "ascii", 1)
@@ -760,7 +759,7 @@ class HTTPConnection:
         if self.__response is not None:
             raise CannotSendHeader()
         self._putheaderparts(True, _CRLF)
-        self._auto_open = False
+        self._can_reconnect = False
         if message_body is not None or encode_chunked:
             self.send(message_body, encode_chunked=encode_chunked)
 
@@ -770,11 +769,11 @@ class HTTPConnection:
         if not data:
             return
 
-        if self._auto_open:
+        if self._can_reconnect:
             try:
                 if self.sock is not None:
                     self.sock.sendall(data)
-                    self._auto_open = False
+                    self._can_reconnect = False
                     return
             except OSError:
                 try:
@@ -784,16 +783,16 @@ class HTTPConnection:
                 self.sock = None
             try:
                 self.connect()
-            except OSError:
-                raise NotConnected()
+            except OSError as e:
+                raise NotConnected(str(e))
             self.sock.sendall(data)
-            self._auto_open = False
+            self._can_reconnect = False
             return
 
         if self.sock is None:
-            raise NotConnected()
+            raise NotConnected("socket missing")
         self.sock.sendall(data)
-        self._auto_open = False
+        self._can_reconnect = False
 
     def _send_chunk(self, data):
         # data=None emits the terminating chunk.
@@ -842,7 +841,7 @@ class HTTPConnection:
             raise ResponseNotReady()
         self.__response = None
 
-        response = HTTPResponse(self.sock, self.debuglevel, self._method, self._url)
+        response = self.response_class(self.sock, self.debuglevel, self._method, self._url)
         try:
             response.begin(**kwargs)
             if response.will_close:
