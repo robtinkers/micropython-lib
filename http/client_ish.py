@@ -41,45 +41,50 @@ class ResponseNotReady(ImproperConnectionState): pass
 class IncompleteRead(HTTPException): pass
 
 @micropython.viper
-def _lower(buf:ptr8, buflen:int, inplace:bool) -> int:
-    # inplace=False: returns 1 if already lowercase, 0 otherwise (no writes).
-    # inplace=True:  lowercases in place, always returns 1.
+def _lower(buf:ptr8, buflen:int, inplace:bool) -> bool:
     i = 0
     while i < buflen:
         b = buf[i]
         if 65 <= b <= 90:
-            if inplace:
-                buf[i] = b + 32
-            else:
-                return 0
+            if not inplace:
+                return False
+            buf[i] = b + 32
         i += 1
-    return 1
+    return True
+
+def _normalize_key(key, force_bytes):
+    if isinstance(key, str):
+        key = key.encode(_ENCODE_HEAD)
+    len_key = len(key)
+    if len_key and (key[0] <= 32 or key[-1] <= 32):
+        key = key.strip()
+        len_key = len(key)
+    if not _lower(key, len_key, False):
+        if not isinstance(key, bytearray):
+            key = bytearray(key)
+        _lower(key, len_key, True)
+    if force_bytes and not isinstance(key, bytes):
+        key = bytes(key)
+    return key
 
 @micropython.viper
-def _validate_ascii(buf:ptr8, buflen:int, deny_flags:int) -> int:
-    # Returns 1 if valid, 0 if rejected. Always rejects ctrl chars and
-    # bytes >= 127. deny_flags bit 0 additionally rejects space.
-    deny_space = (deny_flags & 1)
+def _validate_ascii(buf:ptr8, buflen:int, deny_flags:int) -> bool:
     i = 0
     while i < buflen:
         b = buf[i]
-        if b < 32 or b >= 127:
-            return 0
-        if b == 32 and deny_space:
-            return 0
+        if b < 32 or b >= 127 or (b == 32 and deny_flags):
+            return False
         i += 1
-    return 1
+    return True
 
-def _encode_and_validate(b, charset, deny_flags):
-    if isinstance(b, (bytes, bytearray)):
-        pass
-    elif isinstance(b, str):
-        b = b.encode(charset)
-    else:
-        raise TypeError("must be bytes-like")
-    if _validate_ascii(b, len(b), deny_flags) == 0:
+def _encode_and_validate(val, force_bytes, deny_flags):
+    if isinstance(val, str):
+        val = val.encode(_ENCODE_HEAD)
+    if not _validate_ascii(val, len(val), deny_flags):
         raise ValueError("can't contain special characters")
-    return b
+    if force_bytes and not isinstance(val, bytes):
+        val = bytes(val)
+    return val
 
 def create_connection(address, timeout=None):
     host, port = address
@@ -105,27 +110,11 @@ def create_connection(address, timeout=None):
                 raise e
     raise OSError(errno.EHOSTUNREACH)
 
-def _normalize_key(key):
-    # Strip surrounding whitespace, lowercase, return immutable bytes.
-    if isinstance(key, str):
-        key = key.encode(_ENCODE_HEAD)
-    len_key = len(key)
-    if len_key and (key[0] <= 32 or key[-1] <= 32):
-        key = key.strip()
-        len_key = len(key)
-    if not _lower(key, len_key, False):
-        if not isinstance(key, bytearray):
-            key = bytearray(key)
-        _lower(key, len_key, True)
-    if not isinstance(key, bytes):
-        key = bytes(key)
-    return key
-
 def parse_headers(sock, *, extra_headers=True):
     # Returns [(lowercase_key_bytes, value_bytes), ...]. extra_headers:
     #   None       -> skip all headers
-    #   Falsy      -> keep _IMPORTANT_HEADERS only
     #   True       -> keep all headers
+    #   Falsy      -> keep _IMPORTANT_HEADERS only
     #   container  -> keep _IMPORTANT_HEADERS plus those in container
     headers = []
     while True:
@@ -137,11 +126,11 @@ def parse_headers(sock, *, extra_headers=True):
         # Folded continuations (RFC 7230 deprecated) are dropped, not appended.
         if line[0] <= 32:
             continue
-        sep = line.find(b':')
+        sep = line.find(b":")
         if sep == -1:
             continue
         key, val = line[:sep], line[sep+1:]
-        key = _normalize_key(key)
+        key = _normalize_key(key, True)
         if extra_headers is True or (extra_headers and key in extra_headers) or key in _IMPORTANT_HEADERS:
             headers.append((key, val.strip()))
 
@@ -224,7 +213,7 @@ class HTTPResponse:
             if not line:
                 # Half-closed keep-alive between requests; caller may retry.
                 raise RemoteDisconnected()
-            if not line.startswith(b"HTTP/") or not line.endswith(b'\n'):
+            if not line.startswith(b"HTTP/") or not line.endswith(b"\n"):
                 raise BadStatusLine()
 
             line = line.split(None, 2)
@@ -340,7 +329,7 @@ class HTTPResponse:
                 line = self._sock.readline()
                 if not line:
                     self.close(True)
-                sep = line.find(b';')
+                sep = line.find(b";")
                 if sep >= 0:
                     line = line[:sep]
                 try:
@@ -509,7 +498,7 @@ class HTTPResponse:
     def getheaderbytes(self, key, default=None):
         if self.headers is None:
             raise ResponseNotReady()
-        key = _normalize_key(key)
+        key = _normalize_key(key, False)
         matches = [v for k, v in self.headers if k == key]
         if not matches:
             return default
@@ -541,20 +530,20 @@ class HTTPResponse:
     # Yields fresh bytes or memoryview chunks of up to chunk_size each.
     def iter_content(self, chunk_size=1024, return_memoryview=False):
         chunk_size = int(chunk_size)
-        if chunk_size <= 0:
-            raise ValueError("chunk_size must be > 0")
         if self.length is not None:
             remaining = self.length - self._bytes_read
             if remaining <= 0:
                 return
             if chunk_size > remaining:
                 chunk_size = remaining
+        if chunk_size <= 0:
+            raise ValueError("invalid chunk_size")
         buf = bytearray(chunk_size)
         bmv = memoryview(buf)
         while True:
             n = self._readinto(bmv)
             if n <= 0:
-                break
+                return
             if n == chunk_size:
                 yield bmv if return_memoryview else bytes(buf)
             else:
@@ -585,10 +574,9 @@ class HTTPConnection:
         self.close()
         return False
 
-    def __init__(self, host, port=None, timeout=None, source_address=None, blocksize=1024):
+    def __init__(self, host, port=None, timeout=None):
         self.host, self.port = self._parse_host_port(host, port)
         self.timeout = timeout
-        self.blocksize = blocksize
         self.sock = None
         self.__response = None
         self._can_reconnect = False
@@ -622,18 +610,18 @@ class HTTPConnection:
 
     def _parse_host_port(self, host, port):
         parsed_port = None
-        if host.startswith('['):
-            close = host.rfind(']')
+        if host.startswith("["):
+            close = host.rfind("]")
             if close == -1:
                 raise ValueError("invalid host")
             host, rest = host[1:close], host[close+1:]
-            if rest.startswith(':'):
+            if rest.startswith(":"):
                 if len(rest) > 1:
                     parsed_port = rest[1:]
             elif rest:
                 raise ValueError("invalid host")
-        elif host.count(':') == 1:
-            host, parsed_port = host.rsplit(':', 1)
+        elif host.count(":") == 1:
+            host, parsed_port = host.rsplit(":", 1)
         if port is None:
             port = parsed_port
         if not host:
@@ -663,7 +651,7 @@ class HTTPConnection:
             if not isinstance(headers, (list, tuple)):
                 headers = list(headers)
             for key, val in headers:
-                key = _normalize_key(key)
+                key = _normalize_key(key, False)
                 if key == b"accept-encoding":
                     have_accept_encoding = True
                 elif key == b"content-length":
@@ -706,25 +694,25 @@ class HTTPConnection:
         self._can_reconnect = self.auto_open
         self._filled = 0
 
-        self._method = _encode_and_validate(method, "ascii", 1)
+        self._method = _encode_and_validate(method, True, 1)
         if self._method != b"GET":
             self._method = self._method.upper()
 
         if url is not None:
-            self._url = _encode_and_validate(url, _ENCODE_HEAD, 1) or b"/"
+            self._url = _encode_and_validate(url, True, 1) or b"/"
         else:
             self._url = b"/"
 
         self._putheaderparts(False, self._method, b" ", self._url, b" HTTP/1.1\r\n")
 
         if not skip_host:
-            host_bytes = self.host.encode(_ENCODE_HEAD)
-            if b':' in host_bytes and not host_bytes.startswith(b'['):
-                host_bytes = b"[" + host_bytes + b"]"
+            host = self.host.encode(_ENCODE_HEAD)
+            if b":" in host and not host.startswith(b"["):
+                host = b"[" + host + b"]"
             if self.port == self.default_port:
-                self.putheader(b"Host", host_bytes)
+                self.putheader(b"Host", host)
             else:
-                self.putheader(b"Host", b"%s:%d" % (host_bytes, self.port))
+                self.putheader(b"Host", b"%s:%d" % (host, self.port))
         if not skip_accept_encoding:
             self._putheaderparts(False, b"Accept-Encoding: identity\r\n")
 
@@ -733,27 +721,27 @@ class HTTPConnection:
             raise CannotSendHeader()
         if isinstance(header, str):
             header = header.encode(_ENCODE_HEAD)
-        self._putheaderparts(False, header, b": ", _encode_and_validate(value, _ENCODE_HEAD, 0), _CRLF)
+        self._putheaderparts(False, header, b": ", _encode_and_validate(value, False, 0), _CRLF)
 
     def _putheaderparts(self, last, *parts):
         # Coalesces small writes into a single sendall. last=True flushes.
-        if self._buffmv is None:
-            self._send_raw(_BLANK.join(parts))
-        else:
-            for part in parts:
-                len_part = len(part)
-                if len_part >= self._header_buffer_size:
-                    if self._filled:
-                        self._send_raw(self._buffmv[:self._filled])
-                        self._filled = 0
-                    self._send_raw(part)
-                elif self._filled + len_part <= self._header_buffer_size:
-                    self._buffmv[self._filled:self._filled+len_part] = part
-                    self._filled += len_part
-                else:
+        for part in parts:
+            if self._buffmv is None:
+                self._send_raw(part)
+                continue
+            len_part = len(part)
+            if len_part >= self._header_buffer_size:
+                if self._filled:
                     self._send_raw(self._buffmv[:self._filled])
-                    self._buffmv[:len_part] = part
-                    self._filled = len_part
+                    self._filled = 0
+                self._send_raw(part)
+            elif self._filled + len_part <= self._header_buffer_size:
+                self._buffmv[self._filled:self._filled+len_part] = part
+                self._filled += len_part
+            else:
+                self._send_raw(self._buffmv[:self._filled])
+                self._buffmv[:len_part] = part
+                self._filled = len_part
 
         if last and self._filled:
             self._send_raw(self._buffmv[:self._filled])
@@ -906,7 +894,7 @@ else:
             raw = self.sock
             try:
                 # SNI is omitted for IP literals (per RFC 6066).
-                omit_sni = ':' in self.host or all(c.isdigit() or c == '.' for c in self.host)
+                omit_sni = ":" in self.host or all(c.isdigit() or c == "." for c in self.host)
                 self.sock = self._context.wrap_socket(raw, server_hostname=None if omit_sni else self.host)
             except Exception:
                 self.sock = None
