@@ -527,6 +527,9 @@ class HTTPResponse:
                 return v
         return default
 
+    def getcookies(self):
+        return [v.decode(_DECODE_HEAD) for v in self.getcookiesbytes()]
+
     def getcookiesbytes(self):
         if self.headers is None:
             raise ResponseNotReady()
@@ -770,8 +773,10 @@ class HTTPConnection:
                     self._auto_open = False
                     return
             except OSError:
-                try: self.sock.close()
-                except Exception: pass
+                try:
+                    self.sock.close()
+                except Exception:
+                    pass
                 self.sock = None
             try:
                 self.connect()
