@@ -857,7 +857,7 @@ class HTTPConnection:
             else:
                 self.__response = response
             return response
-        except Exception as e:
+        except Exception:
             # The response owns the socket on this path -- close through it so
             # we don't double-close. Don't use close(True): it would raise
             # IncompleteRead and mask the original BadStatusLine/etc.
@@ -865,8 +865,6 @@ class HTTPConnection:
             # successful header parse, so begin()-raises always mean we close.
             self.sock = None
             self.__response = None
-            if not isinstance(e, OSError):
-                response._tainted = True
             response.close()
             raise
 
