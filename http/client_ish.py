@@ -182,11 +182,11 @@ class HTTPResponse:
             for key, val in self.headers:
                 print("header:", repr(key), "=", repr(val))
 
-        transfer_encoding = self._getheader_bytes(b"transfer-encoding", b"")
+        transfer_encoding = self._getheaderbytes(b"transfer-encoding", b"")
         self.chunked = (b"chunked" in transfer_encoding.lower())
         self.chunk_left = None
 
-        conn = self._getheader_bytes(b"connection", b"").lower()
+        conn = self._getheaderbytes(b"connection", b"").lower()
         if self.version == 10:
             self.will_close = b"keep-alive" not in conn
         else:
@@ -194,7 +194,7 @@ class HTTPResponse:
 
         # Content-Length is ignored when chunked (RFC 7230 S3.3.3).
         self.length = None
-        length = self._getheader_bytes(b"content-length", None)
+        length = self._getheaderbytes(b"content-length", None)
         if length and not self.chunked:
             try:
                 self.length = int(length, 10)
@@ -504,12 +504,12 @@ class HTTPResponse:
         return [(k.decode(_DECODE_HEAD), v.decode(_DECODE_HEAD)) for k, v in self.headers]
 
     def getheader(self, key, default=None):
-        val = self.getheader_bytes(key)
+        val = self.getheaderbytes(key)
         if val is not None:
             return val.decode(_DECODE_HEAD)
         return default
 
-    def getheader_bytes(self, key, default=None):
+    def getheaderbytes(self, key, default=None):
         if self.headers is None:
             raise ResponseNotReady()
         key = _normalize_key(key)
@@ -520,14 +520,14 @@ class HTTPResponse:
             return matches[0]
         return b", ".join(matches)
 
-    def _getheader_bytes(self, key, default=None):
+    def _getheaderbytes(self, key, default=None):
         # First-match fast path; assumes key already normalized.
         for k, v in self.headers:
             if k == key:
                 return v
         return default
 
-    def getcookies_bytes(self):
+    def getcookiesbytes(self):
         if self.headers is None:
             raise ResponseNotReady()
         return [v for k, v in self.headers if k == b"set-cookie"]
