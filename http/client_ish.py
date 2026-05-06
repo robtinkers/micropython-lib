@@ -123,14 +123,17 @@ def _normalize_key(key):
 
 def parse_headers(sock, *, extra_headers=True):
     # Returns [(lowercase_key_bytes, value_bytes), ...]. extra_headers:
+    #   None       -> skip all headers
+    #   Falsy      -> keep _IMPORTANT_HEADERS only
     #   True       -> keep all headers
-    #   False/None -> keep only _IMPORTANT_HEADERS
     #   container  -> keep _IMPORTANT_HEADERS plus those in container
     headers = []
     while True:
         line = sock.readline()
         if not line or line == _CRLF or line == b"\n":
             return headers
+        if extra_headers is None:
+            continue
         # Folded continuations (RFC 7230 deprecated) are dropped, not appended.
         if line[0] <= 32:
             continue
@@ -500,7 +503,7 @@ class HTTPResponse:
             try:
                 return val.decode(_DECODE_HEAD)
             except UnicodeError:
-                return default
+                pass
         return default
 
     def getheaderbytes(self, key, default=None):
