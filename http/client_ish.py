@@ -498,17 +498,6 @@ class HTTPResponse:
         else:
             return chunk
 
-    def getheaders(self):
-        if self.headers is None:
-            raise ResponseNotReady()
-        out = []
-        for k, v in self.headers:
-            try:
-                out.append((k.decode(_DECODE_HEAD), v.decode(_DECODE_HEAD)))
-            except UnicodeError:
-                pass
-        return out
-
     def getheader(self, key, default=None):
         val = self.getheaderbytes(key)
         if val is not None:
