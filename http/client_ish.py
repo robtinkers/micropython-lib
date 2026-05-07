@@ -293,6 +293,8 @@ class HTTPResponse:
             return _BLANK
         buf = bytearray(amt)
         nread = self.readinto(buf)
+        if nread <= 0:
+            return _BLANK
         if nread < amt:
             del buf[nread:]
         return buf
@@ -304,13 +306,12 @@ class HTTPResponse:
             bmv = memoryview(buf)
             while True:
                 nread = self._readinto_chunked(bmv)
-                if nread == 0:
-                    break
+                if nread <= 0:
+                    return out
                 if nread == self.blocksize:
                     out.extend(buf)
                 else:
                     out.extend(bmv[:nread])
-            return out
         if self.length is not None:
             amt = self.length - self._bytes_read
             if amt == 0:
@@ -359,6 +360,7 @@ class HTTPResponse:
                 nread = self._sock.readinto(bmv[total:total + amt])
             if nread <= 0:
                 self.close(True)
+                return total
             self._bytes_read += nread
             self.chunk_left -= nread
             total += nread
@@ -422,9 +424,7 @@ class HTTPResponse:
         else:
             nread = self._sock.readinto(bmv[:amt])
         if nread <= 0:
-            if self.length is not None:
-                self.close(True)
-            self.close()
+            self.close(self.length is not None)
             return 0
         self._bytes_read += nread
         if self.length is not None and self._bytes_read >= self.length:
@@ -690,7 +690,7 @@ class HTTPConnection:
     def _send_raw(self, data):
         # On the first send of a request, transparently (re)connect if a
         # kept-alive socket has died. Subsequent sends require an open socket.
-        if data is None:
+        if not data:
             return
 
         if self._can_reconnect:
@@ -724,7 +724,9 @@ class HTTPConnection:
             self._send_raw(b"0\r\n\r\n")
             return
         len_data = len(data)
-        if len_data <= self._inline_chunk_size:
+        if len_data == 0:
+            self._send_raw(_BLANK)
+        elif len_data <= self._inline_chunk_size:
             self._send_raw(b"%X\r\n%s\r\n" % (len_data, data))
         else:
             self._send_raw(b"%X\r\n" % len_data)
@@ -745,8 +747,7 @@ class HTTPConnection:
         elif isinstance(data, (bytes, bytearray, memoryview)):
             if self.debuglevel > 0:
                 print("send:", type(data).__name__, len(data))
-            if data:
-                send(data)
+            send(data)
 
         else:
             if self.debuglevel > 0:
@@ -754,7 +755,7 @@ class HTTPConnection:
             for d in data:
                 if isinstance(d, str):
                     d = d.encode(_ENCODE_BODY)
-                if d:
+                if d is not None:
                     send(d)
 
         if encode_chunked and final_chunk:
