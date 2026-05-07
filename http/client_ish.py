@@ -55,10 +55,12 @@ def _lower(buf:ptr8, buflen:int, inplace:int) -> int:
 def _normalize_key(key, force_bytes):
     if isinstance(key, str):
         key = key.encode(_ENCODE_HEAD)
-    elif not isinstance(key, (bytes, bytearray)):
+    elif not isinstance(key, (bytes, bytearray, memoryview)):
         key = str(key).encode(_ENCODE_HEAD)
     len_key = len(key)
     if len_key and (key[0] <= 32 or key[-1] <= 32):
+        if isinstance(key, memoryview):
+            key = bytes(key)
         key = key.strip()
         len_key = len(key)
     if not _lower(key, len_key, False):
@@ -649,8 +651,8 @@ class HTTPConnection:
             header = header.encode(_ENCODE_HEAD)
         self._putheaderparts(False, header, b": ", _encode_and_validate(value, False, 0), _CRLF)
 
-    def _putheaderparts(self, last, *parts):
-        # Coalesces small writes into a single sendall. last=True flushes.
+    def _putheaderparts(self, flush, *parts):
+        # Coalesces small writes into a single sendall.
         for part in parts:
             if self._header_buffmv is None:
                 self._send_raw(part)
@@ -669,7 +671,7 @@ class HTTPConnection:
                 self._header_buffmv[:len_part] = part
                 self._filled = len_part
 
-        if last and self._filled:
+        if flush and self._filled:
             self._send_raw(self._header_buffmv[:self._filled])
             self._filled = 0
 
