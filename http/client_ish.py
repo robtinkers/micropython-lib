@@ -557,7 +557,7 @@ class HTTPConnection:
             port = parsed_port
         if not host:
             raise ValueError("invalid host")
-        if not port:
+        if port is None or port == "":
             port = self.default_port
         if isinstance(port, str):
             try:
