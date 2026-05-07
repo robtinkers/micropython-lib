@@ -21,13 +21,13 @@ _IMPORTANT_HEADERS = frozenset((
 
 _METHODS_EXPECTING_BODY = frozenset((b"PATCH", b"POST", b"PUT"))
 
-_ENCODE_HEAD = const("utf-8")
-_DECODE_HEAD = const("utf-8")
-_ENCODE_BODY = const("utf-8")
-_DECODE_BODY = const("utf-8")
+_ENCODE_HEAD = b"utf-8"
+_DECODE_HEAD = b"utf-8"
+_ENCODE_BODY = b"utf-8"
+_DECODE_BODY = b"utf-8"
 
-_BLANK = const(b"")
-_CRLF = const(b"\r\n")
+_BLANK = b""
+_CRLF = b"\r\n"
 
 class HTTPException(Exception): pass
 class NotConnected(HTTPException): pass
@@ -764,7 +764,6 @@ class HTTPConnection:
         if self.__response is not None and not self.__response.isclosed():
             raise ResponseNotReady()
         self.__response = None
-
         response = None
         try:
             response = self.response_class(self._sock, self.debuglevel, self._method, self._url)
@@ -772,23 +771,20 @@ class HTTPConnection:
             if response.will_close:
                 # Response owns the socket from here.
                 self._sock = None
-                self.__response = None
             else:
                 self.__response = response
-            gc.collect()
             return response
         except Exception:
             sock = self._sock
             self._sock = None
-            self.__response = None
             if response is not None:
                 response.close()
-                response = None
-            elif sock is not None:
+            if sock is not None:
                 try: sock.close()
                 except OSError: pass
-            gc.collect()
             raise
+        finally:
+            gc.collect()
 
     def detach(self):
         if self.__response is not None:
