@@ -55,8 +55,12 @@ def _lower(buf:ptr8, buflen:int, inplace:int) -> int:
 def _normalize_key(key, force_bytes):
     if isinstance(key, str):
         key = key.encode(_ENCODE_HEAD)
+    elif not isinstance(key, (bytes, bytearray, memoryview)):
+        key = str(key).encode(_ENCODE_HEAD)
     len_key = len(key)
     if len_key and (key[0] <= 32 or key[-1] <= 32):
+        if isinstance(key, memoryview):
+            key = bytes(key)
         key = key.strip()
         len_key = len(key)
     if not _lower(key, len_key, False):
@@ -78,10 +82,10 @@ def _validate_ascii(buf:ptr8, buflen:int, deny_flags:int) -> int:
     return 1
 
 def _encode_and_validate(val, force_bytes, deny_flags):
-    if isinstance(val, int):
-        val = str(val)
     if isinstance(val, str):
         val = val.encode(_ENCODE_HEAD)
+    elif not isinstance(val, (bytes, bytearray, memoryview)):
+        val = str(val).encode(_ENCODE_HEAD)
     if not _validate_ascii(val, len(val), deny_flags):
         raise ValueError("can't contain special characters")
     if force_bytes and not isinstance(val, bytes):
