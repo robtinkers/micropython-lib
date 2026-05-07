@@ -21,10 +21,10 @@ _IMPORTANT_HEADERS = frozenset((
 
 _METHODS_EXPECTING_BODY = frozenset((b"PATCH", b"POST", b"PUT"))
 
-_ENCODE_HEAD = b"utf-8"
-_DECODE_HEAD = b"utf-8"
-_ENCODE_BODY = b"utf-8"
-_DECODE_BODY = b"utf-8"
+_ENCODE_HEAD = "utf-8"
+_DECODE_HEAD = "utf-8"
+_ENCODE_BODY = "utf-8"
+_DECODE_BODY = "utf-8"
 
 _BLANK = b""
 _CRLF = b"\r\n"
