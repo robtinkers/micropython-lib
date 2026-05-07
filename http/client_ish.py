@@ -757,8 +757,9 @@ class HTTPConnection:
             raise ResponseNotReady()
         self.__response = None
 
-        response = self.response_class(self._sock, self.debuglevel, self._method, self._url)
+        response = None
         try:
+            response = self.response_class(self._sock, self.debuglevel, self._method, self._url)
             response.begin(**kwargs)
             if response.will_close:
                 # The response owns the socket now and will close it.
@@ -776,7 +777,9 @@ class HTTPConnection:
             # successful header parse, so begin()-raises always mean we close.
             self._sock = None
             self.__response = None
-            response.close()
+            if response is not None:
+                response.close()
+            del response
             gc.collect()
             raise
 
