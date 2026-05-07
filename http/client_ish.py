@@ -22,10 +22,10 @@ _IMPORTANT_HEADERS = frozenset((
 _METHODS_EXPECTING_BODY = frozenset((b"PATCH", b"POST", b"PUT"))
 
 # MicroPython lacks iso-8859-1; use utf-8 throughout.
-_DECODE_HEAD = const("utf-8")
 _ENCODE_HEAD = const("utf-8")
-_DECODE_BODY = const("utf-8")
+_DECODE_HEAD = const("utf-8")
 _ENCODE_BODY = const("utf-8")
+_DECODE_BODY = const("utf-8")
 
 _BLANK = const(b"")
 _CRLF = const(b"\r\n")
