@@ -286,8 +286,8 @@ class HTTPResponse:
             return self._read_all()
         if self.length is not None:
             amt = min(amt, self.length - self._bytes_read)
-        if amt < 0:
-            self.close(True)
+#        if amt < 0:
+#            self.close(True)
         if amt == 0:
             return _BLANK
         buf = bytearray(amt)
@@ -311,8 +311,8 @@ class HTTPResponse:
             return out
         if self.length is not None:
             amt = self.length - self._bytes_read
-            if amt < 0:
-                self.close(True)
+#            if amt < 0:
+#                self.close(True)
             if amt == 0:
                 self.close()
                 return _BLANK
@@ -352,17 +352,17 @@ class HTTPResponse:
             if avail == 0:
                 break
 
-            to_read = min(avail, buflen - total)
-            if to_read < 0:
-                self.close(True)
-            if to_read == 0:
+            amt = min(avail, buflen - total)
+#            if amt < 0:
+#                self.close(True)
+            if amt == 0:
                 self.close()
                 return total
 
-            if to_read == buflen and total == 0:
+            if amt == buflen and total == 0:
                 nread = self._sock.readinto(buf)
             else:
-                nread = self._sock.readinto(bmv[total:total + to_read])
+                nread = self._sock.readinto(bmv[total:total + amt])
             if nread <= 0:
                 self.close(True)
             self._bytes_read += nread
@@ -416,19 +416,19 @@ class HTTPResponse:
             return 0
 
         if self.length is None:
-            to_read = buflen
+            amt = buflen
         else:
-            to_read = min(buflen, self.length - self._bytes_read)
-            if to_read < 0:
-                self.close(True)
-            if to_read == 0:
+            amt = min(buflen, self.length - self._bytes_read)
+#            if amt < 0:
+#                self.close(True)
+            if amt == 0:
                 self.close()
                 return 0
 
-        if to_read == buflen:
+        if amt == buflen:
             nread = self._sock.readinto(buf)
         else:
-            nread = self._sock.readinto(bmv[:to_read])
+            nread = self._sock.readinto(bmv[:amt])
         if nread <= 0:
             self.close(True)
         self._bytes_read += nread
