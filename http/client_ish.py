@@ -619,19 +619,19 @@ class HTTPConnection:
 
         self._can_reconnect = self.auto_open
         self._filled = 0
-        self._method = None
-        self._url = None
 
-        self._method = _encode_and_validate(method, True, 1)
-        if self._method != b"GET":
-            self._method = self._method.upper()
+        method = _encode_and_validate(method, True, 1)
+        if method != b"GET":
+            method = method.upper()
 
         if url is not None:
-            self._url = _encode_and_validate(url, True, 1) or b"/"
+            url = _encode_and_validate(url, True, 1) or b"/"
         else:
-            self._url = b"/"
+            url = b"/"
 
-        self._putheaderparts(False, self._method, b" ", self._url, b" HTTP/1.1\r\n")
+        self._putheaderparts(False, method, b" ", url, b" HTTP/1.1\r\n")
+        self._method = method
+        self._url = url
 
         if not skip_host:
             host = self.host.encode(_ENCODE_HEAD)
