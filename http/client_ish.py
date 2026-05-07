@@ -41,7 +41,7 @@ class ResponseNotReady(ImproperConnectionState): pass
 class IncompleteRead(HTTPException): pass
 
 @micropython.viper
-def _lower(buf:ptr8, buflen:int, inplace:bool) -> int:
+def _lower(buf:ptr8, buflen:int, inplace:int) -> int:
     i = 0
     while i < buflen:
         b = buf[i]
@@ -78,6 +78,8 @@ def _validate_ascii(buf:ptr8, buflen:int, deny_flags:int) -> int:
     return 1
 
 def _encode_and_validate(val, force_bytes, deny_flags):
+    if isinstance(val, int):
+        val = str(val)
     if isinstance(val, str):
         val = val.encode(_ENCODE_HEAD)
     if not _validate_ascii(val, len(val), deny_flags):
@@ -231,9 +233,9 @@ class HTTPResponse:
             if not (100 <= status <= 999):
                 raise BadStatusLine()
 
-            if status != 100:
+            if not (100 <= status <= 199) or status == 101:
                 break
-            # Skip 100 Continue's header block and re-read the real status.
+            # Skip 1xx informational header block and re-read the real status.
             while True:
                 line = self._sock.readline()
                 if not line or line == _CRLF or line == b"\n":
