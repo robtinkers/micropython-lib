@@ -102,10 +102,8 @@ def create_connection(address, timeout=None):
             return sock
         except Exception as e:
             if sock is not None:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
+                try: sock.close()
+                except OSError: pass
             if not isinstance(e, OSError):
                 raise e
     raise OSError(errno.EHOSTUNREACH)
@@ -219,7 +217,7 @@ class HTTPResponse:
 
             line = line.split(None, 2)
             if len(line) == 3:
-                version, status, reason = line
+                version, status, reason = line  # application should use reason.rstrip()
             elif len(line) == 2:
                 version, status = line
                 reason = _BLANK
@@ -268,10 +266,8 @@ class HTTPResponse:
             # Close the socket if we can't safely reuse it; otherwise leave it
             # open for HTTPConnection to keep-alive.
             if self._tainted or framing_incomplete or self.will_close:
-                try:
-                    sock.close()
-                except OSError:
-                    pass
+                try: sock.close()
+                except OSError: pass
         if tainted:
             raise IncompleteRead(self._bytes_read, self.length)
 
@@ -284,16 +280,13 @@ class HTTPResponse:
         amt = int(amt)
         if amt < 0:
             return self._read_all()
-        if amt == 0:
-            self.close()
-            return _BLANK
         if self.length is not None:
             amt = min(amt, self.length - self._bytes_read)
         if amt == 0:
             return _BLANK
         buf = bytearray(amt)
         nread = self.readinto(buf)
-        if nread <= 0:
+        if nread == 0:
             return _BLANK
         if nread < amt:
             del buf[nread:]
@@ -306,7 +299,7 @@ class HTTPResponse:
             bmv = memoryview(buf)
             while True:
                 nread = self._readinto_chunked(bmv)
-                if nread <= 0:
+                if nread == 0:
                     return out
                 if nread == self.blocksize:
                     out.extend(buf)
@@ -319,7 +312,7 @@ class HTTPResponse:
                 return _BLANK
             buf = bytearray(amt)
             nread = self._readinto_raw(buf)
-            if nread <= 0:
+            if nread == 0:
                 self.close(True)
             if nread < amt:
                 del buf[nread:]
@@ -358,7 +351,7 @@ class HTTPResponse:
                 nread = self._sock.readinto(buf)
             else:
                 nread = self._sock.readinto(bmv[total:total + amt])
-            if nread <= 0:
+            if nread == 0:
                 self.close(True)
                 return total
             self._bytes_read += nread
@@ -423,7 +416,7 @@ class HTTPResponse:
             nread = self._sock.readinto(buf)
         else:
             nread = self._sock.readinto(bmv[:amt])
-        if nread <= 0:
+        if nread == 0:
             self.close(self.length is not None)
             return 0
         self._bytes_read += nread
@@ -477,7 +470,7 @@ class HTTPResponse:
         bmv = memoryview(buf)
         for n in self.iter_content_into(bmv):
             if n == blocksize:
-                yield buf
+                yield bytes(buf)
             else:
                 yield bytes(bmv[:n])
 
@@ -531,10 +524,8 @@ class HTTPConnection:
         sock = self._sock
         self._sock = None
         if sock is not None:
-            try:
-                sock.close()
-            except OSError:
-                pass
+            try: sock.close()
+            except OSError: pass
         response = self.__response
         self.__response = None
         if response is not None:
@@ -694,16 +685,14 @@ class HTTPConnection:
             return
 
         if self._can_reconnect:
-            try:
-                if self._sock is not None:
+            if self._sock is not None:
+                try:
                     self._sock.sendall(data)
                     self._can_reconnect = False
                     return
-            except OSError:
-                try:
-                    self._sock.close()
-                except Exception:
-                    pass
+                except OSError:
+                    try: self._sock.close()
+                    except OSError: pass
                 self._sock = None
             try:
                 self.connect()
@@ -726,7 +715,7 @@ class HTTPConnection:
         len_data = len(data)
         if len_data == 0:
             self._send_raw(_BLANK)
-        elif len_data <= self._inline_chunk_size:
+        elif len_data <= self._inline_chunk_size and isinstance(data, bytes):
             self._send_raw(b"%X\r\n%s\r\n" % (len_data, data))
         else:
             self._send_raw(b"%X\r\n" % len_data)
@@ -829,9 +818,10 @@ else:
                 omit_sni = ":" in self.host or all(c.isdigit() or c == "." for c in self.host)
                 gc.collect()
                 self._sock = self._context.wrap_socket(raw, server_hostname=None if omit_sni else self.host)
-            except Exception:
+            except OSError as e:
                 self._sock = None
                 try:
                     raw.close()
                 except OSError:
                     pass
+                raise e
