@@ -289,7 +289,6 @@ class HTTPResponse:
         if amt < 0:
             self.close(True)
         if amt == 0:
-            self.close()
             return _BLANK
         buf = bytearray(amt)
         nread = self.readinto(buf)
