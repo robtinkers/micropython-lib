@@ -278,60 +278,82 @@ class HTTPResponse:
     def isclosed(self):
         return self._sock is None
 
-    def readinto(self, buf):
-        if isinstance(buf, memoryview):
-            return self._readinto(buf)
-        else:
-            return self._readinto(memoryview(buf))
-
-    def _readinto(self, bmv):
-        if len(bmv) == 0:
-            return 0
-        if self.chunked:
-            return self._read_chunked(bmv)
-        else:
-            return self._read_raw(bmv)
-
     def read(self, amt=None):
-        if amt == 0:
-            return _BLANK
         if amt is None:
             return self._read_all()
         amt = int(amt)
         if amt < 0:
             return self._read_all()
+        if amt == 0:
+            return _BLANK
+        if self.length is not None:
+            amt = max(0, min(amt, self.length - self._bytes_read))
         buf = bytearray(amt)
-        n = self._readinto(memoryview(buf))
-        return (bytes(buf) if n == amt else bytes(memoryview(buf)[:n]))
+        nread = self.readinto(buf)
+        if nread < amt:
+            del buf[nread:]
+        return buf
 
     def _read_all(self):
         if self.chunked:
             out = bytearray()
             buf = bytearray(self.blocksize)
             bmv = memoryview(buf)
-            while not self.isclosed():
-                n = self._read_chunked(bmv)
-                if n <= 0:
+            while True:
+                nread = self._readinto_chunked(bmv)
+                if nread == 0:
                     break
-                out.extend(bmv[:n])
+                out.extend(bmv[:nread])
             return out  # bytearray()
         if self.length is not None:
-            remaining = self.length - self._bytes_read
-            if remaining <= 0:
+            amt = self.length - self._bytes_read
+            if amt <= 0:
                 self.close()
                 return _BLANK
-            buf = bytearray(remaining)
-            n = self._read_raw(memoryview(buf))
-            if n == remaining:
-                return buf  # bytearray()
-            return bytes(memoryview(buf)[:n])
-        # Not chunked, no CL: read until socket close.
+            buf = bytearray(amt)
+            nread = self._readinto_raw(buf)
+            if nread < amt:
+                del buf[nread:]
+            return buf  # bytearray()
         if not self.isclosed():
-            chunk = self._sock.read()
-            self._bytes_read += len(chunk)
+            buf = self._sock.read()
             self.close()
-            return chunk
+            if buf is not None:
+                self._bytes_read += len(buf)
+                return buf
         return _BLANK
+
+    def readinto(self, buf):
+        if self.chunked:
+            return self._readinto_chunked(buf)
+        else:
+            return self._readinto_raw(buf)
+
+    def _readinto_chunked(self, buf):
+        if isinstance(buf, memoryview):
+            bmv = buf
+        else:
+            bmv = memoryview(buf)
+        buflen = len(bmv)
+
+        total = 0
+        while total < buflen:
+            if self.isclosed():
+                break
+            avail = self._next_chunk()
+            if avail == 0:
+                break
+            to_read = min(avail, buflen - total)
+            if total == 0 and to_read == buflen:
+                nread = self._sock.readinto(buf)
+            else:
+                nread = self._sock.readinto(bmv[total:total + to_read])
+            if nread <= 0:
+                self.close(True)
+            self._bytes_read += nread
+            total += nread
+            self.chunk_left -= nread
+        return total
 
     def _next_chunk(self):
         # Advances the chunk state machine. Returns the number of bytes
@@ -348,7 +370,7 @@ class HTTPResponse:
                 try:
                     size = int(line, 16)
                 except ValueError:
-                    self.close(True)
+                    size = -1
                 if size < 0:
                     self.close(True)
                 self.chunk_left = size
@@ -369,50 +391,34 @@ class HTTPResponse:
             else:
                 return self.chunk_left
 
-    def _read_chunked(self, bmv):
-        total = 0
-        cap = len(bmv)
-        while total < cap:
-            if self.isclosed():
-                break
-            avail = self._next_chunk()
-            if avail == 0:
-                break
-            space = cap - total
-            to_read = avail if avail < space else space
-            # Avoid allocating a memoryview slice when filling from the start.
-            if total == 0 and to_read == cap:
-                nread = self._sock.readinto(bmv, to_read)
-            else:
-                nread = self._sock.readinto(bmv[total:total + to_read])
-            if not nread:
-                self.close(True)
-            self._bytes_read += nread
-            total += nread
-            self.chunk_left -= nread
-        return total
-
-    def _read_raw(self, bmv):
-        if self.isclosed():
-            return 0
-        cap = len(bmv)
-        if self.length is None:
-            to_read = cap
+    def _readinto_raw(self, buf):
+        if isinstance(buf, memoryview):
+            bmv = buf
         else:
-            remaining = self.length - self._bytes_read
-            if remaining <= 0:
+            bmv = memoryview(buf)
+        buflen = len(bmv)
+        if buflen == 0 or self.isclosed():
+            return 0
+
+        if self.length is None:
+            to_read = buflen
+        else:
+            to_read = min(buflen, self.length - self._bytes_read)
+            if to_read <= 0:
                 self.close()
                 return 0
-            to_read = remaining if remaining < cap else cap
-        if to_read == cap:
-            nread = self._sock.readinto(bmv, to_read)
+
+        if to_read == buflen:
+            nread = self._sock.readinto(buf)
         else:
             nread = self._sock.readinto(bmv[:to_read])
-        if not nread:
+
+        if nread <= 0:
             if self.length is not None and self._bytes_read < self.length:
                 self.close(True)
             self.close()
             return 0
+
         self._bytes_read += nread
         if self.length is not None and self._bytes_read >= self.length:
             self.close()
@@ -465,11 +471,11 @@ class HTTPResponse:
         for n in self.iter_content_into(bmv):
             yield bytes(bmv[:n])
 
-    def iter_content_into(self, bmv):
-        if not isinstance(bmv, memoryview):
-            bmv = memoryview(bmv)
+    def iter_content_into(self, buf):
+        if not isinstance(buf, memoryview):
+            buf = memoryview(buf)
         while True:
-            n = self._readinto(bmv)
+            n = self.readinto(buf)
             if n <= 0:
                 return
             yield n
@@ -820,4 +826,3 @@ else:
                     raw.close()
                 except OSError:
                     pass
-                raise
