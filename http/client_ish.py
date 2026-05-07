@@ -629,9 +629,9 @@ class HTTPConnection:
         else:
             url = b"/"
 
-        self._putheaderparts(False, method, b" ", url, b" HTTP/1.1\r\n")
         self._method = method
         self._url = url
+        self._putheaderparts(False, self._method, b" ", self._url, b" HTTP/1.1\r\n")
 
         if not skip_host:
             host = self.host.encode(_ENCODE_HEAD)
