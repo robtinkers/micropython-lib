@@ -311,7 +311,6 @@ class HTTPResponse:
         if self.length is not None:
             amt = self.length - self._bytes_read
             if amt == 0:
-                self.close()
                 return _BLANK
             buf = bytearray(amt)
             nread = self._readinto_raw(buf)
@@ -620,6 +619,8 @@ class HTTPConnection:
 
         self._can_reconnect = self.auto_open
         self._filled = 0
+        self._method = None
+        self._url = None
 
         self._method = _encode_and_validate(method, True, 1)
         if self._method != b"GET":
@@ -777,15 +778,15 @@ class HTTPConnection:
             gc.collect()
             return response
         except Exception:
-            # Response owns the socket on this path; close through it.
-            # Don't use close(True): it would mask the original exception
-            # with IncompleteRead. will_close is True from __init__ and only
-            # relaxes after a successful header parse.
+            sock = self._sock
             self._sock = None
             self.__response = None
             if response is not None:
                 response.close()
                 response = None
+            elif sock is not None:
+                try: sock.close()
+                except OSError: pass
             gc.collect()
             raise
 
