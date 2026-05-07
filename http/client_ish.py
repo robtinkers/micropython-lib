@@ -284,12 +284,17 @@ class HTTPResponse:
         amt = int(amt)
         if amt < 0:
             return self._read_all()
-        if amt == 0:
-            return _BLANK
         if self.length is not None:
-            amt = max(0, min(amt, self.length - self._bytes_read))
+            amt = min(amt, self.length - self._bytes_read)
+        if amt < 0:
+            self.close(True)
+        if amt == 0:
+            self.close()
+            return _BLANK
         buf = bytearray(amt)
         nread = self.readinto(buf)
+        if nread <= 0:
+            self.close(True)
         if nread < amt:
             del buf[nread:]
         return buf
@@ -304,17 +309,21 @@ class HTTPResponse:
                 if nread == 0:
                     break
                 out.extend(bmv[:nread])
-            return out  # bytearray()
+            return out
         if self.length is not None:
             amt = self.length - self._bytes_read
-            if amt <= 0:
+            if amt < 0:
+                self.close(True)
+            if amt == 0:
                 self.close()
                 return _BLANK
             buf = bytearray(amt)
             nread = self._readinto_raw(buf)
+            if nread <= 0:
+                self.close(True)
             if nread < amt:
                 del buf[nread:]
-            return buf  # bytearray()
+            return buf
         if not self.isclosed():
             buf = self._sock.read()
             self.close()
@@ -343,16 +352,23 @@ class HTTPResponse:
             avail = self._next_chunk()
             if avail == 0:
                 break
+
             to_read = min(avail, buflen - total)
-            if total == 0 and to_read == buflen:
+            if to_read < 0:
+                self.close(True)
+            if to_read == 0:
+                self.close()
+                return total
+
+            if to_read == buflen and total == 0:
                 nread = self._sock.readinto(buf)
             else:
                 nread = self._sock.readinto(bmv[total:total + to_read])
             if nread <= 0:
                 self.close(True)
             self._bytes_read += nread
-            total += nread
             self.chunk_left -= nread
+            total += nread
         return total
 
     def _next_chunk(self):
@@ -404,7 +420,9 @@ class HTTPResponse:
             to_read = buflen
         else:
             to_read = min(buflen, self.length - self._bytes_read)
-            if to_read <= 0:
+            if to_read < 0:
+                self.close(True)
+            if to_read == 0:
                 self.close()
                 return 0
 
@@ -412,16 +430,9 @@ class HTTPResponse:
             nread = self._sock.readinto(buf)
         else:
             nread = self._sock.readinto(bmv[:to_read])
-
         if nread <= 0:
-            if self.length is not None and self._bytes_read < self.length:
-                self.close(True)
-            self.close()
-            return 0
-
+            self.close(True)
         self._bytes_read += nread
-        if self.length is not None and self._bytes_read >= self.length:
-            self.close()
         return nread
 
     def getheader(self, key, default=None):
