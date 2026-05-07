@@ -275,13 +275,6 @@ class HTTPResponse:
         return self._sock is None
 
     def read(self, amt=None):
-        try:
-            return self._read(amt)
-        except (OSError, MemoryError):
-            gc.collect()
-            self.close(True) # raises IncompleteRead
-
-    def _read(self, amt):
         if amt is None:
             return self._read_all()
         amt = int(amt)
@@ -335,13 +328,6 @@ class HTTPResponse:
         return _BLANK
 
     def readinto(self, buf):
-        try:
-            return self._readinto(buf)
-        except (OSError, MemoryError):
-            gc.collect()
-            self.close(True) # raises IncompleteRead
-
-    def _readinto(self, buf):
         if self.chunked:
             return self._readinto_chunked(buf)
         else:
@@ -490,15 +476,11 @@ class HTTPResponse:
     def iter_content_into(self, buf):
         if not isinstance(buf, memoryview):
             buf = memoryview(buf)
-        try:
-            while True:
-                n = self._readinto(buf)
-                if n <= 0:
-                    return
-                yield n
-        except (OSError, MemoryError):
-            gc.collect()
-            self.close(True) # raises IncompleteRead
+        while True:
+            n = self.readinto(buf)
+            if n <= 0:
+                return
+            yield n
 
 class HTTPConnection:
     response_class = HTTPResponse
