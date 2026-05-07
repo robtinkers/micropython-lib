@@ -277,12 +277,10 @@ class HTTPResponse:
     def read(self, amt=None):
         try:
             return self._read(amt)
-        except OSError:
-            self.close(True) # raises IncompleteRead
-        except MemoryError:
+        except (OSError, MemoryError):
             gc.collect()
             self.close(True) # raises IncompleteRead
-        
+
     def _read(self, amt):
         if amt is None:
             return self._read_all()
@@ -339,9 +337,7 @@ class HTTPResponse:
     def readinto(self, buf):
         try:
             return self._readinto(buf)
-        except OSError:
-            self.close(True) # raises IncompleteRead
-        except MemoryError:
+        except (OSError, MemoryError):
             gc.collect()
             self.close(True) # raises IncompleteRead
 
@@ -500,9 +496,7 @@ class HTTPResponse:
                 if n <= 0:
                     return
                 yield n
-        except OSError:
-            self.close(True) # raises IncompleteRead
-        except MemoryError:
+        except (OSError, MemoryError):
             gc.collect()
             self.close(True) # raises IncompleteRead
 
