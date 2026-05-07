@@ -275,22 +275,25 @@ class HTTPResponse:
         return self._sock is None
 
     def read(self, amt=None):
-        if amt is None:
-            return self._read_all()
-        amt = int(amt)
-        if amt < 0:
-            return self._read_all()
-        if self.length is not None:
-            amt = min(amt, self.length - self._bytes_read)
-        if amt == 0:
-            return _BLANK
-        buf = bytearray(amt)
-        nread = self.readinto(buf)
-        if nread == 0:
-            return _BLANK
-        if nread < amt:
-            del buf[nread:]
-        return buf
+        try:
+            if amt is None:
+                return self._read_all()
+            amt = int(amt)
+            if amt < 0:
+                return self._read_all()
+            if self.length is not None:
+                amt = min(amt, self.length - self._bytes_read)
+            if amt == 0:
+                return _BLANK
+            buf = bytearray(amt)
+            nread = self.readinto(buf)
+            if nread == 0:
+                return _BLANK
+            if nread < amt:
+                del buf[nread:]
+            return buf
+        except OSError:
+            self.close(True) # raises IncompleteRead
 
     def _read_all(self):
         if self.chunked:
@@ -328,10 +331,13 @@ class HTTPResponse:
         return _BLANK
 
     def readinto(self, buf):
-        if self.chunked:
-            return self._readinto_chunked(buf)
-        else:
-            return self._readinto_raw(buf)
+        try:
+            if self.chunked:
+                return self._readinto_chunked(buf)
+            else:
+                return self._readinto_raw(buf)
+        except OSError:
+            self.close(True) # raises IncompleteRead
 
     def _readinto_chunked(self, buf):
         buflen = len(buf)
@@ -353,7 +359,6 @@ class HTTPResponse:
                 nread = self._sock.readinto(bmv[total:total + amt])
             if nread == 0:
                 self.close(True)
-                return total
             self._bytes_read += nread
             self.chunk_left -= nread
             total += nread
@@ -815,16 +820,20 @@ else:
 
         def connect(self):
             super().connect()
+            gc.collect()
+            # SNI is omitted for IP literals (per RFC 6066).
+            omit_sni = ":" in self.host or all(c.isdigit() or c == "." for c in self.host)
             raw = self._sock
             try:
-                # SNI is omitted for IP literals (per RFC 6066).
-                omit_sni = ":" in self.host or all(c.isdigit() or c == "." for c in self.host)
-                gc.collect()
                 self._sock = self._context.wrap_socket(raw, server_hostname=None if omit_sni else self.host)
-            except OSError as e:
+            except Exception as e:
                 self._sock = None
-                try:
-                    raw.close()
-                except OSError:
-                    pass
-                raise e
+                if raw is not None:
+                    try: raw.close()
+                    except OSError: pass
+                if isinstance(e, OSError):
+                    raise e
+                elif isinstance(e, MemoryError):
+                    raise OSError(errno.ENOMEM)
+                else:
+                    raise OSError(errno.EIO)
