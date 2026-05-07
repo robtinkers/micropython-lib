@@ -276,24 +276,30 @@ class HTTPResponse:
 
     def read(self, amt=None):
         try:
-            if amt is None:
-                return self._read_all()
-            amt = int(amt)
-            if amt < 0:
-                return self._read_all()
-            if self.length is not None:
-                amt = min(amt, self.length - self._bytes_read)
-            if amt == 0:
-                return _BLANK
-            buf = bytearray(amt)
-            nread = self.readinto(buf)
-            if nread == 0:
-                return _BLANK
-            if nread < amt:
-                del buf[nread:]
-            return buf
+            return self._read(amt)
         except OSError:
             self.close(True) # raises IncompleteRead
+        except MemoryError:
+            gc.collect()
+            self.close(True) # raises IncompleteRead
+        
+    def _read(self, amt):
+        if amt is None:
+            return self._read_all()
+        amt = int(amt)
+        if amt < 0:
+            return self._read_all()
+        if self.length is not None:
+            amt = min(amt, self.length - self._bytes_read)
+        if amt == 0:
+            return _BLANK
+        buf = bytearray(amt)
+        nread = self.readinto(buf)
+        if nread == 0:
+            return _BLANK
+        if nread < amt:
+            del buf[nread:]
+        return buf
 
     def _read_all(self):
         if self.chunked:
@@ -332,12 +338,18 @@ class HTTPResponse:
 
     def readinto(self, buf):
         try:
-            if self.chunked:
-                return self._readinto_chunked(buf)
-            else:
-                return self._readinto_raw(buf)
+            return self._readinto(buf)
         except OSError:
             self.close(True) # raises IncompleteRead
+        except MemoryError:
+            gc.collect()
+            self.close(True) # raises IncompleteRead
+
+    def _readinto(self, buf):
+        if self.chunked:
+            return self._readinto_chunked(buf)
+        else:
+            return self._readinto_raw(buf)
 
     def _readinto_chunked(self, buf):
         buflen = len(buf)
@@ -482,11 +494,17 @@ class HTTPResponse:
     def iter_content_into(self, buf):
         if not isinstance(buf, memoryview):
             buf = memoryview(buf)
-        while True:
-            n = self.readinto(buf)
-            if n <= 0:
-                return
-            yield n
+        try:
+            while True:
+                n = self._readinto(buf)
+                if n <= 0:
+                    return
+                yield n
+        except OSError:
+            self.close(True) # raises IncompleteRead
+        except MemoryError:
+            gc.collect()
+            self.close(True) # raises IncompleteRead
 
 class HTTPConnection:
     response_class = HTTPResponse
