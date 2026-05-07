@@ -55,12 +55,10 @@ def _lower(buf:ptr8, buflen:int, inplace:int) -> int:
 def _normalize_key(key, force_bytes):
     if isinstance(key, str):
         key = key.encode(_ENCODE_HEAD)
-    elif not isinstance(key, (bytes, bytearray, memoryview)):
+    elif not isinstance(key, (bytes, bytearray)):
         key = str(key).encode(_ENCODE_HEAD)
     len_key = len(key)
     if len_key and (key[0] <= 32 or key[-1] <= 32):
-        if isinstance(key, memoryview):
-            key = bytes(key)
         key = key.strip()
         len_key = len(key)
     if not _lower(key, len_key, False):
