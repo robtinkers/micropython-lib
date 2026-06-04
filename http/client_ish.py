@@ -292,7 +292,7 @@ class HTTPResponse:
             return _BLANK
         buf = bytearray(amt)
         nread = self.readinto(buf)
-        if nread == 0:
+        if not nread:
             return _BLANK
         if nread < amt:
             del buf[nread:]
@@ -355,7 +355,7 @@ class HTTPResponse:
                 nread = self._sock.readinto(buf)
             else:
                 nread = self._sock.readinto(bmv[total:total + amt])
-            if nread == 0:
+            if not nread:
                 self.close(True)  # raises
             self._bytes_read += nread
             self.chunk_left -= nread
@@ -494,7 +494,7 @@ class HTTPResponse:
             buf = memoryview(buf)
         while True:
             n = self.readinto(buf)
-            if n <= 0:
+            if not n:
                 return
             yield n
 
