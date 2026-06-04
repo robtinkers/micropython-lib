@@ -499,47 +499,6 @@ class HTTPResponse:
                 return
             yield n
 
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        line = self.readline()
-        if not line:
-            raise StopIteration
-        return line
-
-    def readline(self):
-        if self.chunked:
-            raise ImproperConnectionState("readline() not supported for chunked responses")
-        if self.isclosed() or (self.length is not None and self._bytes_read >= self.length):
-            return _BLANK
-        line = self._sock.readline()
-        if not line:
-            # EOF hit. Taint the connection if we expected more bytes.
-            self.close(self.length is not None and self._bytes_read < self.length)
-            return _BLANK
-        self._bytes_read += len(line)
-        # Handle Content-Length boundaries
-        if self.length is not None and self._bytes_read >= self.length:
-            overflow = self._bytes_read - self.length
-            if overflow > 0:
-                # Protocol violation: Truncate to obey the contract.
-                line = line[:-overflow]
-                self._bytes_read = self.length
-                self.close(True)
-            else:
-                self.close()
-        return line
-
-    def readlines(self):
-        lines = []
-        while True:
-            line = self.readline()
-            if not line:
-                break
-            lines.append(line)
-        return lines
-
 class HTTPConnection:
     response_class = HTTPResponse
     default_port = HTTP_PORT
