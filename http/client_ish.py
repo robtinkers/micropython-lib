@@ -40,12 +40,12 @@ class ResponseNotReady(ImproperConnectionState): pass
 class IncompleteRead(HTTPException): pass
 
 @micropython.viper
-def _lower(buf:ptr8, buflen:int, inplace:int) -> int:
+def _lower(buf:ptr8, buflen:int, in_place:int) -> int:
     i = 0
     while i < buflen:
         b = buf[i]
-        if 65 <= b <= 90:
-            if not inplace:
+        if (65 <= b and b <= 90):
+            if not in_place:
                 return 0
             buf[i] = b + 32
         i += 1
@@ -71,21 +71,21 @@ def _normalize_key(key, force_bytes):
     return key
 
 @micropython.viper
-def _validate_ascii(buf:ptr8, buflen:int, deny_flags:int) -> int:
+def _validate_ascii(buf:ptr8, buflen:int, no_space:int) -> int:
     i = 0
     while i < buflen:
         b = buf[i]
-        if b < 32 or b >= 127 or (b == 32 and deny_flags):
+        if b < 9 or (b == 9 and no_space) or (9 < b and b < 32) or (b == 32 and no_space) or b >= 127:
             return 0
         i += 1
     return 1
 
-def _encode_and_validate(val, force_bytes, deny_flags):
+def _encode_and_validate(val, force_bytes, no_space):
     if isinstance(val, str):
         val = val.encode(_ENCODE_HEAD)
     elif not isinstance(val, (bytes, bytearray, memoryview)):
         val = str(val).encode(_ENCODE_HEAD)
-    if not _validate_ascii(val, len(val), deny_flags):
+    if not _validate_ascii(val, len(val), no_space):
         raise ValueError("can't contain special characters")
     if force_bytes and not isinstance(val, bytes):
         val = bytes(val)
@@ -255,11 +255,11 @@ class HTTPResponse:
 
         return version, status, reason
 
-    def close(self, tainted=False):
-        # tainted=True ALWAYS raises IncompleteRead after closing the socket.
+    def close(self, _tainted=False):
+        # _tainted ALWAYS raises IncompleteRead after closing the socket.
         # Reader code in _next_chunk/_readinto_chunked relies on this for
         # control flow; do not break this contract.
-        if tainted:
+        if _tainted:
             self._tainted = True
         sock = self._sock
         self._sock = None
@@ -271,11 +271,15 @@ class HTTPResponse:
             if self._tainted or framing_incomplete or self.will_close:
                 try: sock.close()
                 except OSError: pass
-        if tainted:
+        if _tainted:
             raise IncompleteRead(self._bytes_read, self.length)
 
     def isclosed(self):
         return self._sock is None
+
+    @property
+    def closed(self):
+        return self.isclosed()
 
     def read(self, amt=None):
         if amt is None:
@@ -425,6 +429,17 @@ class HTTPResponse:
             self.close()
         return nread
 
+    def getheaders(self):
+        if self.headers is None:
+            raise ResponseNotReady()
+        out = []
+        for k, v in self.headers:
+            try:
+                out.append((k.decode(_DECODE_HEAD), v.decode(_DECODE_HEAD)))
+            except UnicodeError:
+                pass
+        return out
+
     def getheader(self, key, default=None):
         val = self.getheaderbytes(key)
         if val is not None:
@@ -484,11 +499,53 @@ class HTTPResponse:
                 return
             yield n
 
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        line = self.readline()
+        if not line:
+            raise StopIteration
+        return line
+
+    def readline(self):
+        if self.chunked:
+            raise ImproperConnectionState("readline() not supported for chunked responses")
+        if self.isclosed() or (self.length is not None and self._bytes_read >= self.length):
+            return _BLANK
+        line = self._sock.readline()
+        if not line:
+            # EOF hit. Taint the connection if we expected more bytes.
+            self.close(self.length is not None and self._bytes_read < self.length)
+            return _BLANK
+        self._bytes_read += len(line)
+        # Handle Content-Length boundaries
+        if self.length is not None and self._bytes_read >= self.length:
+            overflow = self._bytes_read - self.length
+            if overflow > 0:
+                # Protocol violation: Truncate to obey the contract.
+                line = line[:-overflow]
+                self._bytes_read = self.length
+                self.close(True)
+            else:
+                self.close()
+        return line
+
+    def readlines(self):
+        lines = []
+        while True:
+            line = self.readline()
+            if not line:
+                break
+            lines.append(line)
+        return lines
+
 class HTTPConnection:
     response_class = HTTPResponse
     default_port = HTTP_PORT
     auto_open = True
     debuglevel = 0
+    blocksize = 2048
     _header_buffer_size = 1024
     _inline_chunk_size = 0
 
@@ -684,11 +741,12 @@ class HTTPConnection:
             self.send(message_body, encode_chunked=encode_chunked)
 
     def _send_raw(self, data):
-        # On the first send of a request, transparently (re)connect if a
-        # kept-alive socket has died. Subsequent sends require an open socket.
         if not data:
             return
-
+        if self.debuglevel > 0:
+            print("send:", len(data), "bytes")
+        # On the first send of a request, transparently (re)connect if a
+        # kept-alive socket has died. Subsequent sends require an open socket.
         if self._can_reconnect:
             if self._sock is not None:
                 try:
@@ -713,14 +771,15 @@ class HTTPConnection:
         self._can_reconnect = False
 
     def _send_chunk(self, data):
-        # data=None emits the terminating chunk.
         if data is None:
+            if self.debuglevel > 0:
+                print("send: terminating chunk")
             self._send_raw(b"0\r\n\r\n")
             return
-        len_data = len(data)
-        if len_data == 0:
+        if not data:
             return
-        elif len_data <= self._inline_chunk_size:
+        len_data = len(data)
+        if len_data <= self._inline_chunk_size:
             # One sendall (one TLS record) at the cost of a copy.
             if isinstance(data, (bytearray, memoryview)):
                 data = bytes(data)
@@ -737,18 +796,25 @@ class HTTPConnection:
         if isinstance(data, str):
             data = data.encode(_ENCODE_BODY)
 
+        if self.debuglevel > 0:
+            print("send:", type(data).__name__)
+
         if data is None:
-            if self.debuglevel > 0:
-                print("send: None")
+            pass
 
         elif isinstance(data, (bytes, bytearray, memoryview)):
-            if self.debuglevel > 0:
-                print("send:", type(data).__name__, len(data))
             send(data)
 
+        elif hasattr(data, "read"):
+            while True:
+                d = data.read(self.blocksize)
+                if not d:
+                    break
+                if isinstance(d, str):
+                    d = d.encode(_ENCODE_BODY)
+                send(d)
+
         else:
-            if self.debuglevel > 0:
-                print("send:", type(data).__name__)
             for d in data:
                 if isinstance(d, str):
                     d = d.encode(_ENCODE_BODY)
@@ -758,7 +824,7 @@ class HTTPConnection:
         if encode_chunked and final_chunk:
             if self.debuglevel > 0:
                 print("send: terminator")
-            send(None)
+            self._send_chunk(None)
 
     def getresponse(self, **kwargs):
         if self.__response is not None and not self.__response.isclosed():
@@ -804,7 +870,7 @@ else:
     class HTTPSConnection(HTTPConnection):
         default_port = HTTPS_PORT
         _header_buffer_size = 1408
-        _inline_chunk_size = 1408
+        _inline_chunk_size = 1400
 
         def __init__(self, *args, context=None, **kwargs):
             super().__init__(*args, **kwargs)
