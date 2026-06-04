@@ -277,10 +277,6 @@ class HTTPResponse:
     def isclosed(self):
         return self._sock is None
 
-    @property
-    def closed(self):
-        return self.isclosed()
-
     def read(self, amt=None):
         if amt is None:
             return self._read_all()
