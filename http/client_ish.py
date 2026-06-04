@@ -51,7 +51,7 @@ def _lower(buf:ptr8, buflen:int, in_place:int) -> int:
         i += 1
     return 1
 
-def _normalize_key(key, force_bytes):
+def _normalize_key(key):
     if isinstance(key, str):
         key = key.encode(_ENCODE_HEAD)
     elif not isinstance(key, (bytes, bytearray, memoryview)):
@@ -60,14 +60,13 @@ def _normalize_key(key, force_bytes):
     if len_key and (key[0] <= 32 or key[-1] <= 32):
         if isinstance(key, memoryview):
             key = bytes(key)
-        key = key.strip()
+        if key and (key[0].isspace() or key[-1].isspace()):
+            key = key.strip()
         len_key = len(key)
     if not _lower(key, len_key, False):
         if not isinstance(key, bytearray):
             key = bytearray(key)
         _lower(key, len_key, True)
-    if force_bytes and not isinstance(key, bytes):
-        key = bytes(key)
     return key
 
 @micropython.viper
@@ -133,9 +132,13 @@ def parse_headers(sock, *, extra_headers=True):
         if sep == -1:
             continue
         key, val = line[:sep], line[sep+1:]
-        key = _normalize_key(key, True)
+        key = _normalize_key(key)
         if extra_headers is True or (extra_headers and key in extra_headers) or key in _IMPORTANT_HEADERS:
-            headers.append((key, val.strip()))
+            if not isinstance(key, bytes):
+                key = bytes(key)
+            if val and (val[0].isspace() or val[-1].isspace()):
+                val = val.strip()
+            headers.append((key, val))
 
 class HTTPResponse:
     blocksize = 2048
@@ -448,7 +451,7 @@ class HTTPResponse:
     def getheaderbytes(self, key, default=None):
         if self.headers is None:
             raise ResponseNotReady()
-        key = _normalize_key(key, False)
+        key = _normalize_key(key)
         matches = [v for k, v in self.headers if k == key]
         if not matches:
             return default
@@ -582,14 +585,13 @@ class HTTPConnection:
         have_transfer_encoding = False
 
         if headers is not None:
-            # Materialize: a generator would be exhausted by the scan below
-            # and have nothing left for the send loop.
-            if hasattr(headers, "items") and callable(headers.items):
+            if isinstance(headers, dict):
                 headers = list(headers.items())
             elif not isinstance(headers, (list, tuple)):
+                # Materialize generator/iterator
                 headers = list(headers)
             for key, val in headers:
-                key = _normalize_key(key, False)
+                key = _normalize_key(key)
                 if key == b"accept-encoding":
                     have_accept_encoding = True
                 elif key == b"content-length":
@@ -760,14 +762,14 @@ class HTTPConnection:
         elif isinstance(data, (bytes, bytearray, memoryview)):
             send(data)
 
-        elif hasattr(data, "read"):
+        elif hasattr(data, "readinto"):
+            buf = bytearray(self.blocksize)
+            bmv = memoryview(buf)
             while True:
-                d = data.read(self.blocksize)
-                if not d:
+                n = data.readinto(buf)
+                if not n:
                     break
-                if isinstance(d, str):
-                    d = d.encode(_ENCODE_BODY)
-                send(d)
+                send(bmv[:n])
 
         else:
             for d in data:
