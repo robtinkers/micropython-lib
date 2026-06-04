@@ -291,11 +291,11 @@ class HTTPResponse:
         if amt == 0:
             return _BLANK
         buf = bytearray(amt)
-        nread = self.readinto(buf)
-        if not nread:
+        n = self.readinto(buf)
+        if n == 0:
             return _BLANK
-        if nread < amt:
-            del buf[nread:]
+        if n < amt:
+            del buf[n:]
         return buf
 
     def _read_all(self):
@@ -304,21 +304,21 @@ class HTTPResponse:
             buf = bytearray(self.blocksize)
             bmv = memoryview(buf)
             while True:
-                nread = self._readinto_chunked(bmv)
-                if nread == 0:
+                n = self._readinto_chunked(bmv)
+                if n == 0:
                     return out
-                elif nread == self.blocksize:
+                if n == self.blocksize:
                     out.extend(buf)
                 else:
-                    out.extend(bmv[:nread])
+                    out.extend(bmv[:n])
         if self.length is not None:
             amt = self.length - self._bytes_read
             if amt == 0:
                 return _BLANK
             buf = bytearray(amt)
-            nread = self._readinto_raw(buf)
-            if nread < amt:
-                del buf[nread:]
+            n = self._readinto_raw(buf)
+            if n < amt:
+                del buf[n:]
             return buf
         # Length unknown, not chunked: read until close.
         if not self.isclosed():
@@ -352,14 +352,14 @@ class HTTPResponse:
             if amt == 0:
                 break
             if amt == buflen and total == 0:
-                nread = self._sock.readinto(buf)
+                n = self._sock.readinto(buf)
             else:
-                nread = self._sock.readinto(bmv[total:total + amt])
-            if not nread:
+                n = self._sock.readinto(bmv[total:total + amt])
+            if n == 0:
                 self.close(True)  # raises
-            self._bytes_read += nread
-            self.chunk_left -= nread
-            total += nread
+            self._bytes_read += n
+            self.chunk_left -= n
+            total += n
         return total
 
     def _next_chunk(self):
@@ -416,17 +416,17 @@ class HTTPResponse:
                 return 0
 
         if amt == buflen:
-            nread = self._sock.readinto(buf)
+            n = self._sock.readinto(buf)
         else:
-            nread = self._sock.readinto(bmv[:amt])
-        if nread == 0:
+            n = self._sock.readinto(bmv[:amt])
+        if n == 0:
             # EOF: taint only if we expected more bytes.
             self.close(self.length is not None)
             return 0
-        self._bytes_read += nread
+        self._bytes_read += n
         if self.length is not None and self._bytes_read >= self.length:
             self.close()
-        return nread
+        return n
 
     def getheaders(self):
         if self.headers is None:
@@ -494,7 +494,7 @@ class HTTPResponse:
             buf = memoryview(buf)
         while True:
             n = self.readinto(buf)
-            if not n:
+            if n == 0:
                 return
             yield n
 
@@ -767,7 +767,7 @@ class HTTPConnection:
             bmv = memoryview(buf)
             while True:
                 n = data.readinto(buf)
-                if not n:
+                if n == 0:
                     break
                 send(bmv[:n])
 
