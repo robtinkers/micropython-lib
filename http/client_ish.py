@@ -736,10 +736,10 @@ class HTTPConnection:
             return
         if not data:
             return
+        len_data = len(data)
         header = b"%X\r\n" % len_data
         if self._merge_buffmv is not None and self._merged == 0:
             len_header = len(header)
-            len_data = len(data)
             total_len = len_header + len_data + 2
             if total_len <= self._merge_buffer_size:
                 self._merge_buffmv[:len_header] = header
