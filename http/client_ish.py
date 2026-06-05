@@ -6,7 +6,7 @@ HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
 
 # Always retained when parse_headers filters.
-_IMPORTANT_HEADERS = frozenset((
+_IMPORTANT_HEADERS = (
     b"connection",
     b"content-encoding",
     b"content-length",
@@ -17,14 +17,9 @@ _IMPORTANT_HEADERS = frozenset((
     b"retry-after",
     b"transfer-encoding",
     b"www-authenticate",
-))
+)
 
-_METHODS_EXPECTING_BODY = frozenset((b"PATCH", b"POST", b"PUT"))
-
-_ENCODE_HEAD = "utf-8"
-_DECODE_HEAD = "utf-8"
-_ENCODE_BODY = "utf-8"
-_DECODE_BODY = "utf-8"
+_METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
 
 _BLANK = b""
 _CRLF = b"\r\n"
@@ -53,9 +48,9 @@ def _lower(buf:ptr8, buflen:int, in_place:int) -> int:
 
 def _normalize_key(key):
     if isinstance(key, str):
-        key = key.encode(_ENCODE_HEAD)
+        key = key.encode()
     elif not isinstance(key, (bytes, bytearray, memoryview)):
-        key = str(key).encode(_ENCODE_HEAD)
+        key = str(key).encode()
     len_key = len(key)
     if len_key and (key[0] <= 32 or key[-1] <= 32):
         if isinstance(key, memoryview):
@@ -81,9 +76,9 @@ def _validate_ascii(buf:ptr8, buflen:int, no_space:int) -> int:
 
 def _encode_and_validate(val, force_bytes, no_space):
     if isinstance(val, str):
-        val = val.encode(_ENCODE_HEAD)
+        val = val.encode()
     elif not isinstance(val, (bytes, bytearray, memoryview)):
-        val = str(val).encode(_ENCODE_HEAD)
+        val = str(val).encode()
     if not _validate_ascii(val, len(val), no_space):
         raise ValueError("can't contain special characters")
     if force_bytes and not isinstance(val, bytes):
@@ -138,7 +133,8 @@ def parse_headers(sock, *, extra_headers=True):
                 key = bytes(key)
             if val and (val[0].isspace() or val[-1].isspace()):
                 val = val.strip()
-            headers.append((key, val))
+            headers.append(key)
+            headers.append(val)
 
 class HTTPResponse:
     blocksize = 2048
@@ -402,10 +398,6 @@ class HTTPResponse:
         buflen = len(buf)
         if buflen == 0 or self.isclosed():
             return 0
-        if isinstance(buf, memoryview):
-            bmv = buf
-        else:
-            bmv = memoryview(buf)
 
         if self.length is None:
             amt = buflen
@@ -415,10 +407,7 @@ class HTTPResponse:
                 self.close()
                 return 0
 
-        if amt == buflen:
-            n = self._sock.readinto(buf)
-        else:
-            n = self._sock.readinto(bmv[:amt])
+        n = self._sock.readinto(buf, amt)
         if n == 0:
             # EOF: taint only if we expected more bytes.
             self.close(self.length is not None)
@@ -432,9 +421,9 @@ class HTTPResponse:
         if self.headers is None:
             raise ResponseNotReady()
         out = []
-        for k, v in self.headers:
+        for i in range(0, len(self.headers), 2):
             try:
-                out.append((k.decode(_DECODE_HEAD), v.decode(_DECODE_HEAD)))
+                out.append((self.headers[i].decode(), self.headers[i+1].decode()))
             except UnicodeError:
                 pass
         return out
@@ -443,7 +432,7 @@ class HTTPResponse:
         val = self.getheaderbytes(key)
         if val is not None:
             try:
-                return val.decode(_DECODE_HEAD)
+                return val.decode()
             except UnicodeError:
                 pass
         return default
@@ -452,24 +441,27 @@ class HTTPResponse:
         if self.headers is None:
             raise ResponseNotReady()
         key = _normalize_key(key)
-        matches = [v for k, v in self.headers if k == key]
-        if not matches:
-            return default
-        if len(matches) == 1:
-            return matches[0]
-        return b", ".join(matches)
+        match = None
+        for i in range(0, len(self.headers), 2):
+            if self.headers[i] == key:
+                v = self.headers[i+1]
+                if match is None:
+                    match = v
+                else:
+                    match = b", ".join((match, v)) 
+        return default if match is None else match
 
     def _getheaderbytesfast(self, key, default=None):
-        for k, v in self.headers:
-            if k == key:
-                return v
+        for i in range(0, len(self.headers), 2):
+            if self.headers[i] == key:
+                return self.headers[i+1]
         return default
 
     def getcookies(self):
         out = []
         for v in self.getcookiesbytes():
             try:
-                out.append(v.decode(_DECODE_HEAD))
+                out.append(v.decode())
             except UnicodeError:
                 pass
         return out
@@ -477,7 +469,9 @@ class HTTPResponse:
     def getcookiesbytes(self):
         if self.headers is None:
             raise ResponseNotReady()
-        return [v for k, v in self.headers if k == b"set-cookie"]
+        for i in range(0, len(self.headers), 2):
+            if self.headers[i] == b"set-cookie":
+                yield self.headers[i+1]
 
     def iter_content(self, blocksize=None):
         blocksize = self.blocksize if blocksize is None else int(blocksize)
@@ -585,12 +579,12 @@ class HTTPConnection:
         have_transfer_encoding = False
 
         if headers is not None:
-            if isinstance(headers, dict):
-                headers = list(headers.items())
-            elif not isinstance(headers, (list, tuple)):
-                # Materialize generator/iterator
-                headers = list(headers)
-            for key, val in headers:
+            is_dict = isinstance(headers, dict)
+            if not is_dict and not isinstance(headers, (list, tuple)):
+                headers = list(headers) # Materialize generator/iterator
+            for key in headers:
+                if not is_dict:
+                    key = key[0]
                 key = _normalize_key(key)
                 if key == b"accept-encoding":
                     have_accept_encoding = True
@@ -604,7 +598,7 @@ class HTTPConnection:
         self.putrequest(method, url, skip_accept_encoding=have_accept_encoding, skip_host=have_host)
 
         if isinstance(body, str):
-            body = body.encode(_ENCODE_BODY)
+            body = body.encode()
 
         if encode_chunked is None:
             if body is None:
@@ -621,8 +615,11 @@ class HTTPConnection:
             self.putheader(b"Transfer-Encoding", b"chunked")
 
         if headers is not None:
-            for key, val in headers:
-                self.putheader(key, val)
+            for item in headers:
+                if is_dict:
+                    self.putheader(item, headers[item])
+                else:
+                    self.putheader(item[0], item[1])
 
         self.endheaders(body, encode_chunked=encode_chunked)
 
@@ -648,7 +645,7 @@ class HTTPConnection:
         self._putheaderparts(False, method, b" ", url, b" HTTP/1.1\r\n")
 
         if not skip_host:
-            host = self.host.encode(_ENCODE_HEAD)
+            host = self.host.encode()
             if b":" in host and not host.startswith(b"["):
                 host = b"[" + host + b"]"
             if self.port == self.default_port:
@@ -662,7 +659,7 @@ class HTTPConnection:
         if self.__response is not None:
             raise CannotSendHeader()
         if isinstance(header, str):
-            header = header.encode(_ENCODE_HEAD)
+            header = header.encode()
         self._putheaderparts(False, header, b": ", _encode_and_validate(value, False, 0), _CRLF)
 
     def _putheaderparts(self, flush, *parts):
@@ -751,7 +748,7 @@ class HTTPConnection:
         send = self._send_chunk if encode_chunked else self._send_raw
 
         if isinstance(data, str):
-            data = data.encode(_ENCODE_BODY)
+            data = data.encode()
 
         if self.debuglevel > 0:
             print("send:", type(data).__name__)
@@ -774,7 +771,7 @@ class HTTPConnection:
         else:
             for d in data:
                 if isinstance(d, str):
-                    d = d.encode(_ENCODE_BODY)
+                    d = d.encode()
                 if d is not None:
                     send(d)
 
