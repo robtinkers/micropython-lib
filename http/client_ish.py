@@ -35,12 +35,12 @@ class ResponseNotReady(ImproperConnectionState): pass
 class IncompleteRead(HTTPException): pass
 
 @micropython.viper
-def _lower(buf:ptr8, buflen:int, in_place:int) -> int:
+def _lower(buf:ptr8, buflen:int, do_lower:int) -> int:
     i = 0
     while i < buflen:
         b = buf[i]
         if (65 <= b and b <= 90):
-            if not in_place:
+            if not do_lower:
                 return 0
             buf[i] = b + 32
         i += 1
@@ -55,8 +55,7 @@ def _normalize_key(key):
     if len_key and (key[0] <= 32 or key[-1] <= 32):
         if isinstance(key, memoryview):
             key = bytes(key)
-        if key and (key[0].isspace() or key[-1].isspace()):
-            key = key.strip()
+        key = key.strip()
         len_key = len(key)
     if not _lower(key, len_key, False):
         if not isinstance(key, bytearray):
@@ -108,7 +107,7 @@ def create_connection(address, timeout=None):
     raise OSError(errno.EHOSTUNREACH)
 
 def parse_headers(sock, *, extra_headers=True):
-    # Returns [(lowercase_key_bytes, value_bytes), ...]. extra_headers:
+    # Returns [lowercase_key_bytes, value_bytes, ...]. extra_headers:
     #   None       -> skip all headers
     #   True       -> keep all headers
     #   Falsy      -> keep _IMPORTANT_HEADERS only
@@ -131,8 +130,7 @@ def parse_headers(sock, *, extra_headers=True):
         if extra_headers is True or (extra_headers and key in extra_headers) or key in _IMPORTANT_HEADERS:
             if not isinstance(key, bytes):
                 key = bytes(key)
-            if val and (val[0].isspace() or val[-1].isspace()):
-                val = val.strip()
+            val = val.strip()
             headers.append(key)
             headers.append(val)
 
@@ -359,9 +357,9 @@ class HTTPResponse:
         return total
 
     def _next_chunk(self):
-        # Advances the chunk state machine. Returns bytes available in the
-        # current data chunk, or 0 at end of body.
-        # close(True) sites below transfer control via IncompleteRead.
+        # Advances the chunk state machine. Returns bytes available in
+        # the current data chunk, or 0 at the end of the body.
+        # .close(True) sites below transfer control via IncompleteRead.
         while True:
             if self.chunk_left is None:
                 line = self._sock.readline()
