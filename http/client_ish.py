@@ -117,8 +117,10 @@ def parse_headers(sock, *, extra_headers=True):
     #   Falsy      -> keep _IMPORTANT_HEADERS only
     #   container  -> keep _IMPORTANT_HEADERS plus those in container
     headers = []
+    _append = headers.append
+    _readline = sock.readline
     while True:
-        line = sock.readline()
+        line = _readline()
         if not line or line == _CRLF or line == b"\n":
             return headers
         if extra_headers is None:
@@ -135,8 +137,8 @@ def parse_headers(sock, *, extra_headers=True):
             if not isinstance(key, bytes):
                 key = bytes(key)
             val = val.strip()
-            headers.append(key)
-            headers.append(val)
+            _append(key)
+            _append(val)
 
 class HTTPResponse:
     blocksize = const(2048)
@@ -499,10 +501,8 @@ class HTTPConnection:
     response_class = HTTPResponse
     default_port = HTTP_PORT
     auto_open = True
-    debuglevel = 0
     blocksize = const(2048)
-    _header_buffer_size = const(2048)
-    _chunk_inline_size = const(0)
+    _merge_buffer_size = const(2048)
 
     def __enter__(self):
         return self
@@ -512,16 +512,17 @@ class HTTPConnection:
         return False
 
     def __init__(self, host, port=None, timeout=None):
+        self.debuglevel = 0
         self.host, self.port = self._parse_host_port(host, port)
         self.timeout = timeout
         self._sock = None
         self.__response = None
         self._can_reconnect = False
-        if self._header_buffer_size:
-            self._header_buffmv = memoryview(bytearray(self._header_buffer_size))
+        if self._merge_buffer_size:
+            self._merge_buffmv = memoryview(bytearray(self._merge_buffer_size))
         else:
-            self._header_buffmv = None
-        self._filled = 0
+            self._merge_buffmv = None
+        self._merged = 0
         self._method = None
         self._url = None
 
@@ -534,8 +535,8 @@ class HTTPConnection:
     def close(self):
         # Suppress the response's own close logic by nulling its socket
         # reference; this object owns the socket teardown.
-        self._filled = 0
         self._can_reconnect = False
+        self._merged = 0
         response = self.__response
         self.__response = None
         if response is not None:
@@ -611,7 +612,7 @@ class HTTPConnection:
             elif isinstance(body, (bytes, bytearray, memoryview)):
                 encode_chunked = False
                 if not have_content_length:
-                    self.putheader(b"Content-Length", str(len(body)))
+                    self.putheader(b"Content-Length", b"%d" % len(body))
             else:
                 encode_chunked = not have_content_length
         if encode_chunked and not have_transfer_encoding:
@@ -632,7 +633,7 @@ class HTTPConnection:
         self.__response = None
 
         self._can_reconnect = self.auto_open
-        self._filled = 0
+        self._merged = 0
 
         method = _encode_and_validate(method, True, 1)
         if method != b"GET":
@@ -668,26 +669,26 @@ class HTTPConnection:
     def _putheaderparts(self, flush, *parts):
         # Coalesces small writes into a single sendall.
         for part in parts:
-            if self._header_buffmv is None:
+            if self._merge_buffmv is None:
                 self._send_raw(part)
                 continue
             len_part = len(part)
-            if len_part >= self._header_buffer_size:
-                if self._filled:
-                    self._send_raw(self._header_buffmv[:self._filled])
-                    self._filled = 0
+            if len_part >= self._merge_buffer_size:
+                if self._merged:
+                    self._send_raw(self._merge_buffmv[:self._merged])
+                    self._merged = 0
                 self._send_raw(part)
-            elif self._filled + len_part <= self._header_buffer_size:
-                self._header_buffmv[self._filled:self._filled+len_part] = part
-                self._filled += len_part
+            elif self._merged + len_part <= self._merge_buffer_size:
+                self._merge_buffmv[self._merged:self._merged+len_part] = part
+                self._merged += len_part
             else:
-                self._send_raw(self._header_buffmv[:self._filled])
-                self._header_buffmv[:len_part] = part
-                self._filled = len_part
+                self._send_raw(self._merge_buffmv[:self._merged])
+                self._merge_buffmv[:len_part] = part
+                self._merged = len_part
 
-        if flush and self._filled:
-            self._send_raw(self._header_buffmv[:self._filled])
-            self._filled = 0
+        if flush and self._merged:
+            self._send_raw(self._merge_buffmv[:self._merged])
+            self._merged = 0
 
     def endheaders(self, message_body=None, *, encode_chunked=False):
         if self.__response is not None:
@@ -736,15 +737,18 @@ class HTTPConnection:
         if not data:
             return
         len_data = len(data)
-        if len_data <= self._chunk_inline_size:
-            # One sendall (one TLS record) at the cost of a copy.
-            if isinstance(data, (bytearray, memoryview)):
-                data = bytes(data)
-            self._send_raw(b"%X\r\n%s\r\n" % (len_data, data))
-        else:
-            self._send_raw(b"%X\r\n" % len_data)
-            self._send_raw(data)
-            self._send_raw(_CRLF)
+        header = b"%X\r\n" % len_data
+        len_header = len(header)
+        total_len = len_header + len_data + 2
+        if self._merge_buffmv is not None and total_len <= self._merge_buffer_size and self._merged == 0:
+            self._merge_buffmv[:len_header] = header
+            self._merge_buffmv[len_header:len_header+len_data] = data
+            self._merge_buffmv[len_header+len_data:total_len] = _CRLF
+            self._send_raw(self._merge_buffmv[:total_len])
+            return
+        self._send_raw(header)
+        self._send_raw(data)
+        self._send_raw(_CRLF)
 
     # encode_chunked and final_chunk are extensions beyond CPython.
     def send(self, data, *, encode_chunked=False, final_chunk=True):
@@ -831,8 +835,7 @@ except ImportError:
 else:
     class HTTPSConnection(HTTPConnection):
         default_port = const(HTTPS_PORT)
-        _header_buffer_size = const(1408)
-        _chunk_inline_size = const(1400)
+        _merge_buffer_size = const(1408)
 
         def __init__(self, *args, context=None, **kwargs):
             super().__init__(*args, **kwargs)
