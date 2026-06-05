@@ -5,7 +5,10 @@ import micropython, socket, errno, gc
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
 
-# Always retained when parse_headers filters.
+# Memory threshold below which GC is called after a request
+_GC_THRESHOLD = const(32768)
+
+# Headers to always retain when parse_headers() filters
 _IMPORTANT_HEADERS = (
     b"connection",
     b"content-encoding",
@@ -19,6 +22,7 @@ _IMPORTANT_HEADERS = (
     b"www-authenticate",
 )
 
+# HTTP methods that expect a body
 _METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
 
 _BLANK = b""
@@ -135,7 +139,7 @@ def parse_headers(sock, *, extra_headers=True):
             headers.append(val)
 
 class HTTPResponse:
-    blocksize = 2048
+    blocksize = const(2048)
 
     def __enter__(self):
         return self
@@ -294,14 +298,15 @@ class HTTPResponse:
 
     def _read_all(self):
         if self.chunked:
-            out = bytearray()
-            buf = bytearray(self.blocksize)
+            buflen = self.blocksize
+            buf = bytearray(buflen)
             bmv = memoryview(buf)
+            out = bytearray()
             while True:
                 n = self._readinto_chunked(bmv)
                 if n == 0:
                     return out
-                if n == self.blocksize:
+                if n == buflen:
                     out.extend(buf)
                 else:
                     out.extend(bmv[:n])
@@ -345,10 +350,10 @@ class HTTPResponse:
             amt = min(self._next_chunk(), buflen - total)
             if amt == 0:
                 break
-            if amt == buflen and total == 0:
-                n = self._sock.readinto(buf)
+            if total == 0:
+                n = self._sock.readinto(buf, amt)
             else:
-                n = self._sock.readinto(bmv[total:total + amt])
+                n = self._sock.readinto(bmv[total:], amt)
             if n == 0:
                 self.close(True)  # raises
             self._bytes_read += n
@@ -472,20 +477,20 @@ class HTTPResponse:
                 yield self.headers[i+1]
 
     def iter_content(self, blocksize=None):
-        blocksize = self.blocksize if blocksize is None else int(blocksize)
-        buf = bytearray(blocksize)
+        buflen = self.blocksize if blocksize is None else blocksize
+        buf = bytearray(buflen)
         bmv = memoryview(buf)
         for n in self.iter_content_into(bmv):
-            if n == blocksize:
+            if n == buflen:
                 yield bytes(buf)
             else:
                 yield bytes(bmv[:n])
 
-    def iter_content_into(self, buf):
-        if not isinstance(buf, memoryview):
-            buf = memoryview(buf)
+    def iter_content_into(self, bmv):
+        if not isinstance(bmv, memoryview):
+            bmv = memoryview(bmv)
         while True:
-            n = self.readinto(buf)
+            n = self.readinto(bmv)
             if n == 0:
                 return
             yield n
@@ -495,9 +500,9 @@ class HTTPConnection:
     default_port = HTTP_PORT
     auto_open = True
     debuglevel = 0
-    blocksize = 2048
-    _header_buffer_size = 1024
-    _inline_chunk_size = 0
+    blocksize = const(2048)
+    _header_buffer_size = const(2048)
+    _chunk_inline_size = const(0)
 
     def __enter__(self):
         return self
@@ -731,7 +736,7 @@ class HTTPConnection:
         if not data:
             return
         len_data = len(data)
-        if len_data <= self._inline_chunk_size:
+        if len_data <= self._chunk_inline_size:
             # One sendall (one TLS record) at the cost of a copy.
             if isinstance(data, (bytearray, memoryview)):
                 data = bytes(data)
@@ -758,13 +763,17 @@ class HTTPConnection:
             send(data)
 
         elif hasattr(data, "readinto"):
-            buf = bytearray(self.blocksize)
+            buflen = self.blocksize
+            buf = bytearray(buflen)
             bmv = memoryview(buf)
             while True:
                 n = data.readinto(buf)
                 if n == 0:
                     break
-                send(bmv[:n])
+                if n == buflen:
+                    send(buf)
+                else:
+                    send(bmv[:n])
 
         else:
             for d in data:
@@ -802,7 +811,8 @@ class HTTPConnection:
                 except OSError: pass
             raise
         finally:
-            gc.collect()
+            if _GC_THRESHOLD and gc.mem_free() < _GC_THRESHOLD:
+                gc.collect()
 
     def detach(self):
         if self.__response is not None:
@@ -820,9 +830,9 @@ except ImportError:
     pass
 else:
     class HTTPSConnection(HTTPConnection):
-        default_port = HTTPS_PORT
-        _header_buffer_size = 1408
-        _inline_chunk_size = 1400
+        default_port = const(HTTPS_PORT)
+        _header_buffer_size = const(1408)
+        _chunk_inline_size = const(1400)
 
         def __init__(self, *args, context=None, **kwargs):
             super().__init__(*args, **kwargs)
