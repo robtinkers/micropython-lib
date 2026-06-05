@@ -155,14 +155,14 @@ class HTTPResponse:
         self.debuglevel = debuglevel
         self._method = method
         self._url = url
+        self.headers = None
         self.version = None
         self.status = None
         self.reason = None
-        self.headers = None
         self.chunked = False
         self.chunk_left = None
-        self.will_close = True
         self.length = None
+        self.will_close = True
         self._bytes_read = 0
         # Set by readers on protocol violation or premature EOF; forces
         # the socket closed even if response would otherwise keep-alive.
@@ -513,18 +513,18 @@ class HTTPConnection:
 
     def __init__(self, host, port=None, timeout=None):
         self.debuglevel = 0
-        self.host, self.port = self._parse_host_port(host, port)
         self.timeout = timeout
         self._sock = None
-        self.__response = None
-        self._can_reconnect = False
         if self._merge_buffer_size:
             self._merge_buffmv = memoryview(bytearray(self._merge_buffer_size))
         else:
             self._merge_buffmv = None
         self._merged = 0
+        self.__response = None
         self._method = None
         self._url = None
+        self.host, self.port = self._parse_host_port(host, port)
+        self._can_reconnect = False
 
     def set_debuglevel(self, level):
         self.debuglevel = level
