@@ -736,16 +736,17 @@ class HTTPConnection:
             return
         if not data:
             return
-        len_data = len(data)
         header = b"%X\r\n" % len_data
-        len_header = len(header)
-        total_len = len_header + len_data + 2
-        if self._merge_buffmv is not None and total_len <= self._merge_buffer_size and self._merged == 0:
-            self._merge_buffmv[:len_header] = header
-            self._merge_buffmv[len_header:len_header+len_data] = data
-            self._merge_buffmv[len_header+len_data:total_len] = _CRLF
-            self._send_raw(self._merge_buffmv[:total_len])
-            return
+        if self._merge_buffmv is not None and self._merged == 0:
+            len_header = len(header)
+            len_data = len(data)
+            total_len = len_header + len_data + 2
+            if total_len <= self._merge_buffer_size:
+                self._merge_buffmv[:len_header] = header
+                self._merge_buffmv[len_header:len_header+len_data] = data
+                self._merge_buffmv[len_header+len_data:total_len] = _CRLF
+                self._send_raw(self._merge_buffmv[:total_len])
+                return
         self._send_raw(header)
         self._send_raw(data)
         self._send_raw(_CRLF)
