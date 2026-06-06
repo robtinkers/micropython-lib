@@ -9,7 +9,7 @@ HTTPS_PORT = const(443)
 _GC_THRESHOLD = const(32768)
 
 # Headers to always retain when parse_headers() filters
-_IMPORTANT_HEADERS = (
+_IMPORTANT_HEADERS = {
     b"connection",
     b"content-encoding",
     b"content-length",
@@ -20,7 +20,7 @@ _IMPORTANT_HEADERS = (
     b"retry-after",
     b"transfer-encoding",
     b"www-authenticate",
-)
+}
 
 # HTTP methods that expect a body
 _METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
@@ -39,12 +39,12 @@ class ResponseNotReady(ImproperConnectionState): pass
 class IncompleteRead(HTTPException): pass
 
 @micropython.viper
-def _lower(buf:ptr8, buflen:int, do_lower:int) -> int:
+def _normal_case(buf:ptr8, buflen:int, update:int) -> int:
     i = 0
     while i < buflen:
         b = buf[i]
         if (65 <= b and b <= 90):
-            if not do_lower:
+            if not update:
                 return 0
             buf[i] = b + 32
         i += 1
@@ -61,10 +61,10 @@ def _normalize_key(key):
             key = bytes(key)
         key = key.strip()
         len_key = len(key)
-    if not _lower(key, len_key, False):
+    if not _normal_case(key, len_key, False):
         if not isinstance(key, bytearray):
             key = bytearray(key)
-        _lower(key, len_key, True)
+        _normal_case(key, len_key, True)
     return key
 
 @micropython.viper
@@ -110,12 +110,14 @@ def create_connection(address, timeout=None):
                 raise e
     raise OSError(errno.EHOSTUNREACH)
 
-def parse_headers(sock, *, extra_headers=True):
+def parse_headers(sock, *, extra_headers=True, cookies=None):
     # Returns [lowercase_key_bytes, value_bytes, ...]. extra_headers:
     #   None       -> skip all headers
     #   True       -> keep all headers
     #   Falsy      -> keep _IMPORTANT_HEADERS only
     #   container  -> keep _IMPORTANT_HEADERS plus those in container
+    if cookies is None:
+        cookies = extra_headers is True or (extra_headers and b"set-cookie" in extra_headers)
     headers = []
     _append = headers.append
     _readline = sock.readline
@@ -135,10 +137,15 @@ def parse_headers(sock, *, extra_headers=True):
         key = _normalize_key(key)
         if not isinstance(key, bytes):
             key = bytes(key)
-        if extra_headers is True or (extra_headers and key in extra_headers) or key in _IMPORTANT_HEADERS:
-            val = val.strip()
-            _append(key)
-            _append(val)
+        if key == b"set-cookie":
+            if not cookies:
+                continue
+        else:
+            if key not in _IMPORTANT_HEADERS and extra_headers is not True and (not extra_headers or key not in extra_headers):
+                continue
+        val = val.strip()
+        _append(key)
+        _append(val)
 
 class HTTPResponse:
     blocksize = const(2048)
@@ -168,21 +175,21 @@ class HTTPResponse:
         # the socket closed even if response would otherwise keep-alive.
         self._tainted = False
 
-    def begin(self, *, extra_headers=True):
+    def begin(self, *, extra_headers=False, cookies=None):
         self.version, self.status, self.reason = self._read_status()
         if self.debuglevel > 0:
             print("status:", repr(self.version), repr(self.status), repr(self.reason))
 
-        self.headers = parse_headers(self._sock, extra_headers=extra_headers)
+        self.headers = parse_headers(self._sock, extra_headers=extra_headers, cookies=cookies)
         if self.debuglevel > 0:
             for key, val in self.headers:
                 print("header:", repr(key), "=", repr(val))
 
-        transfer_encoding = self._getheaderbytesfast(b"transfer-encoding", b"")
+        transfer_encoding = self._getheaderbytes(b"transfer-encoding", b"")
         self.chunked = bool(transfer_encoding) and b"chunked" in transfer_encoding
         self.chunk_left = None
 
-        conn = self._getheaderbytesfast(b"connection", b"")
+        conn = self._getheaderbytes(b"connection", b"")
         if self.version == 10:
             self.will_close = (not conn) or b"keep-alive" not in conn.lower()
         else:
@@ -190,7 +197,7 @@ class HTTPResponse:
 
         # Content-Length ignored when chunked.
         self.length = None
-        length = self._getheaderbytesfast(b"content-length")
+        length = self._getheaderbytes(b"content-length")
         if length and not self.chunked:
             try:
                 self.length = int(length, 10)
@@ -259,9 +266,6 @@ class HTTPResponse:
         return version, status, reason
 
     def close(self, _tainted=False):
-        # _tainted ALWAYS raises IncompleteRead after closing the socket.
-        # Reader code in _next_chunk/_readinto_chunked relies on this for
-        # control flow; do not break this contract.
         if _tainted:
             self._tainted = True
         sock = self._sock
@@ -281,57 +285,96 @@ class HTTPResponse:
         return self._sock is None
 
     def read(self, amt=None):
+        return self._read_dispatcher(self._read, amt)
+
+    def readshort(self, amt=None):
+        return self._read_dispatcher(self._readshort, amt)
+
+    def _read_dispatcher(self, func, amt):
         if amt is None or amt < 0:
             return self._read_all()
         if self.length is not None:
             amt = min(amt, self.length - self._bytes_read)
-        if amt == 0:
+        if amt == 0 or self.isclosed():
             return _BLANK
-        buf = bytearray(amt)
-        n = self.readinto(buf)
-        if n == 0:
+        return func(amt)
+
+    def _read(self, amt):
+        out = _BLANK
+        while len(out) < amt:
+            chunk = self._readshort(amt - len(out))
+            if not chunk:
+                break
+            if out is _BLANK:
+                out = chunk
+            elif type(out) is bytes:
+                out = bytearray(out)
+                out.extend(chunk)
+            else:
+                out.extend(chunk)
+        return out
+
+    def _readshort(self, amt):
+        if self.chunked:
+            amt = min(amt, self._next_chunk())
+            if amt == 0:
+                return _BLANK
+        data = self._sock.read(amt)
+        if not data:
+            self.close(self.length is not None)
             return _BLANK
-        if n < amt:
-            return memoryview(buf)[:n]
-        return buf
+        self._bytes_read += len(data)
+        if self.chunked:
+            self.chunk_left -= len(data)
+        if self.length is not None and self._bytes_read >= self.length:
+            self.close()
+        return data
 
     def _read_all(self):
         if self.chunked:
-            buflen = self.blocksize
-            buf = bytearray(buflen)
-            bmv = memoryview(buf)
-            out = bytearray()
+            out = _BLANK
             while True:
-                n = self._readinto_chunked(bmv)
-                if n == 0:
+                avail = self._next_chunk()
+                if avail == 0:
                     return out
-                if n == buflen:
-                    out.extend(buf)
+                data = self._sock.read(avail)
+                if not data:
+                    self.close(True)
+                self._bytes_read += len(data)
+                self.chunk_left -= len(data)
+                if out is _BLANK:
+                    out = data
+                elif type(out) is bytes:
+                    out = bytearray(out)
+                    out.extend(data)
                 else:
-                    out.extend(bmv[:n])
+                    out.extend(data)
+
         if self.length is not None:
             amt = self.length - self._bytes_read
             if amt == 0:
                 return _BLANK
-            buf = bytearray(amt)
-            n = self._readinto_raw(buf)
-            if n == 0:
+            data = self._sock.read(amt)
+            if not data:
+                self.close(True)
                 return _BLANK
-            if n < amt:
-                return memoryview(buf)[:n]
-            return buf
-        # Length unknown, not chunked: read until close.
-        if not self.isclosed():
-            try:
-                buf = self._sock.read()
-            finally:
-                self.close()
-            if buf is not None:
-                self._bytes_read += len(buf)
-                return buf
-        return _BLANK
+            self._bytes_read += len(data)
+            if self._bytes_read >= self.length:
+                self.close(self._bytes_read > self.length)
+            return data
+
+        try:
+            data = self._sock.read()
+            if not data:
+                return _BLANK
+            self._bytes_read += len(data)
+            return data
+        finally:
+            self.close()
 
     def readinto(self, buf):
+        if self.isclosed() or not buf:
+            return 0
         if self.chunked:
             return self._readinto_chunked(buf)
         else:
@@ -339,8 +382,6 @@ class HTTPResponse:
 
     def _readinto_chunked(self, buf):
         buflen = len(buf)
-        if buflen == 0 or self.isclosed():
-            return 0
         if isinstance(buf, memoryview):
             bmv = buf
         else:
@@ -356,21 +397,18 @@ class HTTPResponse:
             else:
                 n = self._sock.readinto(bmv[total:], amt)
             if n == 0:
-                self.close(True)  # raises
+                self.close(True)
             self._bytes_read += n
             self.chunk_left -= n
             total += n
         return total
 
     def _next_chunk(self):
-        # Advances the chunk state machine. Returns bytes available in
-        # the current data chunk, or 0 at the end of the body.
-        # .close(True) sites below transfer control via IncompleteRead.
         while True:
             if self.chunk_left is None:
                 line = self._sock.readline()
                 if not line:
-                    self.close(True)  # raises
+                    self.close(True)
                 sep = line.find(b";")
                 if sep >= 0:
                     line = line[:sep]
@@ -379,10 +417,9 @@ class HTTPResponse:
                 except ValueError:
                     size = -1
                 if size < 0:
-                    self.close(True)  # raises
+                    self.close(True)
                 self.chunk_left = size
                 if size == 0:
-                    # Drain trailers; clean exit if blank line, taint on EOF.
                     while True:
                         line = self._sock.readline()
                         if not line or line == _CRLF or line == b"\n":
@@ -390,19 +427,15 @@ class HTTPResponse:
                             self.close(not line)
                             return 0
             elif self.chunk_left == 0:
-                # Consume CRLF terminating the previous data chunk.
                 line = self._sock.readline()
                 if line != _CRLF and line != b"\n":
-                    self.close(True)  # raises
+                    self.close(True)
                 self.chunk_left = None
             else:
                 return self.chunk_left
 
     def _readinto_raw(self, buf):
         buflen = len(buf)
-        if buflen == 0 or self.isclosed():
-            return 0
-
         if self.length is None:
             amt = buflen
         else:
@@ -413,7 +446,6 @@ class HTTPResponse:
 
         n = self._sock.readinto(buf, amt)
         if n == 0:
-            # EOF: taint only if we expected more bytes.
             self.close(self.length is not None)
             return 0
         self._bytes_read += n
@@ -442,23 +474,24 @@ class HTTPResponse:
         return default
 
     def getheaderbytes(self, key, default=None):
-        if self.headers is None:
+        _headers = self.headers
+        if _headers is None:
             raise ResponseNotReady()
         key = _normalize_key(key)
         match = None
-        for i in range(0, len(self.headers), 2):
-            if self.headers[i] == key:
-                v = self.headers[i+1]
+        for i in range(0, len(_headers), 2):
+            if _headers[i] == key:
                 if match is None:
-                    match = v
+                    match = _headers[i+1]
                 else:
-                    match = match + b", " + v
+                    match = match + b", " + _headers[i+1]
         return default if match is None else match
 
-    def _getheaderbytesfast(self, key, default=None):
-        for i in range(0, len(self.headers), 2):
-            if self.headers[i] == key:
-                return self.headers[i+1]
+    def _getheaderbytes(self, key, default=None):
+        _headers = self.headers
+        for i in range(0, len(_headers), 2):
+            if _headers[i] == key:
+                return _headers[i+1]
         return default
 
     def getcookies(self):
@@ -514,10 +547,7 @@ class HTTPConnection:
         self.debuglevel = 0
         self.timeout = timeout
         self._sock = None
-        if self._merge_buffer_size:
-            self._merge_buffmv = memoryview(bytearray(self._merge_buffer_size))
-        else:
-            self._merge_buffmv = None
+        self._merge_buffmv = None
         self._merged = 0
         self.__response = None
         self._method = None
@@ -667,27 +697,33 @@ class HTTPConnection:
 
     def _putheaderparts(self, flush, *parts):
         # Coalesces small writes into a single sendall.
+        _send_raw = self._send_raw
+        _buffer_size = self._merge_buffer_size
+        if self._merge_buffmv is None and _buffer_size:
+            self._merge_buffmv = memoryview(bytearray(_buffer_size))
+        _buffmv = self._merge_buffmv
+        _merged = self._merged
         for part in parts:
-            if self._merge_buffmv is None:
-                self._send_raw(part)
+            if _buffmv is None:
+                _send_raw(part)
                 continue
             len_part = len(part)
-            if len_part >= self._merge_buffer_size:
-                if self._merged:
-                    self._send_raw(self._merge_buffmv[:self._merged])
-                    self._merged = 0
-                self._send_raw(part)
-            elif self._merged + len_part <= self._merge_buffer_size:
-                self._merge_buffmv[self._merged:self._merged+len_part] = part
-                self._merged += len_part
+            if len_part >= _buffer_size:
+                if _merged:
+                    _send_raw(_buffmv[:_merged])
+                    _merged = 0
+                _send_raw(part)
+            elif _merged + len_part <= _buffer_size:
+                _buffmv[_merged:_merged+len_part] = part
+                _merged += len_part
             else:
-                self._send_raw(self._merge_buffmv[:self._merged])
-                self._merge_buffmv[:len_part] = part
-                self._merged = len_part
-
-        if flush and self._merged:
-            self._send_raw(self._merge_buffmv[:self._merged])
-            self._merged = 0
+                _send_raw(_buffmv[:_merged])
+                _buffmv[:len_part] = part
+                _merged = len_part
+        if flush and _merged:
+            _send_raw(_buffmv[:_merged])
+            _merged = 0
+        self._merged = _merged
 
     def endheaders(self, message_body=None, *, encode_chunked=False):
         if self.__response is not None:
