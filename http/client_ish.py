@@ -266,9 +266,6 @@ class HTTPResponse:
         return version, status, reason
 
     def close(self, _tainted=False):
-        # _tainted ALWAYS raises IncompleteRead after closing the socket.
-        # Reader code in _next_chunk/_readinto_chunked relies on this for
-        # control flow; do not break this contract.
         if _tainted:
             self._tainted = True
         sock = self._sock
