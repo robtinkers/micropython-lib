@@ -266,6 +266,9 @@ class HTTPResponse:
         return version, status, reason
 
     def close(self, _tainted=False):
+        # _tainted ALWAYS raises IncompleteRead after closing the socket.
+        # Reader code in _next_chunk/_readinto_chunked relies on this for
+        # control flow; do not break this contract.
         if _tainted:
             self._tainted = True
         sock = self._sock
@@ -285,21 +288,15 @@ class HTTPResponse:
         return self._sock is None
 
     def read(self, amt=None):
-        return self._read_dispatcher(self._read, amt)
-
-    def readshort(self, amt=None):
-        return self._read_dispatcher(self._readshort, amt)
-
-    def _read_dispatcher(self, func, amt):
+        if self.isclosed():
+            return _BLANK
         if amt is None or amt < 0:
             return self._read_all()
         if self.length is not None:
             amt = min(amt, self.length - self._bytes_read)
-        if amt == 0 or self.isclosed():
+        if amt == 0:
             return _BLANK
-        return func(amt)
 
-    def _read(self, amt):
         out = _BLANK
         while len(out) < amt:
             chunk = self._readshort(amt - len(out))
@@ -313,6 +310,17 @@ class HTTPResponse:
             else:
                 out.extend(chunk)
         return out
+
+    def readshort(self, amt=None):
+        if self.isclosed():
+            return _BLANK
+        if amt is None or amt < 0:
+            amt = self.blocksize
+        if self.length is not None:
+            amt = min(amt, self.length - self._bytes_read)
+        if amt == 0:
+            return _BLANK
+        return self._readshort(amt)
 
     def _readshort(self, amt):
         if self.chunked:
