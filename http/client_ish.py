@@ -836,7 +836,8 @@ except ImportError:
 else:
     class HTTPSConnection(HTTPConnection):
         default_port = const(HTTPS_PORT)
-        _merge_buffer_size = const(1408)
+        blocksize = const(1200)
+        _merge_buffer_size = const(1200)
 
         def __init__(self, *args, context=None, **kwargs):
             super().__init__(*args, **kwargs)
