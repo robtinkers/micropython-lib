@@ -133,9 +133,9 @@ def parse_headers(sock, *, extra_headers=True):
             continue
         key, val = line[:sep], line[sep+1:]
         key = _normalize_key(key)
+        if not isinstance(key, bytes):
+            key = bytes(key)
         if extra_headers is True or (extra_headers and key in extra_headers) or key in _IMPORTANT_HEADERS:
-            if not isinstance(key, bytes):
-                key = bytes(key)
             val = val.strip()
             _append(key)
             _append(val)
@@ -281,10 +281,7 @@ class HTTPResponse:
         return self._sock is None
 
     def read(self, amt=None):
-        if amt is None:
-            return self._read_all()
-        amt = int(amt)
-        if amt < 0:
+        if amt is None or amt < 0:
             return self._read_all()
         if self.length is not None:
             amt = min(amt, self.length - self._bytes_read)
@@ -295,7 +292,7 @@ class HTTPResponse:
         if n == 0:
             return _BLANK
         if n < amt:
-            del buf[n:]
+            return memoryview(buf)[:n]
         return buf
 
     def _read_all(self):
@@ -318,8 +315,10 @@ class HTTPResponse:
                 return _BLANK
             buf = bytearray(amt)
             n = self._readinto_raw(buf)
+            if n == 0:
+                return _BLANK
             if n < amt:
-                del buf[n:]
+                return memoryview(buf)[:n]
             return buf
         # Length unknown, not chunked: read until close.
         if not self.isclosed():
@@ -453,7 +452,7 @@ class HTTPResponse:
                 if match is None:
                     match = v
                 else:
-                    match = b", ".join((match, v)) 
+                    match = match + b", " + v
         return default if match is None else match
 
     def _getheaderbytesfast(self, key, default=None):
