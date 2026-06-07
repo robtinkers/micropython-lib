@@ -25,10 +25,10 @@ class ResponseNotReady(ImproperConnectionState): pass
 class IncompleteRead(HTTPException): pass
 
 @micropython.viper
-def _validate_iso8859_1(buf:ptr8, offset:int, length:int, no_space:int) -> int:
-    i = 0
-    while i < length:
-        b = buf[offset+i]
+def _validate_iso8859_1(buf:ptr8, start:int, end:int, no_space:int) -> int:
+    i = start
+    while i < end:
+        b = buf[i]
         if b < 9 or (b == 9 and no_space) or (9 < b and b < 32) or (b == 32 and no_space) or (127 == b):
             return 0
         i += 1
@@ -46,38 +46,36 @@ def _encode_and_validate(val, force_bytes, no_space):
     return val
 
 @micropython.viper
-def _lower_case(buf:ptr8, offset:int, length:int, dst:ptr8) -> int:
-    i = 0
-    while i < length:
-        b = buf[offset+i]
+def _lower_case(buf:ptr8, start:int, end:int, dst:ptr8) -> int:
+    i = start
+    while i < end:
+        b = buf[i]
         if dst == 0:
             if 65 <= b and b <= 90:
                 return 0
         else:
             if 65 <= b and b <= 90:
                 b += 32
-            dst[i] = b
+            dst[i - start] = b
         i += 1
     return 1
 
-def _normalize_key(key):
-    if isinstance(key, str):
-        key = key.encode()
-    elif not isinstance(key, (bytes, bytearray, memoryview)):
-        key = str(key).encode()
-    len_key = len(key)
-    start, end = 0, len_key
-    while start < end and key[start] <= 32: start += 1
-    while end > start and key[end - 1] <= 32: end -= 1
-    length = end - start
-    if _lower_case(key, start, length, 0):
-        if start == 0 and end == len_key:
-            return key
-        if isinstance(key, memoryview):
-            return bytes(key[start:end])
-        return key[start:end]
-    out = bytearray(length)
-    _lower_case(key, start, length, out)
+def _normalize_key(buf, start, end):
+    assert 0 <= start <= end
+    if isinstance(buf, str):
+        buf = buf.encode()
+    elif not isinstance(buf, (bytes, bytearray, memoryview)):
+        buf = str(buf).encode()
+    if not _validate_iso8859_1(buf, start, end, 1):
+        raise ValueError("invalid ISO-8859-1 key")
+    if _lower_case(buf, start, end, 0):
+        if isinstance(buf, memoryview):
+            return bytes(buf[start:end])
+        if start == 0 and end == len(buf):
+            return buf
+        return buf[start:end]
+    out = bytearray(end - start)
+    _lower_case(buf, start, end, out)
     return out
 
 _keep_response_headers = {
@@ -91,7 +89,7 @@ _keep_response_headers = {
 }
 
 def keep_response_header(key):
-    key = _normalize_key(key)
+    key = _normalize_key(key, 0, len(key))
     if not isinstance(key, bytes):
         key = bytes(key)
     len_key = len(key)
@@ -102,13 +100,13 @@ def keep_response_header(key):
         cands.append(key)
 
 @micropython.viper
-def _memeqci(cand:ptr8, raw:ptr8, offset:int, length:int) -> int:
-    i = 0
-    while i < length:
-        x = raw[offset + i]
+def _memeqci(raw:ptr8, start:int, end:int, cand:ptr8) -> int:
+    i = start
+    while i < end:
+        x = raw[i]
         if 65 <= x and x <= 90:
             x = x + 32
-        if x != cand[i]:
+        if x != cand[i - start]:
             return 0
         i += 1
     return 1
@@ -131,18 +129,15 @@ def parse_headers(sock, *, all_headers=False, cookies=None):
         if sep == -1:
             continue
 
+        start, end = 0, sep
+        while start < end and line[start] <= 32: start += 1
+        while end > start and line[end - 1] <= 32: end -= 1
+
         key = None
-        end = sep
-        offset = 0
-        while offset < end and line[offset] <= 32:
-            offset += 1
-        while end > offset and line[end - 1] <= 32:
-            end -= 1
-        length = end - offset
-        cands = _keep_response_headers.get(length)
+        cands = _keep_response_headers.get(end - start)
         if cands is not None:
             for cand in cands:
-                if _memeqci(cand, line, offset, length):
+                if _memeqci(line, start, end, cand):
                     key = cand
                     break
 
@@ -152,9 +147,10 @@ def parse_headers(sock, *, all_headers=False, cookies=None):
         else:
             if not all_headers:
                 continue
-            key = _normalize_key(line[:sep])
+            key = _normalize_key(line, start, end)
             if not isinstance(key, bytes):
                 key = bytes(key)
+
         start, end = sep + 1, len(line)
         while start < end and line[start] <= 32: start += 1
         while end > start and line[end - 1] <= 32: end -= 1
@@ -218,8 +214,8 @@ class HTTPResponse:
 
         self._headers = parse_headers(self._sock, all_headers=all_headers, cookies=cookies)
         if self.debuglevel > 0:
-            for key, val in self._headers:
-                print("header:", repr(key), "=", repr(val))
+            for i in range(0, len(self._headers), 2):
+                print("header:", repr(self._headers[i]), "=", repr(self._headers[i+1]))
 
         # Single pass: pull transfer-encoding, connection, content-length.
         # On duplicate headers the last occurrence wins.
@@ -279,7 +275,7 @@ class HTTPResponse:
 
             line = line.split(None, 2)
             if len(line) == 3:
-                version, status, reason = line  # caller should rstrip reason
+                version, status, reason = line  # the application should rstrip reason
             elif len(line) == 2:
                 version, status = line
                 reason = _BLANK
@@ -370,17 +366,20 @@ class HTTPResponse:
             return data
 
         out = _BLANK
-        while unbounded or len(out) < amt:
+        len_out = 0
+        while unbounded or len_out < amt:
             avail = self._next_chunk()
-            want = avail if unbounded else min(amt - len(out), avail)
+            want = avail if unbounded else min(amt - len_out, avail)
             if want == 0:
                 break
             chunk = self._sock.read(want)
             if not chunk:
                 self.close(True)
                 break
-            self._bytes_read += len(chunk)
-            self.chunk_left -= len(chunk)
+            len_chunk = len(chunk)
+            self._bytes_read += len_chunk
+            self.chunk_left -= len_chunk
+            len_out += len_chunk
             if out is _BLANK:
                 out = chunk
             elif type(out) is bytes:
@@ -519,7 +518,7 @@ class HTTPResponse:
     def getheaderbytes(self, key, default=None):
         if self._headers is None:
             raise ResponseNotReady()
-        key = _normalize_key(key)
+        key = _normalize_key(key, 0, len(key))
         match = None
         for i in range(0, len(self._headers), 2):
             if self._headers[i] == key:
@@ -659,7 +658,7 @@ class HTTPConnection:
                 pairs = list(headers)
             headers = None
             for key, _value in pairs:
-                key = _normalize_key(key)
+                key = _normalize_key(key, 0, len(key))
                 if key == b"accept-encoding":
                     have_accept_encoding = True
                 elif key == b"content-length":
