@@ -25,41 +25,38 @@ class ResponseNotReady(ImproperConnectionState): pass
 class IncompleteRead(HTTPException): pass
 
 @micropython.viper
-def _validate_ascii(buf:ptr8, buflen:int, no_space:int) -> int:
+def _validate_iso8859_1(buf:ptr8, offset:int, length:int, no_space:int) -> int:
     i = 0
-    while i < buflen:
-        b = buf[i]
-        if b < 9 or (b == 9 and no_space) or (9 < b and b < 32) or (b == 32 and no_space) or b >= 127:
+    while i < length:
+        b = buf[offset+i]
+        if b < 9 or (b == 9 and no_space) or (9 < b and b < 32) or (b == 32 and no_space) or (127 == b):
             return 0
         i += 1
     return 1
 
 def _encode_and_validate(val, force_bytes, no_space):
     if isinstance(val, str):
-        val = val.encode()
+        val = val.encode() # unfortunately, micropython doesn't support "iso8859-1" encoding
     elif not isinstance(val, (bytes, bytearray, memoryview)):
         val = str(val).encode()
-    if not _validate_ascii(val, len(val), no_space):
-        raise ValueError("can't contain special characters")
+    if not _validate_iso8859_1(val, 0, len(val), no_space):
+        raise ValueError("not ISO-8859-1")
     if force_bytes and not isinstance(val, bytes):
         val = bytes(val)
     return val
 
 @micropython.viper
-def _normal_case(buf:ptr8, buflen:int, dst:ptr8) -> int:
+def _lower_case(buf:ptr8, offset:int, length:int, dst:ptr8) -> int:
     i = 0
-    if dst == 0:
-        while i < buflen:
-            b = buf[i]
+    while i < length:
+        b = buf[offset+i]
+        if dst == 0:
             if 65 <= b and b <= 90:
                 return 0
-            i += 1
-        return 1
-    while i < buflen:
-        b = buf[i]
-        if 65 <= b and b <= 90:
-            b = b + 32
-        dst[i] = b
+        else:
+            if 65 <= b and b <= 90:
+                b += 32
+            dst[i] = b
         i += 1
     return 1
 
@@ -69,41 +66,40 @@ def _normalize_key(key):
     elif not isinstance(key, (bytes, bytearray, memoryview)):
         key = str(key).encode()
     len_key = len(key)
-    if len_key and (key[0] <= 32 or key[-1] <= 32):
+    start, end = 0, len_key
+    while start < end and key[start] <= 32: start += 1
+    while end > start and key[end - 1] <= 32: end -= 1
+    length = end - start
+    if _lower_case(key, start, length, 0):
+        if start == 0 and end == len_key:
+            return key
         if isinstance(key, memoryview):
-            key = bytes(key)
-        key = key.strip()
-        len_key = len(key)
-    if not _normal_case(key, len_key, 0):
-        out = bytearray(len_key)
-        _normal_case(key, len_key, out)
-        key = out
-    return key
+            return bytes(key[start:end])
+        return key[start:end]
+    out = bytearray(length)
+    _lower_case(key, start, length, out)
+    return out
 
-_server_headers = {}
+_keep_response_headers = {
+    4:[b"etag"],
+    8:[b"location"],
+    10:[b"connection", b"set-cookie"],
+    12:[b"content-type"],
+    14:[b"content-length"],
+    16:[b"content-encoding"],
+    17:[b"transfer-encoding"],
+}
 
-def keep_server_header(key):
+def keep_response_header(key):
     key = _normalize_key(key)
     if not isinstance(key, bytes):
         key = bytes(key)
     len_key = len(key)
-    cands = _server_headers.get(len_key)
+    cands = _keep_response_headers.get(len_key)
     if cands is None:
-        _server_headers[len_key] = [key]
+        _keep_response_headers[len_key] = [key]
     elif key not in cands:
         cands.append(key)
-
-keep_server_header(b"connection")
-keep_server_header(b"content-encoding")
-keep_server_header(b"content-length")
-keep_server_header(b"content-type")
-keep_server_header(b"etag")
-keep_server_header(b"keep-alive")
-keep_server_header(b"location")
-keep_server_header(b"retry-after")
-keep_server_header(b"set-cookie")
-keep_server_header(b"transfer-encoding")
-keep_server_header(b"www-authenticate")
 
 @micropython.viper
 def _memeqci(cand:ptr8, raw:ptr8, offset:int, length:int) -> int:
@@ -143,7 +139,7 @@ def parse_headers(sock, *, all_headers=False, cookies=None):
         while end > offset and line[end - 1] <= 32:
             end -= 1
         length = end - offset
-        cands = _server_headers.get(length)
+        cands = _keep_response_headers.get(length)
         if cands is not None:
             for cand in cands:
                 if _memeqci(cand, line, offset, length):
@@ -159,9 +155,11 @@ def parse_headers(sock, *, all_headers=False, cookies=None):
             key = _normalize_key(line[:sep])
             if not isinstance(key, bytes):
                 key = bytes(key)
-        val = line[sep+1:].strip()
+        start, end = sep + 1, len(line)
+        while start < end and line[start] <= 32: start += 1
+        while end > start and line[end - 1] <= 32: end -= 1
         _append(key)
-        _append(val)
+        _append(line[start:end])
 
 def create_connection(address, timeout=None):
     host, port = address
@@ -315,8 +313,8 @@ class HTTPResponse:
 
         return version, status, reason
 
-    def close(self, _tainted=False):
-        if _tainted:
+    def close(self, tainted=False):
+        if tainted:
             self._tainted = True
         sock = self._sock
         self._sock = None
@@ -328,7 +326,7 @@ class HTTPResponse:
             if self._tainted or framing_incomplete or self.will_close:
                 try: sock.close()
                 except OSError: pass
-        if _tainted:
+        if tainted:
             raise IncompleteRead(self._bytes_read, self.length)
 
     def isclosed(self):
@@ -337,18 +335,52 @@ class HTTPResponse:
     def read(self, amt=None):
         if self.isclosed():
             return _BLANK
-        if amt is None or amt < 0:
-            return self._read_all()
+
+        unbounded = amt is None or amt < 0
+        if unbounded and self.length is None and not self.chunked:
+            # Close-delimited: read until EOF in one call.
+            try:
+                data = self._sock.read()
+                if not data:
+                    return _BLANK
+                self._bytes_read += len(data)
+                return data
+            finally:
+                self.close()
+
         if self.length is not None:
-            amt = min(amt, self.length - self._bytes_read)
-        if amt == 0:
+            remaining = self.length - self._bytes_read
+            amt = remaining if unbounded else min(amt, remaining)
+            unbounded = False
+            if amt == 0:
+                if remaining == 0:
+                    self.close()
+                return _BLANK
+        elif not unbounded and amt == 0:
             return _BLANK
 
+        if not self.chunked:
+            data = self._sock.read(amt)
+            if not data:
+                self.close(self.length is not None)
+                return _BLANK
+            self._bytes_read += len(data)
+            if self.length is not None and self._bytes_read >= self.length:
+                self.close()
+            return data
+
         out = _BLANK
-        while len(out) < amt:
-            chunk = self._readshort(amt - len(out))
-            if not chunk:
+        while unbounded or len(out) < amt:
+            avail = self._next_chunk()
+            want = avail if unbounded else min(amt - len(out), avail)
+            if want == 0:
                 break
+            chunk = self._sock.read(want)
+            if not chunk:
+                self.close(True)
+                break
+            self._bytes_read += len(chunk)
+            self.chunk_left -= len(chunk)
             if out is _BLANK:
                 out = chunk
             elif type(out) is bytes:
@@ -364,77 +396,53 @@ class HTTPResponse:
         if amt is None or amt < 0:
             amt = self.blocksize
         if self.length is not None:
-            amt = min(amt, self.length - self._bytes_read)
+            remaining = self.length - self._bytes_read
+            if remaining == 0:
+                self.close()
+                return _BLANK
+            amt = min(amt, remaining)
         if amt == 0:
             return _BLANK
-        return self._readshort(amt)
 
-    def _readshort(self, amt):
         if self.chunked:
             amt = min(amt, self._next_chunk())
             if amt == 0:
                 return _BLANK
+
         data = self._sock.read(amt)
         if not data:
-            self.close(self.length is not None)
+            self.close(self.chunked or self.length is not None)
             return _BLANK
-        self._bytes_read += len(data)
+        n = len(data)
+        self._bytes_read += n
         if self.chunked:
-            self.chunk_left -= len(data)
+            self.chunk_left -= n
         if self.length is not None and self._bytes_read >= self.length:
             self.close()
         return data
 
-    def _read_all(self):
-        if self.chunked:
-            out = _BLANK
-            while True:
-                avail = self._next_chunk()
-                if avail == 0:
-                    return out
-                data = self._sock.read(avail)
-                if not data:
-                    self.close(True)
-                self._bytes_read += len(data)
-                self.chunk_left -= len(data)
-                if out is _BLANK:
-                    out = data
-                elif type(out) is bytes:
-                    out = bytearray(out)
-                    out.extend(data)
-                else:
-                    out.extend(data)
-
-        if self.length is not None:
-            amt = self.length - self._bytes_read
-            if amt == 0:
-                return _BLANK
-            data = self._sock.read(amt)
-            if not data:
-                self.close(True)
-            self._bytes_read += len(data)
-            if self._bytes_read >= self.length:
-                self.close(self._bytes_read > self.length)
-            return data
-
-        try:
-            data = self._sock.read()
-            if not data:
-                return _BLANK
-            self._bytes_read += len(data)
-            return data
-        finally:
-            self.close()
-
     def readinto(self, buf):
         if self.isclosed() or not buf:
             return 0
-        if self.chunked:
-            return self._readinto_chunked(buf)
-        else:
-            return self._readinto_raw(buf)
 
-    def _readinto_chunked(self, buf):
+        if not self.chunked:
+            buflen = len(buf)
+            if self.length is None:
+                amt = buflen
+            else:
+                amt = min(buflen, self.length - self._bytes_read)
+                if amt == 0:
+                    self.close()
+                    return 0
+            n = self._sock.readinto(buf, amt)
+            if n == 0:
+                self.close(self.length is not None)
+                return 0
+            self._bytes_read += n
+            if self.length is not None and self._bytes_read >= self.length:
+                self.close()
+            return n
+
         buflen = len(buf)
         if isinstance(buf, memoryview):
             bmv = buf
@@ -487,25 +495,6 @@ class HTTPResponse:
                 self.chunk_left = None
             else:
                 return self.chunk_left
-
-    def _readinto_raw(self, buf):
-        buflen = len(buf)
-        if self.length is None:
-            amt = buflen
-        else:
-            amt = min(buflen, self.length - self._bytes_read)
-            if amt == 0:
-                self.close()
-                return 0
-
-        n = self._sock.readinto(buf, amt)
-        if n == 0:
-            self.close(self.length is not None)
-            return 0
-        self._bytes_read += n
-        if self.length is not None and self._bytes_read >= self.length:
-            self.close()
-        return n
 
     def getheaders(self):
         if self._headers is None:
@@ -593,6 +582,7 @@ class HTTPConnection:
         self.debuglevel = 0
         self.timeout = timeout
         self._sock = None
+        self._merge_buffer = None
         self._merge_buffmv = None
         self._merged = 0
         self.__response = None
@@ -613,6 +603,7 @@ class HTTPConnection:
         self._can_reconnect = False
         self._merged = 0
         self._merge_buffmv = None
+        self._merge_buffer = None
         response = self.__response
         self.__response = None
         if response is not None:
@@ -746,8 +737,10 @@ class HTTPConnection:
         # Coalesces small writes into a single sendall.
         _send_raw = self._send_raw
         _buffer_size = self._merge_buffer_size
-        if self._merge_buffmv is None and _buffer_size:
-            self._merge_buffmv = memoryview(bytearray(_buffer_size))
+        if self._merge_buffer is None and _buffer_size:
+            self._merge_buffer = bytearray(_buffer_size)
+            self._merge_buffmv = memoryview(self._merge_buffer)
+        _buffer = self._merge_buffer
         _buffmv = self._merge_buffmv
         _merged = self._merged
         for part in parts:
@@ -761,11 +754,11 @@ class HTTPConnection:
                     _merged = 0
                 _send_raw(part)
             elif _merged + len_part <= _buffer_size:
-                _buffmv[_merged:_merged+len_part] = part
+                _buffer[_merged:_merged+len_part] = part
                 _merged += len_part
             else:
                 _send_raw(_buffmv[:_merged])
-                _buffmv[:len_part] = part
+                _buffer[:len_part] = part
                 _merged = len_part
         if flush and _merged:
             _send_raw(_buffmv[:_merged])
@@ -820,13 +813,13 @@ class HTTPConnection:
             return
         len_data = len(data)
         header = b"%X\r\n" % len_data
-        if self._merge_buffmv is not None and self._merged == 0:
+        if self._merge_buffer is not None and self._merged == 0:
             len_header = len(header)
             total_len = len_header + len_data + 2
             if total_len <= self._merge_buffer_size:
-                self._merge_buffmv[:len_header] = header
-                self._merge_buffmv[len_header:len_header+len_data] = data
-                self._merge_buffmv[len_header+len_data:total_len] = _CRLF
+                self._merge_buffer[:len_header] = header
+                self._merge_buffer[len_header:len_header+len_data] = data
+                self._merge_buffer[len_header+len_data:total_len] = _CRLF
                 self._send_raw(self._merge_buffmv[:total_len])
                 return
         self._send_raw(header)
@@ -902,9 +895,6 @@ class HTTPConnection:
                 gc.collect()
 
     def detach(self):
-        self._can_reconnect = False
-        self._merged = 0
-        self._merge_buffmv = None
         if self.__response is not None:
             sock = self.__response._sock
             self.__response._sock = None
@@ -912,6 +902,10 @@ class HTTPConnection:
         else:
             sock = self._sock
         self._sock = None
+        self._can_reconnect = False
+        self._merged = 0
+        self._merge_buffmv = None
+        self._merge_buffer = None
         return sock
 
 try:
