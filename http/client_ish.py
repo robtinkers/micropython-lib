@@ -82,9 +82,10 @@ _keep_response_headers = {
     4:[b"etag"],
     8:[b"location"],
     10:[b"connection", b"set-cookie"],
+    11:[b"retry-after"],
     12:[b"content-type"],
     14:[b"content-length"],
-    16:[b"content-encoding"],
+    16:[b"content-encoding", b"www-authenticate"],
     17:[b"transfer-encoding"],
 }
 
@@ -100,7 +101,7 @@ def keep_response_header(key):
         cands.append(key)
 
 @micropython.viper
-def _memeqci(raw:ptr8, start:int, end:int, cand:ptr8) -> int:
+def _memeqlc(raw:ptr8, start:int, end:int, cand:ptr8) -> int:
     i = start
     while i < end:
         x = raw[i]
@@ -137,7 +138,7 @@ def parse_headers(sock, *, all_headers=False, cookies=None):
         cands = _keep_response_headers.get(end - start)
         if cands is not None:
             for cand in cands:
-                if _memeqci(line, start, end, cand):
+                if _memeqlc(line, start, end, cand):
                     key = cand
                     break
 
@@ -557,8 +558,9 @@ class HTTPResponse:
     def iter_content_into(self, bmv):
         if not isinstance(bmv, memoryview):
             bmv = memoryview(bmv)
+        _readinto = self.readinto
         while True:
-            n = self.readinto(bmv)
+            n = _readinto(bmv)
             if n == 0:
                 return
             yield n
