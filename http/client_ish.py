@@ -8,20 +8,6 @@ HTTPS_PORT = const(443)
 # Memory threshold below which GC is called after a request
 _GC_THRESHOLD = const(32768)
 
-# Headers to always retain when parse_headers() filters
-_IMPORTANT_HEADERS = {
-    b"connection",
-    b"content-encoding",
-    b"content-length",
-    b"content-type",
-    b"etag",
-    b"keep-alive",
-    b"location",
-    b"retry-after",
-    b"transfer-encoding",
-    b"www-authenticate",
-}
-
 # HTTP methods that expect a body
 _METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
 
@@ -37,35 +23,6 @@ class CannotSendRequest(ImproperConnectionState): pass
 class CannotSendHeader(ImproperConnectionState): pass
 class ResponseNotReady(ImproperConnectionState): pass
 class IncompleteRead(HTTPException): pass
-
-@micropython.viper
-def _normal_case(buf:ptr8, buflen:int, update:int) -> int:
-    i = 0
-    while i < buflen:
-        b = buf[i]
-        if (65 <= b and b <= 90):
-            if not update:
-                return 0
-            buf[i] = b + 32
-        i += 1
-    return 1
-
-def _normalize_key(key):
-    if isinstance(key, str):
-        key = key.encode()
-    elif not isinstance(key, (bytes, bytearray, memoryview)):
-        key = str(key).encode()
-    len_key = len(key)
-    if len_key and (key[0] <= 32 or key[-1] <= 32):
-        if isinstance(key, memoryview):
-            key = bytes(key)
-        key = key.strip()
-        len_key = len(key)
-    if not _normal_case(key, len_key, False):
-        if not isinstance(key, bytearray):
-            key = bytearray(key)
-        _normal_case(key, len_key, True)
-    return key
 
 @micropython.viper
 def _validate_ascii(buf:ptr8, buflen:int, no_space:int) -> int:
@@ -87,6 +44,124 @@ def _encode_and_validate(val, force_bytes, no_space):
     if force_bytes and not isinstance(val, bytes):
         val = bytes(val)
     return val
+
+@micropython.viper
+def _normal_case(buf:ptr8, buflen:int, dst:ptr8) -> int:
+    i = 0
+    if dst == 0:
+        while i < buflen:
+            b = buf[i]
+            if 65 <= b and b <= 90:
+                return 0
+            i += 1
+        return 1
+    while i < buflen:
+        b = buf[i]
+        if 65 <= b and b <= 90:
+            b = b + 32
+        dst[i] = b
+        i += 1
+    return 1
+
+def _normalize_key(key):
+    if isinstance(key, str):
+        key = key.encode()
+    elif not isinstance(key, (bytes, bytearray, memoryview)):
+        key = str(key).encode()
+    len_key = len(key)
+    if len_key and (key[0] <= 32 or key[-1] <= 32):
+        if isinstance(key, memoryview):
+            key = bytes(key)
+        key = key.strip()
+        len_key = len(key)
+    if not _normal_case(key, len_key, 0):
+        out = bytearray(len_key)
+        _normal_case(key, len_key, out)
+        key = out
+    return key
+
+_server_headers = {}
+
+def keep_server_header(key):
+    key = _normalize_key(key)
+    if not isinstance(key, bytes):
+        key = bytes(key)
+    len_key = len(key)
+    cands = _server_headers.get(len_key)
+    if cands is None:
+        _server_headers[len_key] = [key]
+    elif key not in cands:
+        cands.append(key)
+
+keep_server_header(b"connection")
+keep_server_header(b"content-encoding")
+keep_server_header(b"content-length")
+keep_server_header(b"content-type")
+keep_server_header(b"etag")
+keep_server_header(b"keep-alive")
+keep_server_header(b"location")
+keep_server_header(b"retry-after")
+keep_server_header(b"set-cookie")
+keep_server_header(b"transfer-encoding")
+keep_server_header(b"www-authenticate")
+
+@micropython.viper
+def _memeqci(cand:ptr8, raw:ptr8, offset:int, length:int) -> int:
+    i = 0
+    while i < length:
+        x = raw[offset + i]
+        if 65 <= x and x <= 90:
+            x = x + 32
+        if x != cand[i]:
+            return 0
+        i += 1
+    return 1
+
+def parse_headers(sock, *, all_headers=False, cookies=None):
+    if cookies is None:
+        cookies = all_headers
+    headers = []
+    _append = headers.append
+    _readline = sock.readline
+    while True:
+        line = _readline()
+        if not line or line == _CRLF or line == b"\n":
+            return headers
+        # Folded continuations (RFC 7230 deprecated) are dropped.
+        if line[0] <= 32:
+            continue
+
+        sep = line.find(b":")
+        if sep == -1:
+            continue
+
+        key = None
+        end = sep
+        offset = 0
+        while offset < end and line[offset] <= 32:
+            offset += 1
+        while end > offset and line[end - 1] <= 32:
+            end -= 1
+        length = end - offset
+        cands = _server_headers.get(length)
+        if cands is not None:
+            for cand in cands:
+                if _memeqci(cand, line, offset, length):
+                    key = cand
+                    break
+
+        if key is not None:
+            if key == b"set-cookie" and not cookies:
+                continue
+        else:
+            if not all_headers:
+                continue
+            key = _normalize_key(line[:sep])
+            if not isinstance(key, bytes):
+                key = bytes(key)
+        val = line[sep+1:].strip()
+        _append(key)
+        _append(val)
 
 def create_connection(address, timeout=None):
     host, port = address
@@ -110,45 +185,8 @@ def create_connection(address, timeout=None):
                 raise e
     raise OSError(errno.EHOSTUNREACH)
 
-def parse_headers(sock, *, extra_headers=True, cookies=None):
-    # Returns [lowercase_key_bytes, value_bytes, ...]. extra_headers:
-    #   None       -> skip all headers
-    #   True       -> keep all headers
-    #   Falsy      -> keep _IMPORTANT_HEADERS only
-    #   container  -> keep _IMPORTANT_HEADERS plus those in container
-    if cookies is None:
-        cookies = extra_headers is True or (extra_headers and b"set-cookie" in extra_headers)
-    headers = []
-    _append = headers.append
-    _readline = sock.readline
-    while True:
-        line = _readline()
-        if not line or line == _CRLF or line == b"\n":
-            return headers
-        if extra_headers is None:
-            continue
-        # Folded continuations (RFC 7230 deprecated) are dropped.
-        if line[0] <= 32:
-            continue
-        sep = line.find(b":")
-        if sep == -1:
-            continue
-        key, val = line[:sep], line[sep+1:]
-        key = _normalize_key(key)
-        if not isinstance(key, bytes):
-            key = bytes(key)
-        if key == b"set-cookie":
-            if not cookies:
-                continue
-        else:
-            if key not in _IMPORTANT_HEADERS and extra_headers is not True and (not extra_headers or key not in extra_headers):
-                continue
-        val = val.strip()
-        _append(key)
-        _append(val)
-
 class HTTPResponse:
-    blocksize = const(2048)
+    blocksize = 2048
 
     def __enter__(self):
         return self
@@ -162,7 +200,7 @@ class HTTPResponse:
         self.debuglevel = debuglevel
         self._method = method
         self._url = url
-        self.headers = None
+        self._headers = None
         self.version = None
         self.status = None
         self.reason = None
@@ -175,32 +213,44 @@ class HTTPResponse:
         # the socket closed even if response would otherwise keep-alive.
         self._tainted = False
 
-    def begin(self, *, extra_headers=False, cookies=None):
+    def begin(self, *, all_headers=False, cookies=None):
         self.version, self.status, self.reason = self._read_status()
         if self.debuglevel > 0:
             print("status:", repr(self.version), repr(self.status), repr(self.reason))
 
-        self.headers = parse_headers(self._sock, extra_headers=extra_headers, cookies=cookies)
+        self._headers = parse_headers(self._sock, all_headers=all_headers, cookies=cookies)
         if self.debuglevel > 0:
-            for key, val in self.headers:
+            for key, val in self._headers:
                 print("header:", repr(key), "=", repr(val))
 
-        transfer_encoding = self._getheaderbytes(b"transfer-encoding", b"")
+        # Single pass: pull transfer-encoding, connection, content-length.
+        # On duplicate headers the last occurrence wins.
+        transfer_encoding = None
+        connection = None
+        content_length = None
+        _headers = self._headers
+        for i in range(0, len(_headers), 2):
+            k = _headers[i]
+            if k == b"transfer-encoding":
+                transfer_encoding = _headers[i+1]
+            elif k == b"connection":
+                connection = _headers[i+1]
+            elif k == b"content-length":
+                content_length = _headers[i+1]
+
         self.chunked = bool(transfer_encoding) and b"chunked" in transfer_encoding
         self.chunk_left = None
 
-        conn = self._getheaderbytes(b"connection", b"")
         if self.version == 10:
-            self.will_close = (not conn) or b"keep-alive" not in conn.lower()
+            self.will_close = (not connection) or b"keep-alive" not in connection.lower()
         else:
-            self.will_close = bool(conn) and b"close" in conn.lower()
+            self.will_close = bool(connection) and b"close" in connection.lower()
 
         # Content-Length ignored when chunked.
         self.length = None
-        length = self._getheaderbytes(b"content-length")
-        if length and not self.chunked:
+        if content_length and not self.chunked:
             try:
-                self.length = int(length, 10)
+                self.length = int(content_length, 10)
                 if self.length < 0:
                     self.length = None
             except ValueError:
@@ -362,7 +412,6 @@ class HTTPResponse:
             data = self._sock.read(amt)
             if not data:
                 self.close(True)
-                return _BLANK
             self._bytes_read += len(data)
             if self._bytes_read >= self.length:
                 self.close(self._bytes_read > self.length)
@@ -459,12 +508,12 @@ class HTTPResponse:
         return n
 
     def getheaders(self):
-        if self.headers is None:
+        if self._headers is None:
             raise ResponseNotReady()
         out = []
-        for i in range(0, len(self.headers), 2):
+        for i in range(0, len(self._headers), 2):
             try:
-                out.append((self.headers[i].decode(), self.headers[i+1].decode()))
+                out.append((self._headers[i].decode(), self._headers[i+1].decode()))
             except UnicodeError:
                 pass
         return out
@@ -479,25 +528,17 @@ class HTTPResponse:
         return default
 
     def getheaderbytes(self, key, default=None):
-        _headers = self.headers
-        if _headers is None:
+        if self._headers is None:
             raise ResponseNotReady()
         key = _normalize_key(key)
         match = None
-        for i in range(0, len(_headers), 2):
-            if _headers[i] == key:
+        for i in range(0, len(self._headers), 2):
+            if self._headers[i] == key:
                 if match is None:
-                    match = _headers[i+1]
+                    match = self._headers[i+1]
                 else:
-                    match = match + b", " + _headers[i+1]
+                    match = match + b", " + self._headers[i+1]
         return default if match is None else match
-
-    def _getheaderbytes(self, key, default=None):
-        _headers = self.headers
-        for i in range(0, len(_headers), 2):
-            if _headers[i] == key:
-                return _headers[i+1]
-        return default
 
     def getcookies(self):
         out = []
@@ -509,11 +550,11 @@ class HTTPResponse:
         return out
 
     def getcookiesbytes(self):
-        if self.headers is None:
+        if self._headers is None:
             raise ResponseNotReady()
-        for i in range(0, len(self.headers), 2):
-            if self.headers[i] == b"set-cookie":
-                yield self.headers[i+1]
+        for i in range(0, len(self._headers), 2):
+            if self._headers[i] == b"set-cookie":
+                yield self._headers[i+1]
 
     def iter_content(self, blocksize=None):
         buflen = self.blocksize if blocksize is None else blocksize
@@ -538,8 +579,8 @@ class HTTPConnection:
     response_class = HTTPResponse
     default_port = HTTP_PORT
     auto_open = True
-    blocksize = const(2048)
-    _merge_buffer_size = const(2048)
+    blocksize = 2048
+    _merge_buffer_size = 2048
 
     def __enter__(self):
         return self
@@ -571,6 +612,7 @@ class HTTPConnection:
         # reference; this object owns the socket teardown.
         self._can_reconnect = False
         self._merged = 0
+        self._merge_buffmv = None
         response = self.__response
         self.__response = None
         if response is not None:
@@ -616,13 +658,16 @@ class HTTPConnection:
         have_host = False
         have_transfer_encoding = False
 
+        pairs = None
         if headers is not None:
-            is_dict = isinstance(headers, dict)
-            if not is_dict and not isinstance(headers, (list, tuple)):
-                headers = list(headers) # Materialize generator/iterator
-            for key in headers:
-                if not is_dict:
-                    key = key[0]
+            if isinstance(headers, dict):
+                pairs = list(headers.items())
+            elif isinstance(headers, (list, tuple)):
+                pairs = headers
+            else:
+                pairs = list(headers)
+            headers = None
+            for key, _value in pairs:
                 key = _normalize_key(key)
                 if key == b"accept-encoding":
                     have_accept_encoding = True
@@ -652,12 +697,9 @@ class HTTPConnection:
         if encode_chunked and not have_transfer_encoding:
             self.putheader(b"Transfer-Encoding", b"chunked")
 
-        if headers is not None:
-            for item in headers:
-                if is_dict:
-                    self.putheader(item, headers[item])
-                else:
-                    self.putheader(item[0], item[1])
+        if pairs is not None:
+            for key, value in pairs:
+                self.putheader(key, value)
 
         self.endheaders(body, encode_chunked=encode_chunked)
 
@@ -860,6 +902,9 @@ class HTTPConnection:
                 gc.collect()
 
     def detach(self):
+        self._can_reconnect = False
+        self._merged = 0
+        self._merge_buffmv = None
         if self.__response is not None:
             sock = self.__response._sock
             self.__response._sock = None
@@ -875,9 +920,9 @@ except ImportError:
     pass
 else:
     class HTTPSConnection(HTTPConnection):
-        default_port = const(HTTPS_PORT)
-        blocksize = const(1200)
-        _merge_buffer_size = const(1200)
+        default_port = HTTPS_PORT
+        blocksize = 1200
+        _merge_buffer_size = 1200
 
         def __init__(self, *args, context=None, **kwargs):
             super().__init__(*args, **kwargs)
