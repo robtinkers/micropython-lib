@@ -160,7 +160,7 @@ def parse_headers(sock, *, all_headers=False, cookies=None):
 
 def create_connection(address, timeout=None):
     host, port = address
-    for f, t, p, n, a in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
+    for f, t, p, _, a in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
         sock = None
         try:
             sock = socket.socket(f, t, p)
@@ -233,7 +233,7 @@ class HTTPResponse:
             elif k == b"content-length":
                 content_length = _headers[i+1]
 
-        self.chunked = bool(transfer_encoding) and b"chunked" in transfer_encoding
+        self.chunked = bool(transfer_encoding) and b"chunked" in transfer_encoding.lower()
         self.chunk_left = None
 
         if self.version == 10:
@@ -256,9 +256,7 @@ class HTTPResponse:
         if (100 <= self.status < 200
             or self.status == 204 or self.status == 304
             or self._method == b"HEAD"):
-            self.length = 0
             self.chunked = False
-            self.chunk_left = None
 
         # Unknown framing -> body is delimited by close.
         if self.length is None and not self.chunked:
@@ -480,14 +478,14 @@ class HTTPResponse:
                     size = -1
                 if size < 0:
                     self.close(True)
-                self.chunk_left = size
-                if size == 0:
-                    while True:
-                        line = self._sock.readline()
-                        if not line or line == _CRLF or line == b"\n":
-                            self.chunk_left = None
-                            self.close(not line)
-                            return 0
+                if size > 0:
+                    self.chunk_left = size
+                    return size
+                while True:
+                    line = self._sock.readline()
+                    if not line or line == _CRLF or line == b"\n":
+                        self.close(not line)
+                        return 0
             elif self.chunk_left == 0:
                 line = self._sock.readline()
                 if line != _CRLF and line != b"\n":
