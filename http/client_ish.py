@@ -481,6 +481,51 @@ class HTTPResponse:
             self.close()
         return data
 
+    def readinto(self, buf):
+        # Fill-to-completion semantics rely on blocking no-short-reads.
+        self._require_blocking()
+        if self.isclosed() or not buf:
+            return 0
+
+        if not self.chunked:
+            if self.length is None:
+                amt = len(buf)
+            else:
+                amt = min(len(buf), self.length - self._bytes_read)
+                if amt == 0:
+                    self.close()
+                    return 0
+            n = self._sock.readinto(buf, amt)
+            if not n:
+                self.close(self.length is not None)
+                return 0
+            self._bytes_read += n
+            if self.length is not None and self._bytes_read >= self.length:
+                self.close()
+            return n
+
+        buflen = len(buf)
+        if isinstance(buf, memoryview):
+            bmv = buf
+        else:
+            bmv = memoryview(buf)
+
+        total = 0
+        while total < buflen:
+            amt = min(self._next_chunk(), buflen - total)
+            if amt == 0:
+                break
+            if total == 0:
+                n = self._sock.readinto(buf, amt)
+            else:
+                n = self._sock.readinto(bmv[total:], amt)
+            if not n:
+                self.close(True)
+            self._bytes_read += n
+            self.chunk_left -= n
+            total += n
+        return total
+
     def recv(self, amt=None):
         # Non-chunked only: chunked framing needs blocking readline() parsing
         # which can't survive non-blocking sockets. Use read/readshort instead.
@@ -545,51 +590,6 @@ class HTTPResponse:
         if self.length is not None and self._bytes_read >= self.length:
             self.close()
         return n
-
-    def readinto(self, buf):
-        # Fill-to-completion semantics rely on blocking no-short-reads.
-        self._require_blocking()
-        if self.isclosed() or not buf:
-            return 0
-
-        if not self.chunked:
-            if self.length is None:
-                amt = len(buf)
-            else:
-                amt = min(len(buf), self.length - self._bytes_read)
-                if amt == 0:
-                    self.close()
-                    return 0
-            n = self._sock.readinto(buf, amt)
-            if not n:
-                self.close(self.length is not None)
-                return 0
-            self._bytes_read += n
-            if self.length is not None and self._bytes_read >= self.length:
-                self.close()
-            return n
-
-        buflen = len(buf)
-        if isinstance(buf, memoryview):
-            bmv = buf
-        else:
-            bmv = memoryview(buf)
-
-        total = 0
-        while total < buflen:
-            amt = min(self._next_chunk(), buflen - total)
-            if amt == 0:
-                break
-            if total == 0:
-                n = self._sock.readinto(buf, amt)
-            else:
-                n = self._sock.readinto(bmv[total:], amt)
-            if not n:
-                self.close(True)
-            self._bytes_read += n
-            self.chunk_left -= n
-            total += n
-        return total
 
     def iter_content(self, blocksize=None):
         buflen = self.blocksize if blocksize is None else blocksize
