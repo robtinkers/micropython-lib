@@ -644,22 +644,6 @@ class HTTPResponse:
                     match = match + b", " + self._headers[i+1]
         return default if match is None else match
 
-    def getcookies(self):
-        out = []
-        for v in self.rawcookies():
-            try:
-                out.append(v.decode())
-            except UnicodeError:
-                pass
-        return out
-
-    def rawcookies(self):
-        if self._headers is None:
-            raise ResponseNotReady()
-        for i in range(0, len(self._headers), 2):
-            if self._headers[i] == b"set-cookie":
-                yield self._headers[i+1]
-
     def getcookie(self, key, default=None):
         if isinstance(key, str):
             key = key.encode()
@@ -676,28 +660,17 @@ class HTTPResponse:
             raise ResponseNotReady()
         len_key = len(key)
         for v in self.rawcookies():
-            # A Set-Cookie header contains exactly one cookie-pair.
-            # Because parse_headers strips leading whitespace, the name must start at index 0.
             if v.startswith(key):
                 len_v = len(v)
-                # Boundary check: If the string ends exactly after the key, 
-                # or the next character is a semicolon (59 is b';'), it has no value.
                 if len_v == len_key or v[len_key] == 59:
                     return _BLANK
-                # 61 is b'='. This ensures we don't accidentally match a longer 
-                # cookie name (e.g., matching "session_id" when looking for "session")
                 if v[len_key] == 61:
                     start = len_key + 1
                     end = v.find(b";", start)
                     if end == -1:
                         end = len_v
-                    # Strip leading whitespace (<= 32 catches spaces, tabs, etc.)
-                    while start < end and v[start] <= 32:
-                        start += 1
-                    # Strip trailing whitespace
-                    while end > start and v[end - 1] <= 32:
-                        end -= 1
-                    # Strip wrapping double quotes (34 is b'"') AFTER whitespace is stripped
+                    while start < end and v[start] <= 32: start += 1
+                    while end > start and v[end - 1] <= 32: end -= 1
                     if end - start >= 2 and v[start] == 34 and v[end - 1] == 34:
                         start += 1
                         end -= 1
