@@ -612,15 +612,20 @@ class HTTPResponse:
             yield n
 
     def getheaders(self):
-        if self._headers is None:
-            raise ResponseNotReady()
         out = []
-        for i in range(0, len(self._headers), 2):
+        for key, val in self.rawheaders():
             try:
-                out.append((self._headers[i].decode(), self._headers[i+1].decode()))
+                out.append((key.decode(), val.decode()))
             except UnicodeError:
                 pass
         return out
+
+    def rawheaders(self):
+        # Returns an iterator
+        if self._headers is None:
+            raise ResponseNotReady()
+        for i in range(0, len(self._headers), 2):
+            yield self._headers[i], self._headers[i+1]
 
     def getheader(self, key, default=None):
         val = self.rawheader(key)
@@ -632,6 +637,7 @@ class HTTPResponse:
         return default
 
     def rawheader(self, key, default=None):
+        # Returns first match
         if self._headers is None:
             raise ResponseNotReady()
         key = _normalize_key(key, 0, len(key))
@@ -656,6 +662,7 @@ class HTTPResponse:
         return default
 
     def rawcookie(self, key, default=None):
+        # Returns first match
         if self._headers is None:
             raise ResponseNotReady()
         len_key = len(key)
