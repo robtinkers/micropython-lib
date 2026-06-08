@@ -1,7 +1,6 @@
 # http/client_ish.py
 
 import micropython, socket, errno, gc
-from micropython import const
 
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
@@ -161,6 +160,7 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
 
 def create_connection(address, timeout=None):
     host, port = address
+    err = None
     for f, t, p, _, a in socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM):
         sock = None
         try:
@@ -173,12 +173,18 @@ def create_connection(address, timeout=None):
                 pass
             sock.connect(a)
             return sock
+        except OSError as e:
+            err = e
+            if sock is not None:
+                try: sock.close()
+                except OSError: pass
         except Exception as e:
             if sock is not None:
                 try: sock.close()
                 except OSError: pass
-            if not isinstance(e, OSError):
-                raise e
+            raise e
+    if err is not None:
+        raise err
     raise OSError(errno.EHOSTUNREACH)
 
 class HTTPResponse:
