@@ -850,13 +850,13 @@ class HTTPConnection:
         if not skip_accept_encoding:
             self._putheaderparts(False, b"Accept-Encoding: identity\r\n")
 
-    def putheader(self, header, value):
+    def putheader(self, key, val):
         if self.__response is not None:
             raise CannotSendHeader()
-        if isinstance(header, str):
-            header = header.encode()
-        value = _encode_and_validate(value, False, 0)
-        self._putheaderparts(False, header, b": ", value, _CRLF)
+        if isinstance(key, str):
+            key = key.encode()
+        val = _encode_and_validate(val, False, 0)
+        self._putheaderparts(False, key, b": ", val, _CRLF)
 
     def putcookie(self, name, value):
         if self.__response is not None:
