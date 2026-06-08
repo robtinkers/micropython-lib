@@ -172,7 +172,7 @@ def create_connection(address, timeout=None):
             except (AttributeError, OSError):
                 pass
             sock.connect(a)
-            return sock
+            return sockbytres
         except OSError as e:
             err = e
             if sock is not None:
@@ -591,55 +591,6 @@ class HTTPResponse:
             else:
                 return self.chunk_left
 
-    def getheaders(self):
-        if self._headers is None:
-            raise ResponseNotReady()
-        out = []
-        for i in range(0, len(self._headers), 2):
-            try:
-                out.append((self._headers[i].decode(), self._headers[i+1].decode()))
-            except UnicodeError:
-                pass
-        return out
-
-    def getheader(self, key, default=None):
-        val = self.getheaderbytes(key)
-        if val is not None:
-            try:
-                return val.decode()
-            except UnicodeError:
-                pass
-        return default
-
-    def getheaderbytes(self, key, default=None):
-        if self._headers is None:
-            raise ResponseNotReady()
-        key = _normalize_key(key, 0, len(key))
-        match = None
-        for i in range(0, len(self._headers), 2):
-            if self._headers[i] == key:
-                if match is None:
-                    match = self._headers[i+1]
-                else:
-                    match = match + b", " + self._headers[i+1]
-        return default if match is None else match
-
-    def getcookies(self):
-        out = []
-        for v in self.getcookiesbytes():
-            try:
-                out.append(v.decode())
-            except UnicodeError:
-                pass
-        return out
-
-    def getcookiesbytes(self):
-        if self._headers is None:
-            raise ResponseNotReady()
-        for i in range(0, len(self._headers), 2):
-            if self._headers[i] == b"set-cookie":
-                yield self._headers[i+1]
-
     def iter_content(self, blocksize=None):
         buflen = self.blocksize if blocksize is None else blocksize
         buf = bytearray(buflen)
@@ -659,6 +610,99 @@ class HTTPResponse:
             if n == 0:
                 return
             yield n
+
+    def getheaders(self):
+        if self._headers is None:
+            raise ResponseNotReady()
+        out = []
+        for i in range(0, len(self._headers), 2):
+            try:
+                out.append((self._headers[i].decode(), self._headers[i+1].decode()))
+            except UnicodeError:
+                pass
+        return out
+
+    def getheader(self, key, default=None):
+        val = self.rawheader(key)
+        if val is not None:
+            try:
+                return val.decode()
+            except UnicodeError:
+                pass
+        return default
+
+    def rawheader(self, key, default=None):
+        if self._headers is None:
+            raise ResponseNotReady()
+        key = _normalize_key(key, 0, len(key))
+        match = None
+        for i in range(0, len(self._headers), 2):
+            if self._headers[i] == key:
+                if match is None:
+                    match = self._headers[i+1]
+                else:
+                    match = match + b", " + self._headers[i+1]
+        return default if match is None else match
+
+    def getcookies(self):
+        out = []
+        for v in self.rawcookies():
+            try:
+                out.append(v.decode())
+            except UnicodeError:
+                pass
+        return out
+
+    def rawcookies(self):
+        if self._headers is None:
+            raise ResponseNotReady()
+        for i in range(0, len(self._headers), 2):
+            if self._headers[i] == b"set-cookie":
+                yield self._headers[i+1]
+
+    def getcookie(self, key, default=None):
+        if isinstance(key, str):
+            key = key.encode()
+        val = self.rawcookie(key, None)
+        if val is not None:
+            try:
+                return val.decode()
+            except UnicodeError:
+                pass
+        return default
+
+    def rawcookie(self, key, default=None):
+        if self._headers is None:
+            raise ResponseNotReady()
+        len_key = len(key)
+        for v in self.rawcookies():
+            # A Set-Cookie header contains exactly one cookie-pair.
+            # Because parse_headers strips leading whitespace, the name must start at index 0.
+            if v.startswith(key):
+                len_v = len(v)
+                # Boundary check: If the string ends exactly after the key, 
+                # or the next character is a semicolon (59 is b';'), it has no value.
+                if len_v == len_key or v[len_key] == 59:
+                    return _BLANK
+                # 61 is b'='. This ensures we don't accidentally match a longer 
+                # cookie name (e.g., matching "session_id" when looking for "session")
+                if v[len_key] == 61:
+                    start = len_key + 1
+                    end = v.find(b";", start)
+                    if end == -1:
+                        end = len_v
+                    # Strip leading whitespace (<= 32 catches spaces, tabs, etc.)
+                    while start < end and v[start] <= 32:
+                        start += 1
+                    # Strip trailing whitespace
+                    while end > start and v[end - 1] <= 32:
+                        end -= 1
+                    # Strip wrapping double quotes (34 is b'"') AFTER whitespace is stripped
+                    if end - start >= 2 and v[start] == 34 and v[end - 1] == 34:
+                        start += 1
+                        end -= 1
+                    return v[start:end]
+        return default
 
 class HTTPConnection:
     response_class = HTTPResponse
