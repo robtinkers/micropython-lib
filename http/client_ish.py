@@ -354,6 +354,37 @@ class HTTPResponse:
         if self.chunked:
             raise ValueError("operation requires a non-chunked stream")
 
+    def _next_chunk(self):
+        while True:
+            if self.chunk_left is None:
+                line = self._sock.readline()
+                if not line:
+                    self.close(True)
+                sep = line.find(b";")
+                if sep >= 0:
+                    line = line[:sep]
+                try:
+                    size = int(line, 16)
+                except ValueError:
+                    size = -1
+                if size < 0:
+                    self.close(True)
+                if size > 0:
+                    self.chunk_left = size
+                    return size
+                while True:
+                    line = self._sock.readline()
+                    if not line or line == _CRLF or line == b"\n":
+                        self.close(not line)
+                        return 0
+            elif self.chunk_left == 0:
+                line = self._sock.readline()
+                if line != _CRLF and line != b"\n":
+                    self.close(True)
+                self.chunk_left = None
+            else:
+                return self.chunk_left
+
     def read(self, amt=None):
         # Fill-to-completion semantics rely on blocking no-short-reads.
         self._require_blocking()
@@ -559,37 +590,6 @@ class HTTPResponse:
             self.chunk_left -= n
             total += n
         return total
-
-    def _next_chunk(self):
-        while True:
-            if self.chunk_left is None:
-                line = self._sock.readline()
-                if not line:
-                    self.close(True)
-                sep = line.find(b";")
-                if sep >= 0:
-                    line = line[:sep]
-                try:
-                    size = int(line, 16)
-                except ValueError:
-                    size = -1
-                if size < 0:
-                    self.close(True)
-                if size > 0:
-                    self.chunk_left = size
-                    return size
-                while True:
-                    line = self._sock.readline()
-                    if not line or line == _CRLF or line == b"\n":
-                        self.close(not line)
-                        return 0
-            elif self.chunk_left == 0:
-                line = self._sock.readline()
-                if line != _CRLF and line != b"\n":
-                    self.close(True)
-                self.chunk_left = None
-            else:
-                return self.chunk_left
 
     def iter_content(self, blocksize=None):
         buflen = self.blocksize if blocksize is None else blocksize
