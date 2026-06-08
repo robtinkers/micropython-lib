@@ -172,7 +172,7 @@ def create_connection(address, timeout=None):
             except (AttributeError, OSError):
                 pass
             sock.connect(a)
-            return sockbytres
+            return sock
         except OSError as e:
             err = e
             if sock is not None:
@@ -628,7 +628,7 @@ class HTTPResponse:
             yield self._headers[i], self._headers[i+1]
 
     def getheader(self, key, default=None):
-        val = self.rawheader(key)
+        val = self.rawheader(key, None)
         if val is not None:
             try:
                 return val.decode()
@@ -650,10 +650,10 @@ class HTTPResponse:
                     match = match + b", " + self._headers[i+1]
         return default if match is None else match
 
-    def getcookie(self, key, default=None):
-        if isinstance(key, str):
-            key = key.encode()
-        val = self.rawcookie(key, None)
+    def getcookie(self, name, default=None):
+        if isinstance(name, str):
+            name = name.encode()
+        val = self.rawcookie(name, None)
         if val is not None:
             try:
                 return val.decode()
@@ -661,27 +661,29 @@ class HTTPResponse:
                 pass
         return default
 
-    def rawcookie(self, key, default=None):
+    def rawcookie(self, name, default=None):
         # Returns first match
         if self._headers is None:
             raise ResponseNotReady()
-        len_key = len(key)
-        for v in self.rawcookies():
-            if v.startswith(key):
-                len_v = len(v)
-                if len_v == len_key or v[len_key] == 59:
+        len_name = len(name)
+        for key, val in self.rawheaders():
+            if key != b"set-cookie":
+                continue
+            if val.startswith(name):
+                len_val = len(val)
+                if len_val == len_name or val[len_name] == 59:
                     return _BLANK
-                if v[len_key] == 61:
-                    start = len_key + 1
-                    end = v.find(b";", start)
+                if val[len_name] == 61:
+                    start = len_name + 1
+                    end = val.find(b";", start)
                     if end == -1:
-                        end = len_v
-                    while start < end and v[start] <= 32: start += 1
-                    while end > start and v[end - 1] <= 32: end -= 1
-                    if end - start >= 2 and v[start] == 34 and v[end - 1] == 34:
+                        end = len_val
+                    while start < end and val[start] <= 32: start += 1
+                    while end > start and val[end - 1] <= 32: end -= 1
+                    if end - start >= 2 and val[start] == 34 and val[end - 1] == 34:
                         start += 1
                         end -= 1
-                    return v[start:end]
+                    return val[start:end]
         return default
 
 class HTTPConnection:
