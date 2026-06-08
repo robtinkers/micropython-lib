@@ -268,6 +268,7 @@ class HTTPResponse:
             or self.status == 204 or self.status == 304
             or self._method == b"HEAD"):
             self.chunked = False
+            self.length = 0
 
         # Unknown framing -> body is delimited by close.
         if self.length is None and not self.chunked:
@@ -691,7 +692,7 @@ class HTTPConnection:
     default_port = HTTP_PORT
     auto_open = True
     blocksize = 2048
-    _merge_buffer_size = 2048
+    _merge_buffer_size = 1460
 
     def __enter__(self):
         return self
@@ -1054,8 +1055,8 @@ except ImportError:
 else:
     class HTTPSConnection(HTTPConnection):
         default_port = HTTPS_PORT
-        blocksize = 1200
-        _merge_buffer_size = 1200
+        blocksize = 2048
+        _merge_buffer_size = 1024
 
         def __init__(self, *args, context=None, **kwargs):
             super().__init__(*args, **kwargs)
