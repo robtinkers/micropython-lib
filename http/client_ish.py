@@ -855,7 +855,22 @@ class HTTPConnection:
             raise CannotSendHeader()
         if isinstance(header, str):
             header = header.encode()
-        self._putheaderparts(False, header, b": ", _encode_and_validate(value, False, 0), _CRLF)
+        value = _encode_and_validate(value, False, 0)
+        self._putheaderparts(False, header, b": ", value, _CRLF)
+
+    def putcookie(self, name, value):
+        if self.__response is not None:
+            raise CannotSendHeader()
+        if isinstance(name, str):
+            name = name.encode()
+        if isinstance(value, str):
+            value = value.encode()
+        if not value:
+            self._putheaderparts(False, b"Cookie: ", name, b'=', _CRLF)
+        elif value.find(b'"') >= 0:
+            self._putheaderparts(False, b"Cookie: ", name, b'=', value, _CRLF)
+        else:
+            self._putheaderparts(False, b"Cookie: ", name, b'="', value, '"', _CRLF)
 
     def _putheaderparts(self, flush, *parts):
         # Coalesces small writes into a single sendall.
