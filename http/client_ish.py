@@ -1,6 +1,7 @@
 # http/client_ish.py
 
 import micropython, socket, errno, gc
+from micropython import const
 
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
@@ -112,9 +113,9 @@ def _memeqlc(raw:ptr8, start:int, end:int, cand:ptr8) -> int:
         i += 1
     return 1
 
-def parse_headers(sock, *, all_headers=False, cookies=None):
-    if cookies is None:
-        cookies = all_headers
+def parse_headers(sock, *, all_headers=False, and_cookies=None):
+    if and_cookies is None:
+        and_cookies = all_headers
     headers = []
     _append = headers.append
     _readline = sock.readline
@@ -143,7 +144,7 @@ def parse_headers(sock, *, all_headers=False, cookies=None):
                     break
 
         if key is not None:
-            if key == b"set-cookie" and not cookies:
+            if key == b"set-cookie" and not and_cookies:
                 continue
         else:
             if not all_headers:
@@ -204,16 +205,20 @@ class HTTPResponse:
         self.length = None
         self.will_close = True
         self._bytes_read = 0
+        # One-way blocking -> non-blocking transition (see setnonblocking).
+        self._nonblocking = False
         # Set by readers on protocol violation or premature EOF; forces
         # the socket closed even if response would otherwise keep-alive.
         self._tainted = False
 
-    def begin(self, *, all_headers=False, cookies=None):
+    def begin(self, *, all_headers=False, and_cookies=None):
+        # Framing parse uses readline(), which is blocking-only.
+        self._require_blocking()
         self.version, self.status, self.reason = self._read_status()
         if self.debuglevel > 0:
             print("status:", repr(self.version), repr(self.status), repr(self.reason))
 
-        self._headers = parse_headers(self._sock, all_headers=all_headers, cookies=cookies)
+        self._headers = parse_headers(self._sock, all_headers=all_headers, and_cookies=and_cookies)
         if self.debuglevel > 0:
             for i in range(0, len(self._headers), 2):
                 print("header:", repr(self._headers[i]), "=", repr(self._headers[i+1]))
@@ -267,6 +272,8 @@ class HTTPResponse:
             line = self._sock.readline()
             if self.debuglevel > 0:
                 print("status:", repr(line))
+            if line == _CRLF or line == b"\n":
+                continue
             if not line:
                 raise RemoteDisconnected()
             if not line.startswith(b"HTTP/") or not line.endswith(b"\n"):
@@ -294,7 +301,7 @@ class HTTPResponse:
                 break
             while True:
                 line = self._sock.readline()
-                if not line or line == _CRLF or line == b"\n":
+                if line == _CRLF or line == b"\n" or not line:
                     break
                 if self.debuglevel > 0:
                     print("header:", repr(line))
@@ -327,7 +334,23 @@ class HTTPResponse:
     def isclosed(self):
         return self._sock is None
 
+    def setnonblocking(self):
+        if self._sock is not None:
+            self._sock.settimeout(0)
+        self._nonblocking = True
+        self.will_close = True
+
+    def _require_blocking(self):
+        if self._nonblocking:
+            raise ValueError("operation requires a blocking socket")
+
+    def _require_nonchunked(self):
+        if self.chunked:
+            raise ValueError("operation requires a non-chunked stream")
+
     def read(self, amt=None):
+        # Fill-to-completion semantics rely on blocking no-short-reads.
+        self._require_blocking()
         if self.isclosed():
             return _BLANK
 
@@ -389,6 +412,8 @@ class HTTPResponse:
         return out
 
     def readshort(self, amt=None):
+        # Single-piece fill relies on blocking no-short-reads.
+        self._require_blocking()
         if self.isclosed():
             return _BLANK
         if amt is None or amt < 0:
@@ -419,21 +444,87 @@ class HTTPResponse:
             self.close()
         return data
 
+    def recv(self, amt=None):
+        # Non-chunked only: chunked framing needs blocking readline() parsing
+        # which can't survive non-blocking sockets. Use read/readshort instead.
+        self._require_nonchunked()
+        if self.isclosed():
+            return _BLANK
+        if amt is None or amt < 0:
+            amt = self.blocksize
+        if self.length is not None:
+            remaining = self.length - self._bytes_read
+            if remaining == 0:
+                self.close()
+                return _BLANK
+            amt = min(amt, remaining)
+        if amt == 0:
+            return _BLANK
+
+        try:
+            data = self._sock.recv(amt)
+            if data is None:
+                return None  # not ready (non-blocking)
+        except OSError as e:
+            if e.errno == errno.EAGAIN:
+                return None  # not ready (non-blocking)
+            raise
+        if not data:
+            self.close(self.length is not None)
+            return _BLANK
+        n = len(data)
+        self._bytes_read += n
+        if self.length is not None and self._bytes_read >= self.length:
+            self.close()
+        return data
+
+    def recvinto(self, buf):
+        # Non-chunked only: chunked framing needs blocking readline() parsing
+        # which can't survive non-blocking sockets. Use read/readshort instead.
+        self._require_nonchunked()
+        if self.isclosed() or not buf:
+            return 0
+
+        if self.length is None:
+            amt = len(buf)
+        else:
+            amt = min(len(buf), self.length - self._bytes_read)
+            if amt == 0:
+                self.close()
+                return 0
+
+        try:
+            n = self._sock.recvinto(buf, amt)
+            if n is None:
+                return None  # not ready (non-blocking)
+        except OSError as e:
+            if e.errno == errno.EAGAIN:
+                return None  # not ready (non-blocking)
+            raise
+        if n == 0:
+            self.close(self.length is not None)
+            return 0
+        self._bytes_read += n
+        if self.length is not None and self._bytes_read >= self.length:
+            self.close()
+        return n
+
     def readinto(self, buf):
+        # Fill-to-completion semantics rely on blocking no-short-reads.
+        self._require_blocking()
         if self.isclosed() or not buf:
             return 0
 
         if not self.chunked:
-            buflen = len(buf)
             if self.length is None:
-                amt = buflen
+                amt = len(buf)
             else:
-                amt = min(buflen, self.length - self._bytes_read)
+                amt = min(len(buf), self.length - self._bytes_read)
                 if amt == 0:
                     self.close()
                     return 0
             n = self._sock.readinto(buf, amt)
-            if n == 0:
+            if not n:
                 self.close(self.length is not None)
                 return 0
             self._bytes_read += n
@@ -456,7 +547,7 @@ class HTTPResponse:
                 n = self._sock.readinto(buf, amt)
             else:
                 n = self._sock.readinto(bmv[total:], amt)
-            if n == 0:
+            if not n:
                 self.close(True)
             self._bytes_read += n
             self.chunk_left -= n
@@ -614,31 +705,33 @@ class HTTPConnection:
             except OSError: pass
 
     def _parse_host_port(self, host, port):
+        if isinstance(host, str):
+            host = host.encode()
         parsed_port = None
-        if host.startswith("["):
-            close = host.rfind("]")
+        if host.startswith(b"["):
+            close = host.rfind(b"]")
             if close == -1:
                 raise ValueError("invalid host")
             host, rest = host[1:close], host[close+1:]
-            if rest.startswith(":"):
+            if rest.startswith(b":"):
                 if len(rest) > 1:
                     parsed_port = rest[1:]
             elif rest:
                 raise ValueError("invalid host")
-        elif host.count(":") == 1:
-            host, parsed_port = host.rsplit(":", 1)
+        elif host.count(b":") == 1:
+            host, parsed_port = host.rsplit(b":", 1)
         if port is None:
             port = parsed_port
         if not host:
             raise ValueError("invalid host")
-        if port is None or port == "":
+        if not port:
             port = self.default_port
-        if isinstance(port, str):
+        if not isinstance(port, int):
             try:
                 port = int(port, 10)
             except ValueError:
                 port = -1
-        if isinstance(port, int) and not (0 <= port <= 65535):
+        if not (0 <= port <= 65535):
             raise ValueError("invalid port")
         return (host, port)
 
@@ -715,7 +808,7 @@ class HTTPConnection:
         self._putheaderparts(False, method, b" ", url, b" HTTP/1.1\r\n")
 
         if not skip_host:
-            host = self.host.encode()
+            host = self.host
             if b":" in host and not host.startswith(b"["):
                 host = b"[" + host + b"]"
             if self.port == self.default_port:
@@ -847,7 +940,7 @@ class HTTPConnection:
             bmv = memoryview(buf)
             while True:
                 n = data.readinto(buf)
-                if n == 0:
+                if not n:
                     break
                 if n == buflen:
                     send(buf)
@@ -929,7 +1022,7 @@ else:
             super().connect()
             gc.collect()
             # SNI is omitted for IP literals (RFC 6066).
-            omit_sni = ":" in self.host or all(c.isdigit() or c == "." for c in self.host)
+            omit_sni = b":" in self.host or all(48 <= c <= 57 or c == 46 for c in self.host)
             raw = self._sock
             try:
                 self._sock = self._context.wrap_socket(raw, server_hostname=None if omit_sni else self.host)
