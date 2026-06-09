@@ -36,7 +36,7 @@ def _validate_not_c0(buf:ptr8, start:int, end:int, invalid_flags:int) -> int:
     return 1
 
 def _encode_and_validate(val, invalid_flags):
-    if isinstance(val, str):
+    if hasattr(val, "encode"):
         val = val.encode() # unfortunately, micropython doesn't support "iso8859-1" encoding
     elif not isinstance(val, (bytes, bytearray, memoryview)):
         val = str(val).encode()
@@ -61,7 +61,7 @@ def _lower_case(buf:ptr8, start:int, end:int, dst:ptr8) -> int:
 
 def _normalize_key(buf, start, end):
     assert 0 <= start <= end
-    if isinstance(buf, str):
+    if hasattr(buf, "encode"):
         buf = buf.encode()
     elif not isinstance(buf, (bytes, bytearray, memoryview)):
         buf = str(buf).encode()
@@ -684,7 +684,7 @@ class HTTPResponse:
         return default if match is None else match
 
     def getcookie(self, name, default=None):
-        if isinstance(name, str):
+        if hasattr(name, "encode"):
             name = name.encode()
         val = self.rawcookie(name, None)
         if val is not None:
@@ -734,7 +734,7 @@ class HTTPConnection:
         return False
 
     def __init__(self, host, port=None, timeout=None):
-        self.debuglevel = 0
+        self.set_debuglevel(0)
         self.timeout = timeout
         self._sock = None
         self._merge_buffer = None
@@ -743,6 +743,13 @@ class HTTPConnection:
         self.__response = None
         self._method = None
         self._url = None
+        self._set_host_port(host, port)
+        self._can_reconnect = False
+
+    def set_debuglevel(self, level):
+        self.debuglevel = level
+
+    def _set_host_port(self, host, port):
         self.host = host
         if host.startswith("[") and host.endswith("]") and len(host) > 2 and all(c in "[0123456789:abcdefABCDEF]" for c in host):
             self._hostaddr = host[1:-1]
@@ -754,15 +761,11 @@ class HTTPConnection:
             self._hostaddr = host
             self._hostname = host
         if port is None or port == self.default_port:
-            self._hostport = b"%s" % host
+            self._hostport = host.encode()
             self.port = self.default_port
         else:
             self._hostport = b"%s:%d" % (host, port)
             self.port = port
-        self._can_reconnect = False
-
-    def set_debuglevel(self, level):
-        self.debuglevel = level
 
     def connect(self):
         self._sock = create_connection((self._hostaddr, self.port), self.timeout)
@@ -812,7 +815,7 @@ class HTTPConnection:
 
         self.putrequest(method, url, skip_accept_encoding=have_accept_encoding, skip_host=have_host)
 
-        if isinstance(body, str):
+        if hasattr(body, "encode"):
             body = body.encode()
 
         if encode_chunked is None:
@@ -865,7 +868,7 @@ class HTTPConnection:
     def putheader(self, key, val):
         if self.__response is not None:
             raise CannotSendHeader()
-        if isinstance(key, str):
+        if hasattr(key, "encode"):
             key = key.encode()
         val = _encode_and_validate(val, 0)
         self._putheaderparts(False, key, b": ", val, _CRLF)
@@ -873,9 +876,9 @@ class HTTPConnection:
     def putcookie(self, name, value):
         if self.__response is not None:
             raise CannotSendHeader()
-        if isinstance(name, str):
+        if hasattr(name, "encode"):
             name = name.encode()
-        if isinstance(value, str):
+        if hasattr(value, "encode"):
             value = value.encode()
         if not value:
             self._putheaderparts(False, b"Cookie: ", name, b'=', _CRLF)
@@ -981,7 +984,7 @@ class HTTPConnection:
     def send(self, data, *, encode_chunked=False, final_chunk=True):
         send = self._send_chunk if encode_chunked else self._send_raw
 
-        if isinstance(data, str):
+        if hasattr(data, "encode"):
             data = data.encode()
 
         if self.debuglevel > 0:
@@ -1008,7 +1011,7 @@ class HTTPConnection:
 
         else:
             for d in data:
-                if isinstance(d, str):
+                if hasattr(d, "encode"):
                     d = d.encode()
                 if d is not None:
                     send(d)
