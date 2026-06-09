@@ -20,7 +20,7 @@ def _latin1_to_utf8(buf: ptr8, buflen: int, dst: ptr8) -> int:
         i += 1
     return dstlen
 
-def _decode_latin1(buf):
+def decode_latin1(buf):
     buflen = len(buf)
     if buflen == 0:
         return ''
@@ -33,5 +33,5 @@ def _decode_latin1(buf):
     _latin1_to_utf8(buf, buflen, utf8dst)
     return utf8dst.decode()
 
-print(_decode_latin1(b'hello!'))
-print(_decode_latin1(b'\xDF\xCA\x54\xC5'))
+print(decode_latin1(b'hello!'))
+print(decode_latin1(b'\xDF\xCA\x54\xC5'))
