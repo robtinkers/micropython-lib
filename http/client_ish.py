@@ -78,12 +78,13 @@ def _normalize_key(buf, start, end):
     return out
 
 @micropython.viper
-def _latin1_to_utf8(buf: ptr8, length: int, dst: ptr8) -> int:
+def _latin1_to_utf8(buf: ptr8, buflen: int, dst: ptr8) -> int:
     write = int(dst) != 0
     dstlen = 0
     i = 0
-    while i < length:
+    while i < buflen:
         b = buf[i]
+        i += 1
         if b < 128:
             if write:
                 dst[dstlen] = b
@@ -95,7 +96,6 @@ def _latin1_to_utf8(buf: ptr8, length: int, dst: ptr8) -> int:
                 dst[dstlen+0] = 0xC0 | (b >> 6)
                 dst[dstlen+1] = 0x80 | (b & 0x3F)
             dstlen += 2
-        i += 1
     return dstlen
 
 def _decode_latin1(buf):
@@ -105,7 +105,7 @@ def _decode_latin1(buf):
     utf8len = _latin1_to_utf8(buf, buflen, 0)
     if utf8len < 0:
         raise UnicodeError
-    if utf8len == buflen and hasattr(buf, "decode"):
+    if utf8len == buflen:
         return buf.decode()
     utf8dst = bytearray(utf8len)
     _latin1_to_utf8(buf, buflen, utf8dst)
