@@ -36,8 +36,8 @@ def _validate_not_c0(buf:ptr8, start:int, end:int, invalid_flags:int) -> int:
     return 1
 
 def _encode_and_validate(val, invalid_flags):
-    if hasattr(val, "encode"):
-        val = val.encode() # unfortunately, micropython doesn't support "iso8859-1" encoding
+    if isinstance(val, str):
+        val = val.encode()
     elif not isinstance(val, (bytes, bytearray, memoryview)):
         val = str(val).encode()
     if not _validate_not_c0(val, 0, len(val), invalid_flags):
@@ -60,8 +60,11 @@ def _lower_case(buf:ptr8, start:int, end:int, dst:ptr8) -> int:
     return 1
 
 def _normalize_key(buf, start, end):
+    # TODO: callers pass end=len(key) computed *before* encoding, so a
+    # non-ASCII str key is validated/normalized/sliced short (chars != bytes).
+    # Consider end=None meaning "to the end, computed after encoding".
     assert 0 <= start <= end
-    if hasattr(buf, "encode"):
+    if isinstance(buf, str):
         buf = buf.encode()
     elif not isinstance(buf, (bytes, bytearray, memoryview)):
         buf = str(buf).encode()
@@ -243,8 +246,9 @@ class HTTPResponse:
         self.length = None
         self.will_close = True
         self._bytes_read = 0
-        # One-way blocking -> non-blocking transition (see setnonblocking).
-        self._nonblocking = False
+        # Tracks the socket's blocking mode; one-way transition to
+        # non-blocking (see setnonblocking).
+        self._blocking = True
         # Set by readers on protocol violation or premature EOF; forces
         # the socket closed even if response would otherwise keep-alive.
         self._tainted = False
@@ -360,8 +364,12 @@ class HTTPResponse:
         sock = self._sock
         self._sock = None
         if sock is not None:
+            # self.chunked is cleared by _next_chunk() when the terminal
+            # chunk has been consumed; if it is still set here, the chunked
+            # stream was abandoned mid-body (even between chunks, where
+            # chunk_left is 0 or None) and the socket can't be reused.
             framing_incomplete = (
-                (self.chunk_left is not None and self.chunk_left != 0)
+                self.chunked
                 or (self.length is not None and self._bytes_read < self.length)
             )
             if self._tainted or framing_incomplete or self.will_close:
@@ -374,13 +382,19 @@ class HTTPResponse:
         return self._sock is None
 
     def setnonblocking(self):
+        # One-way: a wrapped socket has no settimeout(), so once non-blocking
+        # there's no way to restore the connection's timeout for reuse; the
+        # socket is therefore marked to close with the response (will_close).
+        # Chunked framing needs blocking readline() parsing, so refuse it
+        # here rather than at the first (unservable) read.
+        self._require_nonchunked()
         if self._sock is not None:
-            self._sock.settimeout(0)
-        self._nonblocking = True
+            self._sock.setblocking(False)
+        self._blocking = False
         self.will_close = True
 
     def _require_blocking(self):
-        if self._nonblocking:
+        if not self._blocking:
             raise ValueError("operation requires a blocking socket")
 
     def _require_nonchunked(self):
@@ -408,6 +422,10 @@ class HTTPResponse:
                 while True:
                     line = self._sock.readline()
                     if not line or line == _CRLF or line == b"\n":
+                        # Terminal chunk fully consumed: mark framing complete
+                        # so close() can keep the socket alive for reuse.
+                        self.chunked = False
+                        self.length = self._bytes_read = 0
                         self.close(not line)
                         return 0
             elif self.chunk_left == 0:
@@ -593,7 +611,7 @@ class HTTPResponse:
             self.close()
         return data
 
-    def recvinto(self, buf):
+    def recv_into(self, buf):
         # Non-chunked only: chunked framing needs blocking readline() parsing
         # which can't survive non-blocking sockets. Use read/readshort instead.
         self._require_nonchunked()
@@ -609,7 +627,7 @@ class HTTPResponse:
                 return 0
 
         try:
-            n = self._sock.recvinto(buf, amt)
+            n = self._sock.recv_into(buf, amt)
             if n is None:
                 return None  # not ready (non-blocking)
         except OSError as e:
@@ -684,7 +702,7 @@ class HTTPResponse:
         return default if match is None else match
 
     def getcookie(self, name, default=None):
-        if hasattr(name, "encode"):
+        if isinstance(name, str):
             name = name.encode()
         val = self.rawcookie(name, None)
         if val is not None:
@@ -815,7 +833,7 @@ class HTTPConnection:
 
         self.putrequest(method, url, skip_accept_encoding=have_accept_encoding, skip_host=have_host)
 
-        if hasattr(body, "encode"):
+        if isinstance(body, str):
             body = body.encode()
 
         if encode_chunked is None:
@@ -846,15 +864,16 @@ class HTTPConnection:
         self._can_reconnect = self.auto_open
         self._merged = 0
 
+        # Methods are case-sensitive and sent verbatim (as CPython does).
         method = _encode_and_validate(method, 1)
         if not isinstance(method, bytes):
             method = bytes(method)
-        if method != b"GET":
-            method = method.upper()
 
         url = _encode_and_validate(url, 1)
         if not isinstance(url, bytes):
             url = bytes(url)
+        if not url:
+            url = b"/"
 
         self._method = method
         self._url = url
@@ -868,7 +887,7 @@ class HTTPConnection:
     def putheader(self, key, val):
         if self.__response is not None:
             raise CannotSendHeader()
-        if hasattr(key, "encode"):
+        if isinstance(key, str):
             key = key.encode()
         val = _encode_and_validate(val, 0)
         self._putheaderparts(False, key, b": ", val, _CRLF)
@@ -876,16 +895,16 @@ class HTTPConnection:
     def putcookie(self, name, value):
         if self.__response is not None:
             raise CannotSendHeader()
-        if hasattr(name, "encode"):
+        if isinstance(name, str):
             name = name.encode()
-        if hasattr(value, "encode"):
+        if isinstance(value, str):
             value = value.encode()
         if not value:
             self._putheaderparts(False, b"Cookie: ", name, b'=', _CRLF)
         elif value.find(b'"') >= 0:
             self._putheaderparts(False, b"Cookie: ", name, b'=', value, _CRLF)
         else:
-            self._putheaderparts(False, b"Cookie: ", name, b'="', value, '"', _CRLF)
+            self._putheaderparts(False, b"Cookie: ", name, b'="', value, b'"', _CRLF)
 
     def _putheaderparts(self, flush, *parts):
         # Coalesces small writes into a single sendall.
@@ -984,7 +1003,7 @@ class HTTPConnection:
     def send(self, data, *, encode_chunked=False, final_chunk=True):
         send = self._send_chunk if encode_chunked else self._send_raw
 
-        if hasattr(data, "encode"):
+        if isinstance(data, str):
             data = data.encode()
 
         if self.debuglevel > 0:
@@ -1011,7 +1030,7 @@ class HTTPConnection:
 
         else:
             for d in data:
-                if hasattr(d, "encode"):
+                if isinstance(d, str):
                     d = d.encode()
                 if d is not None:
                     send(d)
