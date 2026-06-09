@@ -220,6 +220,39 @@ def create_connection(address, timeout=None):
         raise err
     raise OSError(errno.EHOSTUNREACH)
 
+def get_hostport(host, port, default_port=0):
+    if isinstance(host, str):
+        host = host.encode()
+    parsed_port = None
+    if host.startswith(b"["):
+        close = host.rfind(b"]")
+        if close == -1:
+            raise ValueError("invalid host")
+        host, rest = host[1:close], host[close+1:]
+        if rest.startswith(b":"):
+            if len(rest) > 1:
+                parsed_port = rest[1:]
+        elif rest:
+            raise ValueError("invalid host")
+    else:
+        sep = host.rfind(b":")
+        if sep >= 0:
+            host, parsed_port = host[:sep], host[sep+1:]
+    if not host:
+        raise ValueError("invalid host")
+    if port is None:
+        port = parsed_port
+    if not port:
+        port = default_port
+    if not isinstance(port, int):
+        try:
+            port = int(port, 10)
+        except ValueError:
+            port = -1
+    if not (0 <= port <= 65535):
+        raise ValueError("invalid port")
+    return (host, port)
+
 class HTTPResponse:
     blocksize = 2048
 
@@ -744,7 +777,7 @@ class HTTPConnection:
         self.__response = None
         self._method = None
         self._url = None
-        self.host, self.port = self._parse_host_port(host, port)
+        self.host, self.port = get_hostport(host, port, self.default_port)
         self._can_reconnect = False
 
     def set_debuglevel(self, level):
@@ -769,37 +802,6 @@ class HTTPConnection:
         if sock is not None:
             try: sock.close()
             except OSError: pass
-
-    def _parse_host_port(self, host, port):
-        if isinstance(host, str):
-            host = host.encode()
-        parsed_port = None
-        if host.startswith(b"["):
-            close = host.rfind(b"]")
-            if close == -1:
-                raise ValueError("invalid host")
-            host, rest = host[1:close], host[close+1:]
-            if rest.startswith(b":"):
-                if len(rest) > 1:
-                    parsed_port = rest[1:]
-            elif rest:
-                raise ValueError("invalid host")
-        elif host.count(b":") == 1:
-            host, parsed_port = host.rsplit(b":", 1)
-        if port is None:
-            port = parsed_port
-        if not host:
-            raise ValueError("invalid host")
-        if not port:
-            port = self.default_port
-        if not isinstance(port, int):
-            try:
-                port = int(port, 10)
-            except ValueError:
-                port = -1
-        if not (0 <= port <= 65535):
-            raise ValueError("invalid port")
-        return (host, port)
 
     def request(self, method, url, body=None, headers=None, *, encode_chunked=None):
         have_accept_encoding = False
