@@ -220,7 +220,7 @@ def create_connection(address, timeout=None):
         raise err
     raise OSError(errno.EHOSTUNREACH)
 
-def get_hostport(host, port, default_port=0):
+def get_hostport(host, port=None, default_port=0):
     if isinstance(host, str):
         host = host.encode()
     parsed_port = None
