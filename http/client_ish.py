@@ -101,7 +101,7 @@ def _latin1_to_utf8(buf: ptr8, buflen: int, dst: ptr8) -> int:
 def _decode_latin1(buf):
     buflen = len(buf)
     if buflen == 0:
-        return ''
+        return ""
     utf8len = _latin1_to_utf8(buf, buflen, 0)
     if utf8len < 0:
         raise UnicodeError
