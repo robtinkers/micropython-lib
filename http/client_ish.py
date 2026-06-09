@@ -219,39 +219,6 @@ def create_connection(address, timeout=None):
         raise err
     raise OSError(errno.EHOSTUNREACH)
 
-def get_hostport(host, port=None, default_port=0):
-    if isinstance(host, str):
-        host = host.encode()
-    parsed_port = None
-    if host.startswith(b"["):
-        close = host.rfind(b"]")
-        if close == -1:
-            raise ValueError("invalid host")
-        host, rest = host[1:close], host[close+1:]
-        if rest.startswith(b":"):
-            if len(rest) > 1:
-                parsed_port = rest[1:]
-        elif rest:
-            raise ValueError("invalid host")
-    else:
-        sep = host.rfind(b":")
-        if sep >= 0:
-            host, parsed_port = host[:sep], host[sep+1:]
-    if not host:
-        raise ValueError("invalid host")
-    if port is None:
-        port = parsed_port
-    if not port:
-        port = default_port
-    if not isinstance(port, int):
-        try:
-            port = int(port, 10)
-        except ValueError:
-            port = -1
-    if not (0 <= port <= 65535):
-        raise ValueError("invalid port")
-    return (host, port)
-
 class HTTPResponse:
     blocksize = 2048
 
@@ -776,14 +743,29 @@ class HTTPConnection:
         self.__response = None
         self._method = None
         self._url = None
-        self.host, self.port = get_hostport(host, port, self.default_port)
+        self.host = host
+        if host.startswith("[") and host.endswith("]") and len(host) > 2 and all(c in "[0123456789:abcdefABCDEF]" for c in host):
+            self._hostaddr = host[1:-1]
+            self._hostname = None
+        elif len(host) > 0 and all(c in "0123456789." for c in host):
+            self._hostaddr = host
+            self._hostname = None
+        else:
+            self._hostaddr = host
+            self._hostname = host
+        if port is None or port == self.default_port:
+            self._hostport = b"%s" % host
+            self.port = self.default_port
+        else:
+            self._hostport = b"%s:%d" % (host, port)
+            self.port = port
         self._can_reconnect = False
 
     def set_debuglevel(self, level):
         self.debuglevel = level
 
     def connect(self):
-        self._sock = create_connection((self.host, self.port), self.timeout)
+        self._sock = create_connection((self._hostaddr, self.port), self.timeout)
 
     def close(self):
         # Suppress the response's own close logic by nulling its socket
@@ -876,13 +858,7 @@ class HTTPConnection:
         self._putheaderparts(False, method, b" ", url, b" HTTP/1.1\r\n")
 
         if not skip_host:
-            host = self.host
-            if b":" in host and not host.startswith(b"["):
-                host = b"[" + host + b"]"
-            if self.port == self.default_port:
-                self.putheader(b"Host", host)
-            else:
-                self.putheader(b"Host", b"%s:%d" % (host, self.port))
+            self._putheaderparts(False, b"Host: ", self._hostport, _CRLF)
         if not skip_accept_encoding:
             self._putheaderparts(False, b"Accept-Encoding: identity\r\n")
 
@@ -1105,10 +1081,9 @@ else:
             super().connect()
             gc.collect()
             # SNI is omitted for IP literals (RFC 6066).
-            omit_sni = b":" in self.host or all(48 <= c <= 57 or c == 46 for c in self.host)
             raw = self._sock
             try:
-                self._sock = self._context.wrap_socket(raw, server_hostname=None if omit_sni else self.host)
+                self._sock = self._context.wrap_socket(raw, server_hostname=self._hostname)
             except Exception as e:
                 self._sock = None
                 if raw is not None:
