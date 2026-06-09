@@ -1,10 +1,10 @@
 
 @micropython.viper
-def _latin1_to_utf8(buf: ptr8, length: int, dst: ptr8) -> int:
+def _latin1_to_utf8(buf: ptr8, buflen: int, dst: ptr8) -> int:
     write = int(dst) != 0
     dstlen = 0
     i = 0
-    while i < length:
+    while i < buflen:
         b = buf[i]
         if b < 128:
             if write:
