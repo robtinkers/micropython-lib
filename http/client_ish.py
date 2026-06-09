@@ -175,15 +175,14 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
                     key = cand
                     break
 
-        if key is not None:
-            if key == b"set-cookie" and not and_cookies:
-                continue
-        else:
+        if key is None:
             if not all_headers:
                 continue
             key = _normalize_key(line, start, end)
             if not isinstance(key, bytes):
                 key = bytes(key)
+        elif key == b"set-cookie" and not and_cookies:
+            continue
 
         start, end = sep + 1, len(line)
         while start < end and line[start] <= 32: start += 1
