@@ -25,24 +25,23 @@ class ResponseNotReady(ImproperConnectionState): pass
 class IncompleteRead(HTTPException): pass
 
 @micropython.viper
-def _validate_iso8859_1(buf:ptr8, start:int, end:int, no_space:int) -> int:
+def _validate_not_c0(buf:ptr8, start:int, end:int, allow_space:int) -> int:
+    not_space = not(allow_space)
     i = start
     while i < end:
         b = buf[i]
-        if b < 9 or (b == 9 and no_space) or (9 < b and b < 32) or (b == 32 and no_space) or (127 == b):
+        if b < 9 or (b == 9 and not_space) or (9 < b and b < 32) or (b == 32 and not_space):
             return 0
         i += 1
     return 1
 
-def _encode_and_validate(val, force_bytes, no_space):
+def _encode_and_validate(val, allow_space):
     if isinstance(val, str):
         val = val.encode() # unfortunately, micropython doesn't support "iso8859-1" encoding
     elif not isinstance(val, (bytes, bytearray, memoryview)):
         val = str(val).encode()
-    if not _validate_iso8859_1(val, 0, len(val), no_space):
+    if not _validate_not_c0(val, 0, len(val), allow_space):
         raise ValueError("not ISO-8859-1")
-    if force_bytes and not isinstance(val, bytes):
-        val = bytes(val)
     return val
 
 @micropython.viper
@@ -66,8 +65,8 @@ def _normalize_key(buf, start, end):
         buf = buf.encode()
     elif not isinstance(buf, (bytes, bytearray, memoryview)):
         buf = str(buf).encode()
-    if not _validate_iso8859_1(buf, start, end, 1):
-        raise ValueError("invalid ISO-8859-1 key")
+    if not _validate_not_c0(buf, start, end, 0):
+        raise ValueError("invalid key")
     if _lower_case(buf, start, end, 0):
         if isinstance(buf, memoryview):
             return bytes(buf[start:end])
@@ -77,6 +76,40 @@ def _normalize_key(buf, start, end):
     out = bytearray(end - start)
     _lower_case(buf, start, end, out)
     return out
+
+@micropython.viper
+def _latin1_to_utf8(buf: ptr8, length: int, dst: ptr8) -> int:
+    write = int(dst) != 0
+    dstlen = 0
+    i = 0
+    while i < length:
+        b = buf[i]
+        i += 1
+        if b < 128:
+            if write:
+                dst[dstlen] = b
+            dstlen += 1
+        elif b < 160:
+            return -1
+        else:
+            if write:
+                dst[dstlen+0] = 0xC0 | (b >> 6)
+                dst[dstlen+1] = 0x80 | (b & 0x3F)
+            dstlen += 2
+    return dstlen
+
+def _decode_latin1(buf):
+    buflen = len(buf)
+    if buflen == 0:
+        return ''
+    utf8len = _latin1_to_utf8(buf, buflen, 0)
+    if utf8len < 0:
+        raise UnicodeError
+    if utf8len == buflen and hasattr(buf, "decode"):
+        return buf.decode()
+    utf8dst = bytearray(utf8len)
+    _latin1_to_utf8(buf, buflen, utf8dst)
+    return utf8dst.decode()
 
 _keep_response_headers = {
     4:[b"etag"],
@@ -616,7 +649,7 @@ class HTTPResponse:
         out = []
         for key, val in self.rawheaders():
             try:
-                out.append((key.decode(), val.decode()))
+                out.append((_decode_latin1(key), _decode_latin1(val)))
             except UnicodeError:
                 pass
         return out
@@ -632,7 +665,7 @@ class HTTPResponse:
         val = self.rawheader(key, None)
         if val is not None:
             try:
-                return val.decode()
+                return _decode_latin1(val)
             except UnicodeError:
                 pass
         return default
@@ -657,7 +690,7 @@ class HTTPResponse:
         val = self.rawcookie(name, None)
         if val is not None:
             try:
-                return val.decode()
+                return _decode_latin1(val)
             except UnicodeError:
                 pass
         return default
@@ -827,14 +860,15 @@ class HTTPConnection:
         self._can_reconnect = self.auto_open
         self._merged = 0
 
-        method = _encode_and_validate(method, True, 1)
+        method = _encode_and_validate(method, 0)
+        if not isinstance(method, bytes):
+            method = bytes(method)
         if method != b"GET":
             method = method.upper()
 
-        if url is not None:
-            url = _encode_and_validate(url, True, 1) or b"/"
-        else:
-            url = b"/"
+        url = _encode_and_validate(url, 0)
+        if not isinstance(url, bytes):
+            url = bytes(method)
 
         self._method = method
         self._url = url
@@ -856,7 +890,7 @@ class HTTPConnection:
             raise CannotSendHeader()
         if isinstance(key, str):
             key = key.encode()
-        val = _encode_and_validate(val, False, 0)
+        val = _encode_and_validate(val, 1)
         self._putheaderparts(False, key, b": ", val, _CRLF)
 
     def putcookie(self, name, value):
