@@ -25,22 +25,22 @@ class ResponseNotReady(ImproperConnectionState): pass
 class IncompleteRead(HTTPException): pass
 
 @micropython.viper
-def _validate_not_c0(buf:ptr8, start:int, end:int, allow_space:int) -> int:
-    not_space = not(allow_space)
+def _validate_not_c0(buf:ptr8, start:int, end:int, invalid_flags:int) -> int:
+    invalid_space = invalid_flags & 1
     i = start
     while i < end:
         b = buf[i]
-        if b < 9 or (b == 9 and not_space) or (9 < b and b < 32) or (b == 32 and not_space):
+        if b < 9 or (b == 9 and invalid_space) or (9 < b and b < 32) or (b == 32 and invalid_space):
             return 0
         i += 1
     return 1
 
-def _encode_and_validate(val, allow_space):
+def _encode_and_validate(val, invalid_flags):
     if isinstance(val, str):
         val = val.encode() # unfortunately, micropython doesn't support "iso8859-1" encoding
     elif not isinstance(val, (bytes, bytearray, memoryview)):
         val = str(val).encode()
-    if not _validate_not_c0(val, 0, len(val), allow_space):
+    if not _validate_not_c0(val, 0, len(val), invalid_flags):
         raise ValueError("not ISO-8859-1")
     return val
 
@@ -65,7 +65,7 @@ def _normalize_key(buf, start, end):
         buf = buf.encode()
     elif not isinstance(buf, (bytes, bytearray, memoryview)):
         buf = str(buf).encode()
-    if not _validate_not_c0(buf, start, end, 0):
+    if not _validate_not_c0(buf, start, end, 1):
         raise ValueError("invalid key")
     if _lower_case(buf, start, end, 0):
         if isinstance(buf, memoryview):
@@ -860,13 +860,13 @@ class HTTPConnection:
         self._can_reconnect = self.auto_open
         self._merged = 0
 
-        method = _encode_and_validate(method, 0)
+        method = _encode_and_validate(method, 1)
         if not isinstance(method, bytes):
             method = bytes(method)
         if method != b"GET":
             method = method.upper()
 
-        url = _encode_and_validate(url, 0)
+        url = _encode_and_validate(url, 1)
         if not isinstance(url, bytes):
             url = bytes(url)
 
@@ -890,7 +890,7 @@ class HTTPConnection:
             raise CannotSendHeader()
         if isinstance(key, str):
             key = key.encode()
-        val = _encode_and_validate(val, 1)
+        val = _encode_and_validate(val, 0)
         self._putheaderparts(False, key, b": ", val, _CRLF)
 
     def putcookie(self, name, value):
