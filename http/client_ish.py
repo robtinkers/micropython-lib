@@ -868,7 +868,7 @@ class HTTPConnection:
 
         url = _encode_and_validate(url, 0)
         if not isinstance(url, bytes):
-            url = bytes(method)
+            url = bytes(url)
 
         self._method = method
         self._url = url
