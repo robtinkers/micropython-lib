@@ -98,7 +98,7 @@ def _latin1_to_utf8(buf: ptr8, buflen: int, dst: ptr8) -> int:
             dstlen += 2
     return dstlen
 
-def _decode_latin1(buf):
+def decode_latin1(buf):
     buflen = len(buf)
     if buflen == 0:
         return ""
@@ -649,7 +649,7 @@ class HTTPResponse:
         out = []
         for key, val in self.rawheaders():
             try:
-                out.append((_decode_latin1(key), _decode_latin1(val)))
+                out.append((decode_latin1(key), decode_latin1(val)))
             except UnicodeError:
                 pass
         return out
@@ -665,7 +665,7 @@ class HTTPResponse:
         val = self.rawheader(key, None)
         if val is not None:
             try:
-                return _decode_latin1(val)
+                return decode_latin1(val)
             except UnicodeError:
                 pass
         return default
@@ -690,7 +690,7 @@ class HTTPResponse:
         val = self.rawcookie(name, None)
         if val is not None:
             try:
-                return _decode_latin1(val)
+                return decode_latin1(val)
             except UnicodeError:
                 pass
         return default
