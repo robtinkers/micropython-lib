@@ -84,7 +84,6 @@ def _latin1_to_utf8(buf: ptr8, length: int, dst: ptr8) -> int:
     i = 0
     while i < length:
         b = buf[i]
-        i += 1
         if b < 128:
             if write:
                 dst[dstlen] = b
@@ -96,6 +95,7 @@ def _latin1_to_utf8(buf: ptr8, length: int, dst: ptr8) -> int:
                 dst[dstlen+0] = 0xC0 | (b >> 6)
                 dst[dstlen+1] = 0x80 | (b & 0x3F)
             dstlen += 2
+        i += 1
     return dstlen
 
 def _decode_latin1(buf):
@@ -861,14 +861,13 @@ class HTTPConnection:
         self._merged = 0
 
         method = _encode_and_validate(method, 0)
-        if not isinstance(method, bytes):
-            method = bytes(method)
         if method != b"GET":
             method = method.upper()
 
-        url = _encode_and_validate(url, 0)
-        if not isinstance(url, bytes):
-            url = bytes(method)
+        if url is not None:
+            url = _encode_and_validate(url, 0) or b"/"
+        else:
+            url = b"/"
 
         self._method = method
         self._url = url
