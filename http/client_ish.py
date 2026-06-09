@@ -861,13 +861,14 @@ class HTTPConnection:
         self._merged = 0
 
         method = _encode_and_validate(method, 0)
+        if not isinstance(method, bytes):
+            method = bytes(method)
         if method != b"GET":
             method = method.upper()
 
-        if url is not None:
-            url = _encode_and_validate(url, 0) or b"/"
-        else:
-            url = b"/"
+        url = _encode_and_validate(url, 0)
+        if not isinstance(url, bytes):
+            url = bytes(method)
 
         self._method = method
         self._url = url
