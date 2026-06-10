@@ -62,7 +62,7 @@ def _lower_case(buf:ptr8, start:int, end:int, dst:ptr8) -> int:
     i = start
     while i < end:
         b = buf[i]
-        if dst == 0:
+        if int(dst) == 0:
             if 65 <= b and b <= 90:
                 return 0
         else:
