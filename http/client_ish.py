@@ -605,7 +605,7 @@ class HTTPResponse:
             return _BLANK
 
         try:
-            data = self._sock.read(amt)
+            data = self._sock.recv(amt)
             if data is None:
                 return None
         except OSError as e:
@@ -636,7 +636,7 @@ class HTTPResponse:
                 return 0
 
         try:
-            n = self._sock.readinto(buf, amt)
+            n = self._sock.recv_into(buf, amt)
             if n is None:
                 return None
         except OSError as e:
