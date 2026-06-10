@@ -59,15 +59,16 @@ def _lower_case(buf:ptr8, start:int, end:int, dst:ptr8) -> int:
         i += 1
     return 1
 
-def _normalize_key(buf, start, end):
-    # TODO: callers pass end=len(key) computed *before* encoding, so a
-    # non-ASCII str key is validated/normalized/sliced short (chars != bytes).
-    # Consider end=None meaning "to the end, computed after encoding".
-    assert 0 <= start <= end
+def _normalize_key(buf, start=0, end=None):
+    # end=None means "to the end", measured after encoding. Callers must
+    # only pass explicit start/end as *byte* offsets into a bytes-like buf.
     if isinstance(buf, str):
         buf = buf.encode()
     elif not isinstance(buf, (bytes, bytearray, memoryview)):
         buf = str(buf).encode()
+    if end is None:
+        end = len(buf)
+    assert 0 <= start <= end
     if not _validate_not_c0(buf, start, end, 1):
         raise ValueError("invalid key")
     if _lower_case(buf, start, end, 0):
@@ -126,7 +127,7 @@ _keep_response_headers = {
 }
 
 def keep_response_header(key):
-    key = _normalize_key(key, 0, len(key))
+    key = _normalize_key(key)
     if not isinstance(key, bytes):
         key = bytes(key)
     len_key = len(key)
@@ -247,7 +248,7 @@ class HTTPResponse:
         self.will_close = True
         self._bytes_read = 0
         # Tracks the socket's blocking mode; one-way transition to
-        # non-blocking (see setnonblocking).
+        # non-blocking (see setblocking).
         self._blocking = True
         # Set by readers on protocol violation or premature EOF; forces
         # the socket closed even if response would otherwise keep-alive.
@@ -381,12 +382,15 @@ class HTTPResponse:
     def isclosed(self):
         return self._sock is None
 
-    def setnonblocking(self):
+    def setblocking(self, flag):
         # One-way: a wrapped socket has no settimeout(), so once non-blocking
         # there's no way to restore the connection's timeout for reuse; the
         # socket is therefore marked to close with the response (will_close).
+        # Only a falsy *flag* (non-blocking) is accepted for that reason.
         # Chunked framing needs blocking readline() parsing, so refuse it
         # here rather than at the first (unservable) read.
+        if flag:
+            raise ValueError("can only transition to non-blocking")
         self._require_nonchunked()
         if self._sock is not None:
             self._sock.setblocking(False)
@@ -691,7 +695,7 @@ class HTTPResponse:
         # Returns first match
         if self._headers is None:
             raise ResponseNotReady()
-        key = _normalize_key(key, 0, len(key))
+        key = _normalize_key(key)
         match = None
         for i in range(0, len(self._headers), 2):
             if self._headers[i] == key:
@@ -821,7 +825,7 @@ class HTTPConnection:
                 pairs = list(headers)
             headers = None
             for key, _value in pairs:
-                key = _normalize_key(key, 0, len(key))
+                key = _normalize_key(key)
                 if key == b"accept-encoding":
                     have_accept_encoding = True
                 elif key == b"content-length":
