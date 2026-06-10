@@ -10,6 +10,10 @@ HTTPS_PORT = const(443)
 # Run gc.collect() after a response when free memory drops below this (bytes); 0 disables.
 _GC_THRESHOLD = const(32768)
 
+# Compile-time debug switch: with const(0), the compiler strips every
+# "if _DEBUG:" block (and its strings) from the bytecode entirely.
+_DEBUG = const(0)
+
 # Methods that get an explicit "Content-Length: 0" when no body is supplied.
 _METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
 
@@ -35,8 +39,9 @@ def _validate_not_c0(buf:ptr8, start:int, end:int, invalid_flags:int) -> int:
     i = start
     while i < end:
         b = buf[i]
-        if b < 9 or (b == 9 and invalid_space) or (9 < b and b < 32) or (b == 32 and invalid_space):
-            return 0
+        if b < 33:
+            if invalid_space or (b != 9 and b != 32):
+                return 0
         i += 1
     return 1
 
@@ -249,9 +254,8 @@ class HTTPResponse:
         self.close()
         return False
 
-    def __init__(self, sock, debuglevel=0, method=None, url=None):
+    def __init__(self, sock, method=None, url=None):
         self._sock = sock
-        self.debuglevel = debuglevel
         self._method = method
         self._url = url
         self._headers = None
@@ -272,11 +276,11 @@ class HTTPResponse:
             return
         self._require_blocking()
         self.version, self.status, self.reason = self._read_status()
-        if self.debuglevel > 0:
+        if _DEBUG:
             print("status:", repr(self.version), repr(self.status), repr(self.reason))
 
         self._headers = parse_headers(self._sock, all_headers=all_headers, and_cookies=and_cookies)
-        if self.debuglevel > 0:
+        if _DEBUG:
             for i in range(0, len(self._headers), 2):
                 print("header:", repr(self._headers[i]), "=", repr(self._headers[i+1]))
 
@@ -326,7 +330,7 @@ class HTTPResponse:
     def _read_status(self):
         while True:
             line = self._sock.readline()
-            if self.debuglevel > 0:
+            if _DEBUG:
                 print("status:", repr(line))
             if line == _CRLF or line == b"\n":
                 continue
@@ -357,7 +361,7 @@ class HTTPResponse:
                 line = self._sock.readline()
                 if line == _CRLF or line == b"\n" or not line:
                     break
-                if self.debuglevel > 0:
+                if _DEBUG:
                     print("header:", repr(line))
 
         if version == b"HTTP/1.0":
@@ -584,7 +588,7 @@ class HTTPResponse:
             total += n
         return total
 
-    # Non-blocking-friendly read: None on EAGAIN, b"" at end of body.
+    # Non-blocking-friendly read: None while no data is available yet, b"" at end of body.
     def recv(self, amt=None):
         self._require_nonchunked()
         if self.isclosed():
@@ -600,14 +604,11 @@ class HTTPResponse:
         if amt == 0:
             return _BLANK
 
-        try:
-            data = self._sock.recv(amt)
-            if data is None:
-                return None
-        except OSError as e:
-            if e.errno == errno.EAGAIN:
-                return None
-            raise
+        # On a non-blocking socket the stream read returns None instead of
+        # raising EAGAIN, so an empty poll allocates nothing.
+        data = self._sock.read(amt)
+        if data is None:
+            return None
         if not data:
             self.close(self.length is not None)
             return _BLANK
@@ -617,7 +618,7 @@ class HTTPResponse:
             self.close()
         return data
 
-    # Non-blocking-friendly readinto: None on EAGAIN, 0 at end of body.
+    # Non-blocking-friendly readinto: None while no data is available yet, 0 at end of body.
     def recv_into(self, buf):
         self._require_nonchunked()
         if self.isclosed() or not buf:
@@ -631,14 +632,9 @@ class HTTPResponse:
                 self.close()
                 return 0
 
-        try:
-            n = self._sock.recv_into(buf, amt)
-            if n is None:
-                return None
-        except OSError as e:
-            if e.errno == errno.EAGAIN:
-                return None
-            raise
+        n = self._sock.readinto(buf, amt)
+        if n is None:
+            return None
         if n == 0:
             self.close(self.length is not None)
             return 0
@@ -763,7 +759,6 @@ class HTTPConnection:
         return False
 
     def __init__(self, host, port=None, timeout=None):
-        self.set_debuglevel(0)
         self.timeout = timeout
         self._sock = None
         self._merge_buffer = None
@@ -774,9 +769,6 @@ class HTTPConnection:
         self._url = None
         self._set_host_port(host, port)
         self._can_reconnect = False
-
-    def set_debuglevel(self, level):
-        self.debuglevel = level
 
     # Record host/port; IPv6 ([...]) and IPv4 literals skip DNS and TLS SNI.
     def _set_host_port(self, host, port):
@@ -826,7 +818,9 @@ class HTTPConnection:
         pairs = None
         if headers is not None:
             if isinstance(headers, dict):
-                pairs = list(headers.items())
+                # items() view is re-iterable, so no list copy is needed
+                # for the two passes below.
+                pairs = headers.items()
             elif isinstance(headers, (list, tuple)):
                 pairs = headers
             else:
@@ -968,7 +962,7 @@ class HTTPConnection:
     def _send_raw(self, data):
         if not data:
             return
-        if self.debuglevel > 0:
+        if _DEBUG:
             print("send:", len(data), "bytes")
         if self._can_reconnect:
             if self._sock is not None:
@@ -996,7 +990,7 @@ class HTTPConnection:
     # Send one chunked-encoding chunk; None sends the zero-length terminator.
     def _send_chunk(self, data):
         if data is None:
-            if self.debuglevel > 0:
+            if _DEBUG:
                 print("send: terminating chunk")
             self._send_raw(b"0\r\n\r\n")
             return
@@ -1026,7 +1020,7 @@ class HTTPConnection:
         if isinstance(data, str):
             data = data.encode()
 
-        if self.debuglevel > 0:
+        if _DEBUG:
             print("send:", type(data).__name__)
 
         if data is None:
@@ -1056,7 +1050,7 @@ class HTTPConnection:
                     send(d)
 
         if encode_chunked and final_chunk:
-            if self.debuglevel > 0:
+            if _DEBUG:
                 print("send: terminator")
             self._send_chunk(None)
 
@@ -1071,7 +1065,7 @@ class HTTPConnection:
             raise ResponseNotReady()
         response = None
         try:
-            response = self.response_class(self._sock, self.debuglevel, self._method, self._url)
+            response = self.response_class(self._sock, self._method, self._url)
             response.begin(**kwargs)
             if response.will_close:
                 self._sock = None
