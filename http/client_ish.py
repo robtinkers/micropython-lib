@@ -5,10 +5,9 @@ import micropython, socket, errno, gc
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
 
-# Memory threshold below which GC is called after a request
+# Free-memory threshold below which getresponse() collects garbage.
 _GC_THRESHOLD = const(32768)
 
-# HTTP methods that expect a body
 _METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
 
 _BLANK = b""
@@ -24,6 +23,7 @@ class CannotSendHeader(ImproperConnectionState): pass
 class ResponseNotReady(ImproperConnectionState): pass
 class IncompleteRead(HTTPException): pass
 
+# Rejects C0 controls; bit 0 of invalid_flags also rejects space and tab.
 @micropython.viper
 def _validate_not_c0(buf:ptr8, start:int, end:int, invalid_flags:int) -> int:
     invalid_space = invalid_flags & 1
@@ -44,6 +44,7 @@ def _encode_and_validate(val, invalid_flags):
         raise ValueError("not ISO-8859-1")
     return val
 
+# dst == 0: return 1 iff already lower-case. Else lower-case buf into dst.
 @micropython.viper
 def _lower_case(buf:ptr8, start:int, end:int, dst:ptr8) -> int:
     i = start
@@ -59,16 +60,15 @@ def _lower_case(buf:ptr8, start:int, end:int, dst:ptr8) -> int:
         i += 1
     return 1
 
+# Validate and lower-case a header key. end=None means "to the end",
+# measured after encoding; explicit start/end are byte offsets.
 def _normalize_key(buf, start=0, end=None):
-    # end=None means "to the end", measured after encoding. Callers must
-    # only pass explicit start/end as *byte* offsets into a bytes-like buf.
     if isinstance(buf, str):
         buf = buf.encode()
     elif not isinstance(buf, (bytes, bytearray, memoryview)):
         buf = str(buf).encode()
     if end is None:
         end = len(buf)
-    assert 0 <= start <= end
     if not _validate_not_c0(buf, start, end, 1):
         raise ValueError("invalid key")
     if _lower_case(buf, start, end, 0):
@@ -81,6 +81,7 @@ def _normalize_key(buf, start=0, end=None):
     _lower_case(buf, start, end, out)
     return out
 
+# UTF-8 length of latin-1 buf (written to dst unless 0); -1 on C1 controls.
 @micropython.viper
 def _latin1_to_utf8(buf: ptr8, buflen: int, dst: ptr8) -> int:
     write = int(dst) != 0
@@ -115,6 +116,7 @@ def decode_latin1(buf):
     _latin1_to_utf8(buf, buflen, utf8dst)
     return utf8dst.decode()
 
+# Response headers kept by parse_headers, keyed by length.
 _keep_response_headers = {
     4:[b"etag"],
     8:[b"location"],
@@ -149,6 +151,7 @@ def _memeqlc(raw:ptr8, start:int, end:int, cand:ptr8) -> int:
         i += 1
     return 1
 
+# Returns a flat [key1, val1, key2, val2, ...] list.
 def parse_headers(sock, *, all_headers=False, and_cookies=None):
     if and_cookies is None:
         and_cookies = all_headers
@@ -247,15 +250,14 @@ class HTTPResponse:
         self.length = None
         self.will_close = True
         self._bytes_read = 0
-        # Tracks the socket's blocking mode; one-way transition to
-        # non-blocking (see setblocking).
+        # One-way blocking -> non-blocking transition (see setblocking).
         self._blocking = True
-        # Set by readers on protocol violation or premature EOF; forces
-        # the socket closed even if response would otherwise keep-alive.
+        # Set on protocol violation or premature EOF; forces the socket closed.
         self._tainted = False
 
     def begin(self, *, all_headers=False, and_cookies=None):
-        # Framing parse uses readline(), which is blocking-only.
+        if self._headers is not None:
+            return  # already begun: no-op (CPython-compatible)
         self._require_blocking()
         self.version, self.status, self.reason = self._read_status()
         if self.debuglevel > 0:
@@ -266,8 +268,7 @@ class HTTPResponse:
             for i in range(0, len(self._headers), 2):
                 print("header:", repr(self._headers[i]), "=", repr(self._headers[i+1]))
 
-        # Single pass: pull transfer-encoding, connection, content-length.
-        # On duplicate headers the last occurrence wins.
+        # Single pass; on duplicate headers the last occurrence wins.
         transfer_encoding = None
         connection = None
         content_length = None
@@ -289,7 +290,6 @@ class HTTPResponse:
         else:
             self.will_close = bool(connection) and b"close" in connection.lower()
 
-        # Content-Length ignored when chunked.
         self.length = None
         if content_length and not self.chunked:
             try:
@@ -325,7 +325,7 @@ class HTTPResponse:
 
             line = line.split(None, 2)
             if len(line) == 3:
-                version, status, reason = line  # the application should rstrip reason
+                version, status, reason = line  # application should rstrip reason
             elif len(line) == 2:
                 version, status = line
                 reason = _BLANK
@@ -339,8 +339,7 @@ class HTTPResponse:
             if not (100 <= status <= 999):
                 raise BadStatusLine()
 
-            # 1xx informational (except 101 Switching Protocols) is followed
-            # by another status line; drain its headers and re-read.
+            # 1xx (except 101) is followed by another status line: drain, re-read.
             if not (100 <= status <= 199) or status == 101:
                 break
             while True:
@@ -365,10 +364,8 @@ class HTTPResponse:
         sock = self._sock
         self._sock = None
         if sock is not None:
-            # self.chunked is cleared by _next_chunk() when the terminal
-            # chunk has been consumed; if it is still set here, the chunked
-            # stream was abandoned mid-body (even between chunks, where
-            # chunk_left is 0 or None) and the socket can't be reused.
+            # chunked is cleared at the terminal chunk (_next_chunk); still set
+            # here means the stream was abandoned mid-body: do not reuse.
             framing_incomplete = (
                 self.chunked
                 or (self.length is not None and self._bytes_read < self.length)
@@ -382,13 +379,10 @@ class HTTPResponse:
     def isclosed(self):
         return self._sock is None
 
+    # One-way: wrapped sockets lack settimeout(), so the connection's
+    # timeout can't be restored for reuse and the socket dies with the
+    # response. Chunked framing needs blocking readline(), so refuse it.
     def setblocking(self, flag):
-        # One-way: a wrapped socket has no settimeout(), so once non-blocking
-        # there's no way to restore the connection's timeout for reuse; the
-        # socket is therefore marked to close with the response (will_close).
-        # Only a falsy *flag* (non-blocking) is accepted for that reason.
-        # Chunked framing needs blocking readline() parsing, so refuse it
-        # here rather than at the first (unservable) read.
         if flag:
             raise ValueError("can only transition to non-blocking")
         self._require_nonchunked()
@@ -426,8 +420,7 @@ class HTTPResponse:
                 while True:
                     line = self._sock.readline()
                     if not line or line == _CRLF or line == b"\n":
-                        # Terminal chunk fully consumed: mark framing complete
-                        # so close() can keep the socket alive for reuse.
+                        # Terminal chunk consumed: mark framing complete for close().
                         self.chunked = False
                         self.length = self._bytes_read = 0
                         self.close(not line)
@@ -441,14 +434,13 @@ class HTTPResponse:
                 return self.chunk_left
 
     def read(self, amt=None):
-        # Fill-to-completion semantics rely on blocking no-short-reads.
         self._require_blocking()
         if self.isclosed():
             return _BLANK
 
         unbounded = amt is None or amt < 0
+        # Close-delimited: read until EOF in one call.
         if unbounded and self.length is None and not self.chunked:
-            # Close-delimited: read until EOF in one call.
             try:
                 data = self._sock.read()
                 if not data:
@@ -504,7 +496,6 @@ class HTTPResponse:
         return out
 
     def readshort(self, amt=None):
-        # Single-piece fill relies on blocking no-short-reads.
         self._require_blocking()
         if self.isclosed():
             return _BLANK
@@ -537,7 +528,6 @@ class HTTPResponse:
         return data
 
     def readinto(self, buf):
-        # Fill-to-completion semantics rely on blocking no-short-reads.
         self._require_blocking()
         if self.isclosed() or not buf:
             return 0
@@ -581,9 +571,8 @@ class HTTPResponse:
             total += n
         return total
 
+    # Non-chunked only; returns None when not ready (non-blocking).
     def recv(self, amt=None):
-        # Non-chunked only: chunked framing needs blocking readline() parsing
-        # which can't survive non-blocking sockets. Use read/readshort instead.
         self._require_nonchunked()
         if self.isclosed():
             return _BLANK
@@ -601,10 +590,10 @@ class HTTPResponse:
         try:
             data = self._sock.recv(amt)
             if data is None:
-                return None  # not ready (non-blocking)
+                return None
         except OSError as e:
             if e.errno == errno.EAGAIN:
-                return None  # not ready (non-blocking)
+                return None
             raise
         if not data:
             self.close(self.length is not None)
@@ -615,9 +604,8 @@ class HTTPResponse:
             self.close()
         return data
 
+    # Non-chunked only; returns None when not ready (non-blocking).
     def recv_into(self, buf):
-        # Non-chunked only: chunked framing needs blocking readline() parsing
-        # which can't survive non-blocking sockets. Use read/readshort instead.
         self._require_nonchunked()
         if self.isclosed() or not buf:
             return 0
@@ -633,10 +621,10 @@ class HTTPResponse:
         try:
             n = self._sock.recv_into(buf, amt)
             if n is None:
-                return None  # not ready (non-blocking)
+                return None
         except OSError as e:
             if e.errno == errno.EAGAIN:
-                return None  # not ready (non-blocking)
+                return None
             raise
         if n == 0:
             self.close(self.length is not None)
@@ -676,7 +664,6 @@ class HTTPResponse:
         return out
 
     def rawheaders(self):
-        # Returns an iterator
         if self._headers is None:
             raise ResponseNotReady()
         for i in range(0, len(self._headers), 2):
@@ -691,8 +678,8 @@ class HTTPResponse:
                 pass
         return default
 
+    # Duplicate headers are joined with ", ".
     def rawheader(self, key, default=None):
-        # Returns first match
         if self._headers is None:
             raise ResponseNotReady()
         key = _normalize_key(key)
@@ -716,8 +703,8 @@ class HTTPResponse:
                 pass
         return default
 
+    # First matching cookie's value, surrounding quotes stripped.
     def rawcookie(self, name, default=None):
-        # Returns first match
         if self._headers is None:
             raise ResponseNotReady()
         len_name = len(name)
@@ -793,12 +780,11 @@ class HTTPConnection:
         self._sock = create_connection((self._hostaddr, self.port), self.timeout)
 
     def close(self):
-        # Suppress the response's own close logic by nulling its socket
-        # reference; this object owns the socket teardown.
         self._can_reconnect = False
         self._merged = 0
         self._merge_buffmv = None
         self._merge_buffer = None
+        # This object owns socket teardown; null the response's reference.
         response = self.__response
         self.__response = None
         if response is not None:
@@ -861,14 +847,17 @@ class HTTPConnection:
         self.endheaders(body, encode_chunked=encode_chunked)
 
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
-        if self.__response is not None and not self.__response.isclosed():
+        # Not idle: a method+socket pair whose response was never fetched
+        # (or is still open) means the previous cycle is unfinished.
+        if (self._method is not None and self._sock is not None
+                and (self.__response is None or not self.__response.isclosed())):
             raise CannotSendRequest()
         self.__response = None
 
         self._can_reconnect = self.auto_open
         self._merged = 0
 
-        # Methods are case-sensitive and sent verbatim (as CPython does).
+        # Methods are case-sensitive and sent verbatim.
         method = _encode_and_validate(method, 1)
         if not isinstance(method, bytes):
             method = bytes(method)
@@ -889,7 +878,7 @@ class HTTPConnection:
             self._putheaderparts(False, b"Accept-Encoding: identity\r\n")
 
     def putheader(self, key, val):
-        if self.__response is not None:
+        if self.__response is not None or self._method is None:
             raise CannotSendHeader()
         if isinstance(key, str):
             key = key.encode()
@@ -897,7 +886,7 @@ class HTTPConnection:
         self._putheaderparts(False, key, b": ", val, _CRLF)
 
     def putcookie(self, name, value):
-        if self.__response is not None:
+        if self.__response is not None or self._method is None:
             raise CannotSendHeader()
         if isinstance(name, str):
             name = name.encode()
@@ -910,8 +899,8 @@ class HTTPConnection:
         else:
             self._putheaderparts(False, b"Cookie: ", name, b'="', value, b'"', _CRLF)
 
+    # Coalesces small writes into a single sendall.
     def _putheaderparts(self, flush, *parts):
-        # Coalesces small writes into a single sendall.
         _send_raw = self._send_raw
         _buffer_size = self._merge_buffer_size
         if self._merge_buffer is None and _buffer_size:
@@ -943,9 +932,9 @@ class HTTPConnection:
         self._merged = _merged
 
     def endheaders(self, message_body=None, *, encode_chunked=False):
-        if self.__response is not None:
+        if self.__response is not None or self._method is None:
             raise CannotSendHeader()
-        # The flush below sends _CRLF, which clears _can_reconnect via _send_raw.
+        # Flushing the final CRLF clears _can_reconnect via _send_raw.
         self._putheaderparts(True, _CRLF)
         if message_body is not None or encode_chunked:
             self.send(message_body, encode_chunked=encode_chunked)
@@ -955,8 +944,8 @@ class HTTPConnection:
             return
         if self.debuglevel > 0:
             print("send:", len(data), "bytes")
-        # On the first send of a request, transparently (re)connect if a
-        # kept-alive socket has died. Subsequent sends require an open socket.
+        # First send of a request transparently (re)connects a dead kept-alive
+        # socket; subsequent sends require an open socket.
         if self._can_reconnect:
             if self._sock is not None:
                 try:
@@ -1005,6 +994,9 @@ class HTTPConnection:
 
     # encode_chunked and final_chunk are extensions beyond CPython.
     def send(self, data, *, encode_chunked=False, final_chunk=True):
+        # Body data is only valid between endheaders() and getresponse().
+        if self.__response is not None:
+            raise CannotSendRequest()
         send = self._send_chunk if encode_chunked else self._send_raw
 
         if isinstance(data, str):
@@ -1045,16 +1037,21 @@ class HTTPConnection:
             self._send_chunk(None)
 
     def getresponse(self, **kwargs):
-        if self.__response is not None and not self.__response.isclosed():
+        # A request is fully sent iff: no outstanding or undelivered response,
+        # a method and socket exist, nothing is still buffered (_merged) and
+        # nothing is still unsent (_can_reconnect).
+        if (self.__response is not None
+            or self._method is None
+            or self._sock is None
+            or self._can_reconnect
+            or self._merged):
             raise ResponseNotReady()
-        self.__response = None
         response = None
         try:
             response = self.response_class(self._sock, self.debuglevel, self._method, self._url)
             response.begin(**kwargs)
             if response.will_close:
-                # Response owns the socket from here.
-                self._sock = None
+                self._sock = None  # response owns the socket from here
             else:
                 self.__response = response
             return response
