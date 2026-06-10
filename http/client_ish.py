@@ -604,11 +604,15 @@ class HTTPResponse:
         if amt == 0:
             return _BLANK
 
-        # On a non-blocking socket the stream read returns None instead of
-        # raising EAGAIN, so an empty poll allocates nothing.
-        data = self._sock.read(amt)
-        if data is None:
-            return None
+        try:
+            data = self._sock.read(amt)
+            if data is None:
+                return None
+        except OSError as e:
+            if e.errno == errno.EAGAIN:
+                return None
+            raise
+
         if not data:
             self.close(self.length is not None)
             return _BLANK
@@ -623,7 +627,6 @@ class HTTPResponse:
         self._require_nonchunked()
         if self.isclosed() or not buf:
             return 0
-
         if self.length is None:
             amt = len(buf)
         else:
@@ -632,9 +635,15 @@ class HTTPResponse:
                 self.close()
                 return 0
 
-        n = self._sock.readinto(buf, amt)
-        if n is None:
-            return None
+        try:
+            n = self._sock.readinto(buf, amt)
+            if n is None:
+                return None
+        except OSError as e:
+            if e.errno == errno.EAGAIN:
+                return None
+            raise
+
         if n == 0:
             self.close(self.length is not None)
             return 0
