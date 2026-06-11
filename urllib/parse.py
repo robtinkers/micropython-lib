@@ -140,7 +140,6 @@ def quote(s, safe="/"):
     elif safe == "":
         return _quote(s, _COMPILED_EMPTY)
     elif isinstance(safe, array):
-        safe[0] = 0
         return _quote(s, safe)
     else:
         return _quote(s, compile_safe(safe, 0))
@@ -149,8 +148,7 @@ def quote_plus(s, safe=""):
     if safe == "":
         return _quote(s, _COMPILED_PLUS)
     elif isinstance(safe, array):
-        safe[0] = 1
-        return _quote(s, safe)
+        return None
     else:
         return _quote(s, compile_safe(safe, 1))
 
@@ -162,7 +160,6 @@ def quote_from_bytes(bs, safe="/"):
     elif safe == "":
         return _quote(bs, _COMPILED_EMPTY)
     elif isinstance(safe, array):
-        safe[0] = 0
         return _quote(bs, safe)
     else:
         return _quote(bs, compile_safe(safe, 0))
@@ -224,7 +221,7 @@ def _unquote_helper(src: ptr8, start: int, end: int, out: ptr8) -> int:
     
     return outlen if modified else -outlen
 
-def _unquote(src, start, end, plusmode: int) -> bytes:
+def _unquote(src, start, end, plusmode: bool) -> bytes:
     if isinstance(src, str):
         # on micropython, memoryview(str) gives you direct access to the underlying bytes
         # but you're going to have a hard time unless (start == 0 and end is None)
@@ -245,25 +242,28 @@ def _unquote(src, start, end, plusmode: int) -> bytes:
     if outlen >= 0:
         out = bytearray(outlen)
         _unquote_helper(src, start, endx, out)
-        return bytes(out)
+        return out
     
     if start != 0 or end != srclen:
         out = src[start:end]
     else:
         out = src
     
-    if not isinstance(out, bytes):
+    if isinstance(out, memoryview):
         out = bytes(out)
     return out
 
 def unquote(s):
-    return _unquote(s, 0, None, 0).decode()
+    return _unquote(s, 0, None, False).decode()
 
 def unquote_plus(s):
-    return _unquote(s, 0, None, 1).decode()
+    return _unquote(s, 0, None, True).decode()
 
 def unquote_to_bytes(s) -> bytes:
-    return _unquote(s, 0, None, 0)
+    out = _unquote(s, 0, None, False)
+    if not isinstance(out, bytes):
+        out = bytes(out)
+    return out
 
 
 
@@ -314,6 +314,10 @@ def _parse_generator(src, keep_blank_values=False, strict_parsing=False,
         j = _mv_find(src, sep, i, srclen)
         if j < 0:
             j = srclen
+        if i == j:
+            i = j + 1
+            continue
+        
         eq = _mv_find(src, 61, i, j) # '='
         
         try:
@@ -321,21 +325,28 @@ def _parse_generator(src, keep_blank_values=False, strict_parsing=False,
                 # key (no '=')
                 if strict_parsing:
                     raise ValueError("bad query field")
-                if keep_blank_values and i < j: # empty segments are skipped, not blank
-                    key = _unquote(src, i, j, 1)
+                if keep_blank_values:
+                    key = _unquote(src, i, j, True)
                     val = b""
                     if _decode:
                         key = key.decode()
                         val = ""
+                    elif not isinstance(key, bytes):
+                        key = bytes(key)
                     yield key, val
             else:
                 # key=value
                 if keep_blank_values or (eq + 1 < j):
-                    key = _unquote(src, i, eq, 1)
-                    val = _unquote(src, eq + 1, j, 1)
+                    key = _unquote(src, i, eq, True)
+                    val = _unquote(src, eq + 1, j, True)
                     if _decode:
                         key = key.decode()
                         val = val.decode() 
+                    else:
+                        if not isinstance(key, bytes):
+                            key = bytes(key)
+                        if not isinstance(val, bytes):
+                            val = bytes(val)
                     yield key, val
         except UnicodeError:
             if errors != "ignore":
@@ -454,7 +465,12 @@ class SplitResult(tuple):
     
     def __init__(self, scheme, netloc, path, query, fragment):
         super().__init__((scheme or "", netloc or "", path, query or "", fragment or ""))
-        self.username, self.password, self.hostname, self._port = locsplit_as_tuple(self[1])
+        self._loc = None
+    
+    def _locsplit(self):
+        if self._loc is None:
+            self._loc = locsplit_as_tuple(self[1])
+        return self._loc
     
     @property
     def scheme(self): return self[0]
@@ -472,10 +488,20 @@ class SplitResult(tuple):
     def fragment(self): return self[4]
     
     @property
+    def username(self): return self._locsplit()[0]
+    
+    @property
+    def password(self): return self._locsplit()[1]
+    
+    @property
+    def hostname(self): return self._locsplit()[2]
+    
+    @property
     def port(self):
-        if isinstance(self._port, int):
-            return self._port
-        if not self._port or self._port == ":":
+        port = self._locsplit()[3]
+        if port is None or isinstance(port, int):
+            return port
+        if port == ":":
             return None
         raise ValueError("bad port number")
     
