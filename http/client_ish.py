@@ -55,20 +55,21 @@ def _encode_and_validate(val, invalid_flags):
         raise ValueError("not ISO-8859-1")
     return val
 
-# Viper: ASCII-lower-case buf[start:end] into dst, or with dst==0 just
+# Viper: ASCII-lower-case buf[start:end] into out, or with out==0 just
 # report whether it is already lower-case (returns 1 if unchanged).
 @micropython.viper
-def _lower_case(buf:ptr8, start:int, end:int, dst:ptr8) -> int:
+def _lower_case(buf:ptr8, start:int, end:int, out:ptr8) -> int:
+    write = int(out) != 0
     i = start
     while i < end:
         b = buf[i]
-        if int(dst) == 0:
-            if 65 <= b and b <= 90:
-                return 0
-        else:
+        if write:
             if 65 <= b and b <= 90:
                 b += 32
-            dst[i - start] = b
+            out[i - start] = b
+        else:
+            if 65 <= b and b <= 90:
+                return 0
         i += 1
     return 1
 
@@ -93,27 +94,27 @@ def _normalize_key(buf, start=0, end=None):
     return out
 
 # Viper: transcode Latin-1 to UTF-8. Returns the required output length
-# when dst==0, or -1 on 0x80-0x9F (C1 controls, invalid in headers).
+# when out==0, or -1 on 0x80-0x9F (C1 controls, invalid in headers).
 @micropython.viper
-def _latin1_to_utf8(buf: ptr8, buflen: int, dst: ptr8) -> int:
-    write = int(dst) != 0
-    dstlen = 0
+def _latin1_to_utf8(buf: ptr8, buflen: int, out: ptr8) -> int:
+    write = int(out) != 0
+    outlen = 0
     i = 0
     while i < buflen:
         b = buf[i]
         i += 1
         if b < 128:
             if write:
-                dst[dstlen] = b
-            dstlen += 1
+                out[outlen] = b
+            outlen += 1
         elif b < 160:
             return -1
         else:
             if write:
-                dst[dstlen+0] = 0xC0 | (b >> 6)
-                dst[dstlen+1] = 0x80 | (b & 0x3F)
-            dstlen += 2
-    return dstlen
+                out[outlen+0] = 0xC0 | (b >> 6)
+                out[outlen+1] = 0x80 | (b & 0x3F)
+            outlen += 2
+    return outlen
 
 # Decode Latin-1 bytes to str (MicroPython lacks the latin-1 codec).
 def decode_latin1(buf):
@@ -125,9 +126,9 @@ def decode_latin1(buf):
         raise UnicodeError
     if utf8len == buflen:
         return buf.decode()
-    utf8dst = bytearray(utf8len)
-    _latin1_to_utf8(buf, buflen, utf8dst)
-    return utf8dst.decode()
+    utf8out = bytearray(utf8len)
+    _latin1_to_utf8(buf, buflen, utf8out)
+    return utf8out.decode()
 
 # Response headers kept by default, bucketed by key length for cheap lookup.
 _keep_response_headers = {
