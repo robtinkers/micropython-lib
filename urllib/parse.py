@@ -221,14 +221,12 @@ def _unquote(s, start, end, plusmode: bool) -> bytes:
         # but you're going to have a hard time unless (start == 0 and end is None)
         assert(start == 0 and end is None)
         src = memoryview(s)
-        end = srclen = len(src)
     else:
         src = s
-        srclen = len(src)
-        if end is None:
-            end = srclen
-        assert(0 <= start <= end <= srclen)
-    
+    srclen = len(src)
+    if end is None:
+        end = srclen
+    assert(0 <= start <= end <= srclen)
     if start == end:
         return b""
     
@@ -423,13 +421,12 @@ def locsplit(netloc: str) -> dict:
 
 # Derived from CPython (all bugs are mine)
 def urlsplit_as_tuple(url: str, scheme, allow_fragments: bool) -> tuple:
-#    assert (isinstance(url, str))
-    
     # url = url.lstrip()
-    start, end = 0, len(url)
-    while start < end and ord(url[start]) <= 32: start += 1
-    if start > 0:
-        url = url[start:]
+    if url:
+        start, end = 0, len(url)
+        while start < end and ord(url[start]) <= 32: start += 1
+        if start > 0:
+            url = url[start:]
     
     # scheme = scheme.strip()
     if scheme:
