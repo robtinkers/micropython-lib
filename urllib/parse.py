@@ -106,15 +106,11 @@ def compile_safe(safe, flags=0):
     return safeblob
 
 def _quote(s, safeblob):
-    if isinstance(s, (memoryview, bytes, bytearray)):
-        src = s
-#    elif isinstance(s, str):
-#        src = s.encode()
-    else:
+    if isinstance(s, str):
         # on micropython, memoryview(str) gives you direct access to the underlying bytes
-        # if this doesn't work for some reason, enable the 'elif' code above
         src = memoryview(s)
-    
+    else:
+        src = s
     srclen = len(src)
     if srclen == 0:
         return ""
@@ -219,14 +215,15 @@ def _unquote_helper(src: ptr8, start: int, end: int, out: ptr8) -> int:
     
     return outlen if modified else -outlen
 
-def _unquote(src, start, end, plusmode: bool) -> bytes:
+def _unquote(s, start, end, plusmode: bool) -> bytes:
     if isinstance(src, str):
         # on micropython, memoryview(str) gives you direct access to the underlying bytes
         # but you're going to have a hard time unless (start == 0 and end is None)
         assert(start == 0 and end is None)
-        src = memoryview(src)
+        src = memoryview(s)
         end = srclen = len(src)
     else:
+        src = s
         srclen = len(src)
         if end is None:
             end = srclen
@@ -296,11 +293,13 @@ def _mv_find(mv: ptr8, b: int, start: int, end: int) -> int:
         i += 1
     return -1
 
-def _parse_generator(src, keep_blank_values=False, strict_parsing=False,
+def _parse_generator(s, keep_blank_values=False, strict_parsing=False,
                      errors="ignore", separator='&', _decode=True):
     if isinstance(src, str):
         # on micropython, memoryview(str) gives you direct access to the underlying bytes
         src = memoryview(src)
+    else:
+        src = s
     srclen = len(src)
     if srclen == 0:
         return
