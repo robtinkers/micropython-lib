@@ -1,8 +1,6 @@
 # urllib/parse.py
 
-import micropython
-from array import array
-from uctypes import addressof
+import micropython, array
 
 _USES_RELATIVE = frozenset([
     "", "file", "ftp", "http", "https", "rtsp", "rtsps", "sftp", "ws", "wss",
@@ -24,21 +22,21 @@ _COMPILED_BASE2 = const(0x87FFFFFE)
 # 96-127: a-z, ~
 _COMPILED_BASE3 = const(0x47FFFFFE)
 
-_COMPILED_EMPTY = array('I', [
+_COMPILED_EMPTY = array.array('I', [
     0,
     _COMPILED_BASE1, 
     _COMPILED_BASE2, 
     _COMPILED_BASE3
 ])
 
-_COMPILED_SLASH = array('I', [
+_COMPILED_SLASH = array.array('I', [
     0,
     _COMPILED_BASE1 | (1 << 15), # slash
     _COMPILED_BASE2, 
     _COMPILED_BASE3
 ])
 
-_COMPILED_PLUS = array('I', [
+_COMPILED_PLUS = array.array('I', [
     1, # plus mode
     _COMPILED_BASE1, 
     _COMPILED_BASE2, 
@@ -99,7 +97,7 @@ def _quote_helper(src: ptr8, srclen: int, safeblob_obj: object, out: ptr8) -> in
     return outlen if modified else 0
 
 def compile_safe(safe, flags=0):
-    safeblob = array('I', [flags, _COMPILED_BASE1, _COMPILED_BASE2, _COMPILED_BASE3])
+    safeblob = array.array('I', [flags, _COMPILED_BASE1, _COMPILED_BASE2, _COMPILED_BASE3])
     for c in safe:
         if isinstance(c, str):
             c = ord(c)
