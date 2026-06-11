@@ -133,29 +133,29 @@ def _quote(s, safeblob):
     return out.decode("ascii")
 
 def quote(s, safe="/"):
-    if safe == "/":
+    if safe == "/" or safe == b"/":
         return _quote(s, _COMPILED_SLASH)
-    elif safe == "":
+    elif safe == "" or safe == b"":
         return _quote(s, _COMPILED_EMPTY)
-    elif isinstance(safe, array):
+    elif isinstance(safe, array.array):
         return _quote(s, safe)
     else:
         return _quote(s, compile_safe(safe, 0))
 
 def quote_plus(s, safe=""):
-    if safe == "":
+    if safe == "" or safe == b"":
         return _quote(s, _COMPILED_PLUS)
-    elif isinstance(safe, array):
-        return None
+    elif isinstance(safe, array.array):
+        return _quote(s, safe)
     else:
         return _quote(s, compile_safe(safe, 1))
 
 def quote_from_bytes(bs, safe="/"):
     if not isinstance(bs, (bytes, bytearray)):
         raise TypeError("quote_from_bytes() expected bytes")
-    if safe == "/":
+    if safe == "/" or safe == b"/":
         return _quote(bs, _COMPILED_SLASH)
-    elif safe == "":
+    elif safe == "" or safe == b"":
         return _quote(bs, _COMPILED_EMPTY)
     elif isinstance(safe, array):
         return _quote(bs, safe)
@@ -463,12 +463,13 @@ class SplitResult(tuple):
     
     def __init__(self, scheme, netloc, path, query, fragment):
         super().__init__((scheme or "", netloc or "", path, query or "", fragment or ""))
-        self._loc = None
+        self._locsplit_ = None
     
+    @property
     def _locsplit(self):
-        if self._loc is None:
-            self._loc = locsplit_as_tuple(self[1])
-        return self._loc
+        if self._locsplit_ is None:
+            self._locsplit_ = locsplit_as_tuple(self[1])
+        return self._locsplit_
     
     @property
     def scheme(self): return self[0]
@@ -486,17 +487,17 @@ class SplitResult(tuple):
     def fragment(self): return self[4]
     
     @property
-    def username(self): return self._locsplit()[0]
+    def username(self): return self._locsplit[0]
     
     @property
-    def password(self): return self._locsplit()[1]
+    def password(self): return self._locsplit[1]
     
     @property
-    def hostname(self): return self._locsplit()[2]
+    def hostname(self): return self._locsplit[2]
     
     @property
     def port(self):
-        port = self._locsplit()[3]
+        port = self._locsplit[3]
         if port is None or isinstance(port, int):
             return port
         if port == ":":
