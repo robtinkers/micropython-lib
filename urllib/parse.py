@@ -280,7 +280,7 @@ def _urlencode_generator(query, doseq=False, safe="", quote_via=quote_plus):
                     v = str(v)
                 yield key + "=" + quote_via(v, safe)
             continue
-        elif not isinstance(val, (str, bytes, bytearray, memoryview)):
+        if not isinstance(val, (str, bytes, bytearray, memoryview)):
             val = str(val)
         yield key + "=" + quote_via(val, safe)
 
