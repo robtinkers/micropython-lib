@@ -11,6 +11,9 @@ _USES_RELATIVE = frozenset([
 #])
 _USES_NETLOC = _USES_RELATIVE
 
+# WHATWG C0 controls + space, == "".join(chr(i) for i in range(0x21))
+_C0_SPACE = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x20"
+
 _HEX_DIGITS = b"0123456789ABCDEF"
 
 # Standard safeblob for ASCII 32-127
@@ -134,6 +137,8 @@ def quote(s, safe="/"):
     elif safe == "" or safe == b"":
         return _quote(s, _COMPILED_EMPTY)
     elif isinstance(safe, array.array):
+        if safe[0] != 0:
+            raise TypeError("pre-compiled safe is incompatible with current method")
         return _quote(s, safe)
     else:
         return _quote(s, compile_safe(safe, 0))
@@ -142,6 +147,8 @@ def quote_plus(s, safe=""):
     if safe == "" or safe == b"":
         return _quote(s, _COMPILED_PLUS)
     elif isinstance(safe, array.array):
+        if safe[0] != 1:
+            raise TypeError("pre-compiled safe is incompatible with current method")
         return _quote(s, safe)
     else:
         return _quote(s, compile_safe(safe, 1))
@@ -153,7 +160,9 @@ def quote_from_bytes(bs, safe="/"):
         return _quote(bs, _COMPILED_SLASH)
     elif safe == "" or safe == b"":
         return _quote(bs, _COMPILED_EMPTY)
-    elif isinstance(safe, array):
+    elif isinstance(safe, array.array):
+        if safe[0] != 0:
+            raise TypeError("pre-compiled safe is incompatible with current method")
         return _quote(bs, safe)
     else:
         return _quote(bs, compile_safe(safe, 0))
@@ -215,8 +224,10 @@ def _unquote_helper(src: ptr8, start: int, end: int, out: ptr8) -> int:
     
     return outlen if modified else -outlen
 
-def _unquote(s, start, end, plusmode: bool) -> bytes:
-    if isinstance(src, str):
+def _unquote(s, start, end, plusmode: bool):
+    # Returns a bytes-like object that supports .decode(): bytes or bytearray.
+    # Callers that need real bytes (unquote_to_bytes) must materialise it.
+    if isinstance(s, str):
         # on micropython, memoryview(str) gives you direct access to the underlying bytes
         # but you're going to have a hard time unless (start == 0 and end is None)
         assert(start == 0 and end is None)
@@ -293,9 +304,9 @@ def _mv_find(mv: ptr8, b: int, start: int, end: int) -> int:
 
 def _parse_generator(s, keep_blank_values=False, strict_parsing=False,
                      errors="ignore", separator='&', _decode=True):
-    if isinstance(src, str):
+    if isinstance(s, str):
         # on micropython, memoryview(str) gives you direct access to the underlying bytes
-        src = memoryview(src)
+        src = memoryview(s)
     else:
         src = s
     srclen = len(src)
@@ -421,20 +432,12 @@ def locsplit(netloc: str) -> dict:
 
 # Derived from CPython (all bugs are mine)
 def urlsplit_as_tuple(url: str, scheme, allow_fragments: bool) -> tuple:
-    # url = url.lstrip()
-    if url:
-        start, end = 0, len(url)
-        while start < end and ord(url[start]) <= 32: start += 1
-        if start > 0:
-            url = url[start:]
+    # Only lstrip url, as some applications rely on preserving trailing space.
+    # (https://url.spec.whatwg.org/#concept-basic-url-parser would strip both)
+    url = url.lstrip(_C0_SPACE)
     
-    # scheme = scheme.strip()
     if scheme:
-        start, end = 0, len(scheme)
-        while start < end and ord(scheme[start]) <= 32: start += 1
-        while end > start and ord(scheme[end - 1]) <= 32: end -= 1
-        if start > 0 or end < len(scheme):
-            scheme = scheme[start:end]
+        scheme = scheme.strip(_C0_SPACE)
     
     netloc = query = fragment = None
     if (colon := url.find(':')) > 0 and url[0].isalpha():
