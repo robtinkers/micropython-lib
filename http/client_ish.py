@@ -19,6 +19,7 @@ _METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
 
 _BLANK = b""
 _CRLF = b"\r\n"
+_LF = b"\n"
 
 # Exception hierarchy mirroring CPython's http.client.
 class HTTPException(Exception): pass
@@ -177,8 +178,13 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
     _readline = sock.readline
     while True:
         line = _readline()
-        if not line or line == _CRLF or line == b"\n":
+
+        if line == _CRLF or line == _LF:
             return headers
+
+        if not line or not line.endswith(_LF):
+            raise RemoteDisconnected()
+
         # Ignore obsolete line folding (continuation lines).
         if line[0] <= 32:
             continue
@@ -333,16 +339,17 @@ class HTTPResponse:
             line = self._sock.readline()
             if _DEBUG:
                 print("status:", repr(line))
-            if line == _CRLF or line == b"\n":
+            if line == _CRLF or line == _LF:
                 continue
             if not line:
                 raise RemoteDisconnected()
-            if not line.startswith(b"HTTP/") or not line.endswith(b"\n"):
+            if not line.startswith(b"HTTP/") or not line.endswith(_LF):
                 raise BadStatusLine()
 
             line = line.split(None, 2)
             if len(line) == 3:
                 version, status, reason = line
+                reason = reason.rstrip()
             elif len(line) == 2:
                 version, status = line
                 reason = _BLANK
@@ -360,7 +367,7 @@ class HTTPResponse:
                 break
             while True:
                 line = self._sock.readline()
-                if line == _CRLF or line == b"\n" or not line:
+                if line == _CRLF or line == _LF or not line:
                     break
                 if _DEBUG:
                     print("header:", repr(line))
@@ -436,14 +443,14 @@ class HTTPResponse:
                     return size
                 while True:
                     line = self._sock.readline()
-                    if not line or line == _CRLF or line == b"\n":
+                    if not line or line == _CRLF or line == _LF:
                         self.chunked = False
                         self.length = self._bytes_read = 0
                         self.close(not line)
                         return 0
             elif self.chunk_left == 0:
                 line = self._sock.readline()
-                if line != _CRLF and line != b"\n":
+                if line != _CRLF and line != _LF:
                     self.close(True)
                 self.chunk_left = None
             else:
@@ -531,11 +538,11 @@ class HTTPResponse:
             amt = min(amt, self._next_chunk())
             if amt == 0:
                 return _BLANK
-
         data = self._sock.read(amt)
         if not data:
             self.close(self.chunked or self.length is not None)
             return _BLANK
+
         n = len(data)
         self._bytes_read += n
         if self.chunked:
