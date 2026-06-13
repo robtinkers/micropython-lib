@@ -776,7 +776,7 @@ class HTTPConnection:
         self.close()
         return False
 
-    def __init__(self, host_port, port=None, timeout=None):
+    def __init__(self, host, port=None, timeout=None):
         self.timeout = timeout
         self._sock = None
         self._merge_buffer = None
@@ -785,46 +785,43 @@ class HTTPConnection:
         self.__response = None
         self._method = None
         self._url = None
-        self._set_host_port(host_port, port)
+        self._set_host(host, port)
         self._can_reconnect = False
 
     # Record host/port; IPv6 ([...]) and IPv4 literals skip DNS and TLS SNI.
-    # The port may be embedded in host_port ("host:8080"); that wins.
-    # Otherwise the port argument is used, and finally the class default.
-    def _set_host_port(self, host_port, port=None):
+    def _set_host(self, host, port=None):
         rest = ""
-        if host_port.startswith("["):
+        if host.startswith("["):
             # Bracketed literal: "[addr]" optionally followed by ":port".
-            j = host_port.find("]")
+            j = host.find("]")
             if j == -1:
                 raise InvalidURL()
-            self.host, rest = host_port[:j+1], host_port[j+1:]
+            self.host, rest = host[:j+1], host[j+1:]
             if rest:
                 if not rest.startswith(":"):
                     raise InvalidURL()
                 rest = rest[1:]
             self._hostaddr = self.host[1:-1]
             self._hostname = None
-        elif host_port.count(":") > 1:
-            # Unbracketed IPv6 literal (>1 colon, no port): bracket it for
-            # self.host and the Host header, but resolve on the bare address.
-            self.host = "[" + host_port + "]"
-            self._hostaddr = host_port
+        elif host.count(":") > 1:
+            # Unbracketed IPv6 literal
+            self.host = "[" + host + "]"
+            self._hostaddr = host
             self._hostname = None
         else:
             # Hostname or IPv4, optionally with a single ":port".
-            i = host_port.rfind(":")
+            i = host.find(":")
             if i >= 0:
-                self.host, rest = host_port[:i], host_port[i+1:]
+                self.host, rest = host[:i], host[i+1:]
             else:
-                self.host = host_port
+                self.host = host
             if len(self.host) > 0 and all(c in "0123456789." for c in self.host):
                 self._hostaddr = self.host
                 self._hostname = None
             else:
                 self._hostaddr = self.host
                 self._hostname = self.host
-        # A port embedded in host_port wins; otherwise keep the port argument.
+        # A port embedded in host wins; otherwise keep the port argument.
         if rest:
             if rest.isdigit():
                 port = int(rest, 10)
