@@ -24,6 +24,7 @@ _LF = b"\n"
 # Exception hierarchy mirroring CPython's http.client.
 class HTTPException(Exception): pass
 class NotConnected(HTTPException): pass
+class InvalidURL(HTTPException): pass
 class BadStatusLine(HTTPException): pass
 class RemoteDisconnected(BadStatusLine): pass
 class ImproperConnectionState(HTTPException): pass
@@ -775,7 +776,7 @@ class HTTPConnection:
         self.close()
         return False
 
-    def __init__(self, host, port=None, timeout=None):
+    def __init__(self, host_port, port=None, timeout=None):
         self.timeout = timeout
         self._sock = None
         self._merge_buffer = None
@@ -784,26 +785,56 @@ class HTTPConnection:
         self.__response = None
         self._method = None
         self._url = None
-        self._set_host_port(host, port)
+        self._set_host_port(host_port, port)
         self._can_reconnect = False
 
     # Record host/port; IPv6 ([...]) and IPv4 literals skip DNS and TLS SNI.
-    def _set_host_port(self, host, port):
-        self.host = host
-        if host.startswith("[") and host.endswith("]") and len(host) > 2 and all(c in "[0123456789:abcdefABCDEF]" for c in host):
-            self._hostaddr = host[1:-1]
+    # The port may be embedded in host_port ("host:8080"); that wins.
+    # Otherwise the port argument is used, and finally the class default.
+    def _set_host_port(self, host_port, port=None):
+        rest = ""
+        if host_port.startswith("["):
+            # Bracketed literal: "[addr]" optionally followed by ":port".
+            j = host_port.find("]")
+            if j == -1:
+                raise InvalidURL()
+            self.host, rest = host_port[:j+1], host_port[j+1:]
+            if rest:
+                if not rest.startswith(":"):
+                    raise InvalidURL()
+                rest = rest[1:]
+            self._hostaddr = self.host[1:-1]
             self._hostname = None
-        elif len(host) > 0 and all(c in "0123456789." for c in host):
-            self._hostaddr = host
+        elif host_port.count(":") > 1:
+            # Unbracketed IPv6 literal (>1 colon, no port): bracket it for
+            # self.host and the Host header, but resolve on the bare address.
+            self.host = "[" + host_port + "]"
+            self._hostaddr = host_port
             self._hostname = None
         else:
-            self._hostaddr = host
-            self._hostname = host
+            # Hostname or IPv4, optionally with a single ":port".
+            i = host_port.rfind(":")
+            if i >= 0:
+                self.host, rest = host_port[:i], host_port[i+1:]
+            else:
+                self.host = host_port
+            if len(self.host) > 0 and all(c in "0123456789." for c in self.host):
+                self._hostaddr = self.host
+                self._hostname = None
+            else:
+                self._hostaddr = self.host
+                self._hostname = self.host
+        # A port embedded in host_port wins; otherwise keep the port argument.
+        if rest:
+            if rest.isdigit():
+                port = int(rest, 10)
+            else:
+                raise InvalidURL()
         if port is None or port == self.default_port:
-            self._hostport = host.encode()
+            self._hostport = self.host.encode()
             self.port = self.default_port
         else:
-            self._hostport = b"%s:%d" % (host, port)
+            self._hostport = b"%s:%d" % (self.host, port)
             self.port = port
 
     def connect(self):
