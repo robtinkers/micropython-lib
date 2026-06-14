@@ -1,7 +1,8 @@
 # http/client_ish.py
+#
+# http.client for Micropython, optimised for memory footprint and churn.
+# Extensions include cookies, iterators, limited non-blocking I/O and more.
 
-# Minimal http.client work-alike for MicroPython: memory-frugal request
-# sending and streaming response parsing, with viper-compiled hot paths.
 import micropython, socket, errno, gc
 
 HTTP_PORT = const(80)
