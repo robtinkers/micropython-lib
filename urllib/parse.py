@@ -1,4 +1,6 @@
 # urllib/parse.py
+#
+# urllib.parse for Micropython, optimised for memory footprint and churn.
 
 import micropython, array
 
