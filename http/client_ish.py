@@ -429,6 +429,11 @@ class HTTPResponse:
         if self.chunked:
             raise ValueError("operation requires a non-chunked stream")
 
+    def _require_chunked(self, arg=True):
+        if arg:
+            if not self.chunked:
+                raise ValueError("operation requires a chunked stream")
+
     # Advance chunked framing: consume size lines, inter-chunk CRLFs and the
     # trailer as needed; return bytes left in the current chunk (0 = end of body).
     def _next_chunk(self):
@@ -654,7 +659,17 @@ class HTTPResponse:
                 return 0
 
         try:
-            n = self._sock.recv_into(buf, amt)
+            if hasattr(self._sock, "recv_into"):
+                n = self._sock.recv_into(buf, amt)
+            elif self._blocking:
+                tmp = self._sock.recv(min(amt, self.blocksize))
+                n = len(tmp) if tmp else 0
+                if n:
+                    buf[:n] = tmp
+                del tmp
+            else:
+                n = self._sock.readinto(buf, amt)
+
             if n is None:
                 return None
         except OSError as e:
