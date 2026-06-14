@@ -429,11 +429,6 @@ class HTTPResponse:
         if self.chunked:
             raise ValueError("operation requires a non-chunked stream")
 
-    def _require_chunked(self, arg=True):
-        if arg:
-            if not self.chunked:
-                raise ValueError("operation requires a chunked stream")
-
     # Advance chunked framing: consume size lines, inter-chunk CRLFs and the
     # trailer as needed; return bytes left in the current chunk (0 = end of body).
     def _next_chunk(self):
