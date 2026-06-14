@@ -132,44 +132,44 @@ def _quote(s, safeblob):
     return out.decode("ascii")
 
 def quote(s, safe="/"):
-    if safe == "/" or safe == b"/":
-        return _quote(s, _COMPILED_SLASH)
-    elif safe == "" or safe == b"":
-        return _quote(s, _COMPILED_EMPTY)
-    elif isinstance(safe, array.array):
+    if isinstance(safe, array.array):
         if safe[0] != 0:
             raise TypeError("pre-compiled safe is incompatible with current method")
         return _quote(s, safe)
+    elif not safe:                                 # "" or b""
+        return _quote(s, _COMPILED_EMPTY)
+    elif len(safe) == 1 and safe[0] in (47, "/"):  # "/" or b"/"
+        return _quote(s, _COMPILED_SLASH)
     else:
         return _quote(s, compile_safe(safe, 0))
 
 def quote_plus(s, safe=""):
-    if safe == "" or safe == b"":
-        return _quote(s, _COMPILED_PLUS)
-    elif isinstance(safe, array.array):
+    if isinstance(safe, array.array):
         if safe[0] != 1:
             raise TypeError("pre-compiled safe is incompatible with current method")
         return _quote(s, safe)
+    elif not safe:                                 # "" or b""
+        return _quote(s, _COMPILED_PLUS)
     else:
         return _quote(s, compile_safe(safe, 1))
 
 def quote_from_bytes(bs, safe="/"):
     if not isinstance(bs, (bytes, bytearray)):
         raise TypeError("quote_from_bytes() expected bytes")
-    if safe == "/" or safe == b"/":
-        return _quote(bs, _COMPILED_SLASH)
-    elif safe == "" or safe == b"":
-        return _quote(bs, _COMPILED_EMPTY)
-    elif isinstance(safe, array.array):
+    if isinstance(safe, array.array):
         if safe[0] != 0:
             raise TypeError("pre-compiled safe is incompatible with current method")
         return _quote(bs, safe)
+    elif not safe:                                 # "" or b""
+        return _quote(bs, _COMPILED_EMPTY)
+    elif len(safe) == 1 and safe[0] in (47, "/"):  # "/" or b"/"
+        return _quote(bs, _COMPILED_SLASH)
     else:
         return _quote(bs, compile_safe(safe, 0))
 
 
 
-_HEX_TO_INT = const(b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\xff\xff\xff\xff\xff\xff\xff\x0a\x0b\x0c\x0d\x0e\x0f\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x0a\x0b\x0c\x0d\x0e\x0f\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff")
+_HEX_TO_INT = const(b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\xff\xff\xff\xff\xff\xff\xff\x0a\x0b\x0c\x0d\x0e\x0f\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\x0a\x0b\x0c\x0d\x0e\x0f\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff")
 
 @micropython.viper
 def _unquote_helper(src: ptr8, start: int, end: int, out: ptr8) -> int:
@@ -192,18 +192,7 @@ def _unquote_helper(src: ptr8, start: int, end: int, out: ptr8) -> int:
         
         if b == 37: # '%'
             if (i + 1 < end):
-#                n1 = src[i+0]
-#                if   48 <= n1 <= 57: n1 -= 48
-#                elif 65 <= n1 <= 70: n1 -= 55
-#                elif 97 <= n1 <=102: n1 -= 87
-#                else: n1 = 255
                 n1 = hex_to_int[src[i+0]]
-                
-#                n2 = src[i+1]
-#                if   48 <= n2 <= 57: n2 -= 48
-#                elif 65 <= n2 <= 70: n2 -= 55
-#                elif 97 <= n2 <=102: n2 -= 87
-#                else: n2 = 255
                 n2 = hex_to_int[src[i+1]]
             else:
                 n1 = 255
@@ -321,6 +310,8 @@ def _parse_generator(s, keep_blank_values=False, strict_parsing=False,
         if j < 0:
             j = srclen
         if i == j:
+            if strict_parsing:
+                raise ValueError("bad query field")
             i = j + 1
             continue
         
