@@ -885,6 +885,7 @@ class HTTPConnection:
                 key = _normalize_key(key, lower=False)
                 if key is None:
                     raise ValueError("invalid key")
+                headers.append((key, value))
                 keylen = len(key)
                 if keylen == 4:
                     if _memeqlc(key, 0, 4, b"host"):
@@ -898,7 +899,6 @@ class HTTPConnection:
                 elif keylen == 17:
                     if _memeqlc(key, 0, 17, b"transfer-encoding"):
                         have_transfer_encoding = True
-                headers.append((key, value))
             del pairs
         else:
             headers = []
