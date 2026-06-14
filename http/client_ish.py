@@ -453,7 +453,7 @@ class HTTPResponse:
                     line = self._sock.readline()
                     if line == _CRLF or line == _LF:
                         self.chunked = False
-                        self.length = self._bytes_read = 0
+                        self.length = self._bytes_read
                         self.close()
                         return 0
                     if not line:
