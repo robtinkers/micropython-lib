@@ -664,7 +664,6 @@ class HTTPResponse:
                 del tmp
             else:
                 n = self._sock.readinto(buf, amt)
-
             if n is None:
                 return None
         except OSError as e:
