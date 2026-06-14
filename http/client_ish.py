@@ -76,7 +76,7 @@ def _lower_case(buf:ptr8, start:int, end:int, out:ptr8) -> int:
     return 1
 
 # Return a validated, lower-cased header key, avoiding a copy when possible.
-def _normalize_key(buf, start=0, end=None):
+def _normalize_key(buf, start=0, end=None, lower=True):
     if isinstance(buf, str):
         buf = buf.encode()
     elif not isinstance(buf, (bytes, bytearray, memoryview)):
@@ -84,8 +84,8 @@ def _normalize_key(buf, start=0, end=None):
     if end is None:
         end = len(buf)
     if not _validate_not_c0(buf, start, end, 1):
-        raise ValueError("invalid key")
-    if _lower_case(buf, start, end, 0):
+        return None
+    if not lower or _lower_case(buf, start, end, 0):
         if isinstance(buf, memoryview):
             return bytes(buf[start:end])
         if start == 0 and end == len(buf):
@@ -147,6 +147,8 @@ _keep_response_headers = {
 # Register an extra header to retain when parsing with all_headers=False.
 def keep_response_header(key):
     key = _normalize_key(key)
+    if key is None:
+        raise ValueError("invalid key")
     if not isinstance(key, bytes):
         key = bytes(key)
     len_key = len(key)
@@ -210,6 +212,8 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
             if not all_headers:
                 continue
             key = _normalize_key(line, start, end)
+            if key is None:
+                continue
             if not isinstance(key, bytes):
                 key = bytes(key)
         elif key == b"set-cookie" and not and_cookies:
@@ -342,9 +346,9 @@ class HTTPResponse:
                 print("status:", repr(line))
             if line == _CRLF or line == _LF:
                 continue
-            if not line:
+            if not line or not line.endswith(_LF):
                 raise RemoteDisconnected()
-            if not line.startswith(b"HTTP/") or not line.endswith(_LF):
+            if not line.startswith(b"HTTP/"):
                 raise BadStatusLine()
 
             line = line.split(None, 2)
@@ -372,6 +376,8 @@ class HTTPResponse:
                     break
                 if _DEBUG:
                     print("header:", repr(line))
+                if not line.endswith(_LF):
+                    raise BadStatusLine()
 
         if version == b"HTTP/1.0":
             version = 10
@@ -444,11 +450,13 @@ class HTTPResponse:
                     return size
                 while True:
                     line = self._sock.readline()
-                    if not line or line == _CRLF or line == _LF:
+                    if line == _CRLF or line == _LF:
                         self.chunked = False
                         self.length = self._bytes_read = 0
-                        self.close(not line)
+                        self.close()
                         return 0
+                    if not line:
+                        self.close(True)
             elif self.chunk_left == 0:
                 line = self._sock.readline()
                 if line != _CRLF and line != _LF:
@@ -713,6 +721,8 @@ class HTTPResponse:
         if self._headers is None:
             raise ResponseNotReady()
         key = _normalize_key(key)
+        if key is None:
+            raise ValueError("invalid key")
         match = None
         for i in range(0, len(self._headers), 2):
             if self._headers[i] == key:
@@ -870,17 +880,28 @@ class HTTPConnection:
                 pairs = headers
             else:
                 pairs = list(headers)
-            headers = None
-            for key, _value in pairs:
-                key = _normalize_key(key)
-                if key == b"accept-encoding":
-                    have_accept_encoding = True
-                elif key == b"content-length":
-                    have_content_length = True
-                elif key == b"host":
-                    have_host = True
-                elif key == b"transfer-encoding":
-                    have_transfer_encoding = True
+            headers = []
+            for key, value in pairs:
+                key = _normalize_key(key, lower=False)
+                if key is None:
+                    raise ValueError("invalid key")
+                keylen = len(key)
+                if keylen == 4:
+                    if _memeqlc(key, 0, 4, b"host"):
+                        have_host = True
+                elif keylen == 14:
+                    if _memeqlc(key, 0, 14, b"content-length"):
+                        have_content_length = True
+                elif keylen == 15:
+                    if _memeqlc(key, 0, 15, b"accept-encoding"):
+                        have_accept_encoding = True
+                elif keylen == 17:
+                    if _memeqlc(key, 0, 17, b"transfer-encoding"):
+                        have_transfer_encoding = True
+                headers.append((key, value))
+            del pairs
+        else:
+            headers = []
 
         self.putrequest(method, url, skip_accept_encoding=have_accept_encoding, skip_host=have_host)
 
@@ -892,19 +913,18 @@ class HTTPConnection:
             if body is None:
                 encode_chunked = False
                 if not have_content_length and self._method in _METHODS_EXPECTING_BODY:
-                    self.putheader(b"Content-Length", b"0")
+                    headers.append((b"Content-Length", b"0"))
             elif isinstance(body, (bytes, bytearray, memoryview)):
                 encode_chunked = False
                 if not have_content_length:
-                    self.putheader(b"Content-Length", b"%d" % len(body))
+                    headers.append((b"Content-Length", b"%d" % len(body)))
             else:
                 encode_chunked = not have_content_length
         if encode_chunked and not have_transfer_encoding:
-            self.putheader(b"Transfer-Encoding", b"chunked")
+            headers.append((b"Transfer-Encoding", b"chunked"))
 
-        if pairs is not None:
-            for key, value in pairs:
-                self.putheader(key, value)
+        for key, value in headers:
+            self.putheader(key, value)
 
         self.endheaders(body, encode_chunked=encode_chunked)
 
