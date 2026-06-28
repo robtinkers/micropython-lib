@@ -1,7 +1,7 @@
 # http/client_ish.py
 #
-# http.client for Micropython, optimised for memory footprint and churn.
-# Extensions include cookies, iterators, limited non-blocking I/O and more.
+# http.client for Micropython, optimised for low memory-allocation.
+# Extensions include chunking, cookies, reconnects, non-blocking I/O and more.
 
 import micropython, socket, errno, gc
 
@@ -18,6 +18,7 @@ _DEBUG = const(0)
 # Methods that get an explicit "Content-Length: 0" when no body is supplied.
 _METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
 
+_SET_COOKIE = b"set-cookie"
 _BLANK = b""
 _CRLF = b"\r\n"
 _LF = b"\n"
@@ -33,6 +34,43 @@ class CannotSendRequest(ImproperConnectionState): pass
 class CannotSendHeader(ImproperConnectionState): pass
 class ResponseNotReady(ImproperConnectionState): pass
 class IncompleteRead(HTTPException): pass
+
+#
+import network, time
+
+class WifiManager:
+    def __init__(self, *args, **kwargs):
+        self._nic = network.WLAN(network.WLAN.IF_STA)
+        self._args = args
+        self._kwargs = kwargs
+
+    def isconnected(self):
+        return self._nic.isconnected()
+
+    def connect(self):
+        reset = self._kwargs.get("reset", False)
+        timeout = self._kwargs.get("timeout", 10)
+        if reset:
+            try: self._nic.disconnect()
+            except Exception: pass
+            self._nic.active(False)
+            time.sleep(1)
+        if not self._nic.active():
+            self._nic.active(True)
+            time.sleep(1)
+        self._nic.connect(*self._args)
+        while timeout is None or timeout > 0:
+            if self._nic.isconnected():
+                return True
+            time.sleep(1)
+            if timeout is not None:
+                timeout -= 1
+        return self._nic.isconnected()
+
+    def disconnect(self):
+        try: self._nic.disconnect()
+        except Exception: pass
+        self._nic.active(False)
 
 # Viper: return 1 if buf[start:end] is free of C0 control chars
 # (invalid_flags bit 0 also forbids space and tab).
@@ -137,7 +175,7 @@ def decode_latin1(buf):
 _keep_response_headers = {
     4:[b"etag"],
     8:[b"location"],
-    10:[b"connection", b"set-cookie"],
+    10:[b"connection", _SET_COOKIE],
     11:[b"retry-after"],
     12:[b"content-type"],
     14:[b"content-length"],
@@ -180,6 +218,7 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
     headers = []
     _append = headers.append
     _readline = sock.readline
+    _get = _keep_response_headers.get
     while True:
         line = _readline()
 
@@ -198,11 +237,10 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
             continue
 
         start, end = 0, sep
-        while start < end and line[start] <= 32: start += 1
         while end > start and line[end - 1] <= 32: end -= 1
 
         key = None
-        cands = _keep_response_headers.get(end - start)
+        cands = _get(end - start)
         if cands is not None:
             for cand in cands:
                 if _memeqlc(line, start, end, cand):
@@ -217,7 +255,7 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
                 continue
             if not isinstance(key, bytes):
                 key = bytes(key)
-        elif key == b"set-cookie" and not and_cookies:
+        elif key == _SET_COOKIE and not and_cookies:
             continue
 
         start, end = sep + 1, len(line)
@@ -653,15 +691,18 @@ class HTTPResponse:
                 self.close()
                 return 0
 
+        if self._blocking and not hasattr(self._sock, "recv_into"):
+            data = self.recv(min(amt, self.blocksize))
+            if data is None:
+                return None
+            n = len(data)
+            if n:
+                buf[:n] = data
+            return n
+
         try:
             if hasattr(self._sock, "recv_into"):
                 n = self._sock.recv_into(buf, amt)
-            elif self._blocking:
-                tmp = self._sock.recv(min(amt, self.blocksize))
-                n = len(tmp) if tmp else 0
-                if n:
-                    buf[:n] = tmp
-                del tmp
             else:
                 n = self._sock.readinto(buf, amt)
             if n is None:
@@ -760,7 +801,7 @@ class HTTPResponse:
             raise ResponseNotReady()
         len_name = len(name)
         for key, val in self.rawheaders():
-            if key != b"set-cookie":
+            if key != _SET_COOKIE:
                 continue
             if val.startswith(name):
                 len_val = len(val)
@@ -796,7 +837,7 @@ class HTTPConnection:
         self.close()
         return False
 
-    def __init__(self, host, port=None, timeout=None):
+    def __init__(self, host, port=None, timeout=None, network=None):
         self.timeout = timeout
         self._sock = None
         self._merge_buffer = None
@@ -806,6 +847,7 @@ class HTTPConnection:
         self._method = None
         self._url = None
         self._set_host(host, port)
+        self._network = network
         self._can_reconnect = False
 
     # Record host/port; IPv6 ([...]) and IPv4 literals skip DNS and TLS SNI.
@@ -855,6 +897,8 @@ class HTTPConnection:
             self.port = port
 
     def connect(self):
+        if self._network is not None and not self._network.isconnected():
+            self._network.connect()
         self._sock = create_connection((self._hostaddr, self.port), self.timeout)
 
     # Drop buffers, any pending response, and the socket.
@@ -1039,6 +1083,10 @@ class HTTPConnection:
             return
         if _DEBUG:
             print("send:", len(data), "bytes")
+
+        if self._network is not None and not self._network.isconnected():
+            self._network.connect()
+
         if self._can_reconnect:
             if self._sock is not None:
                 try:
