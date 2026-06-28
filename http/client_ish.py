@@ -197,18 +197,28 @@ def keep_response_header(key):
     elif key not in cands:
         cands.append(key)
 
-# Viper: case-insensitively compare raw[start:end] to a lower-case candidate.
+# Viper: case-insensitively search for a (lower-case) needle in haystack
 @micropython.viper
-def _memeqlc(raw:ptr8, start:int, end:int, cand:ptr8) -> int:
-    i = start
-    while i < end:
-        x = raw[i]
-        if 65 <= x and x <= 90:
-            x = x + 32
-        if x != cand[i - start]:
-            return 0
+def _containslc(haystack:ptr8, haystacklen:int, needle:ptr8, needlelen:int) -> int:
+    if needlelen == 0:
+        return 1
+    if needlelen > haystacklen:
+        return 0
+    last = haystacklen - needlelen
+    i = 0
+    while i <= last:
+        j = 0
+        while j < needlelen:
+            x = haystack[i + j]
+            if 65 <= x and x <= 90:
+                x = x + 32
+            if x != needle[j]:
+                break
+            j += 1
+        if j == needlelen:
+            return 1
         i += 1
-    return 1
+    return 0
 
 # Read response headers into a flat [key, value, key, value, ...] list.
 # Malformed lines are skipped; unwanted headers are dropped unless all_headers.
@@ -243,7 +253,7 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
         cands = _get(end - start)
         if cands is not None:
             for cand in cands:
-                if _memeqlc(line, start, end, cand):
+                if _containslc(line, end - start, cand, end - start):
                     key = cand
                     break
 
@@ -348,13 +358,13 @@ class HTTPResponse:
             elif k == b"content-length":
                 content_length = _headers[i+1]
 
-        self.chunked = bool(transfer_encoding) and b"chunked" in transfer_encoding.lower()
+        self.chunked = bool(transfer_encoding) and bool(_containslc(transfer_encoding, len(transfer_encoding), b"chunked", 7))
         self.chunk_left = None
 
         if self.version == 10:
-            self.will_close = (not connection) or b"keep-alive" not in connection.lower()
+            self.will_close = (not connection) or not bool(_containslc(connection, len(connection), b"keep-alive", 10))
         else:
-            self.will_close = bool(connection) and b"close" in connection.lower()
+            self.will_close = bool(connection) and bool(_containslc(connection, len(connection), b"close", 5))
 
         self.length = None
         if content_length and not self.chunked:
@@ -942,16 +952,16 @@ class HTTPConnection:
                 headers.append((key, value))
                 keylen = len(key)
                 if keylen == 4:
-                    if _memeqlc(key, 0, 4, b"host"):
+                    if _containslc(key, 4, b"host", 4):
                         have_host = True
                 elif keylen == 14:
-                    if _memeqlc(key, 0, 14, b"content-length"):
+                    if _containslc(key, 14, b"content-length", 14):
                         have_content_length = True
                 elif keylen == 15:
-                    if _memeqlc(key, 0, 15, b"accept-encoding"):
+                    if _containslc(key, 15, b"accept-encoding", 15):
                         have_accept_encoding = True
                 elif keylen == 17:
-                    if _memeqlc(key, 0, 17, b"transfer-encoding"):
+                    if _containslc(key, 17, b"transfer-encoding", 17):
                         have_transfer_encoding = True
             del pairs
         else:
