@@ -51,7 +51,7 @@ class WifiManager:
             if self._nic.isconnected():
                 return True
             if self._reset:
-                self.disconnect()
+                self._disconnect()
                 was_active = False
         if not was_active:
             self._nic.active(True)
@@ -62,15 +62,14 @@ class WifiManager:
             if self._nic.isconnected():
                 return True
             if time.ticks_diff(time.ticks_ms(), t0) > timeout_ms:
-                self.disconnect()
+                self._disconnect()
                 return False
             time.sleep_ms(100)
 
-    def disconnect(self):
-        if self._nic.isconnected():
-            try: self._nic.disconnect()
-            except Exception: pass
-            time.sleep(1)
+    def _disconnect(self):
+        try: self._nic.disconnect()
+        except Exception: pass
+        time.sleep(1)
         if self._nic.active():
             self._nic.active(False)
             time.sleep(1)
