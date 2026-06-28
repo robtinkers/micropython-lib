@@ -46,25 +46,24 @@ class WifiManager:
         self._timeout = timeout
 
     def connect(self):
-        if self._nic.isconnected():
+        if not self._nic.active():
+            pass
+        elif self._nic.isconnected():
             return True
-        if self._reset:
-            try: self._nic.disconnect()
-            except Exception: pass
-            self._nic.active(False)
+        elif self._reset:
+            self.disconnect()
             time.sleep(1)
         if not self._nic.active():
             self._nic.active(True)
-            time.sleep(1)
         self._nic.connect(*self._args)
-        timeout = self._timeout
-        while timeout is None or timeout > 0:
+        t0 = time.ticks_ms()
+        while True:
             if self._nic.isconnected():
                 return True
-            time.sleep(1)
-            if timeout is not None:
-                timeout -= 1
-        return self._nic.isconnected()
+            if time.ticks_diff(time.ticks_ms(), t0) > self._timeout * 1000:
+                self.disconnect()
+                raise NotConnected("timeout connecting to wifi")
+            time.sleep_ms(100)
 
     def disconnect(self):
         try: self._nic.disconnect()
