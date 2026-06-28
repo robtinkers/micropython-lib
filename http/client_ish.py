@@ -39,18 +39,16 @@ class IncompleteRead(HTTPException): pass
 import network, time
 
 class WifiManager:
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args, reset=False, timeout=10):
         self._nic = network.WLAN(network.WLAN.IF_STA)
         self._args = args
-        self._kwargs = kwargs
-
-    def isconnected(self):
-        return self._nic.isconnected()
+        self._reset = reset
+        self._timeout = timeout
 
     def connect(self):
-        reset = self._kwargs.get("reset", False)
-        timeout = self._kwargs.get("timeout", 10)
-        if reset:
+        if self._nic.isconnected():
+            return True
+        if self._reset:
             try: self._nic.disconnect()
             except Exception: pass
             self._nic.active(False)
@@ -59,6 +57,7 @@ class WifiManager:
             self._nic.active(True)
             time.sleep(1)
         self._nic.connect(*self._args)
+        timeout = self._timeout
         while timeout is None or timeout > 0:
             if self._nic.isconnected():
                 return True
@@ -906,9 +905,12 @@ class HTTPConnection:
             self._hostport = b"%s:%d" % (self.host, port)
             self.port = port
 
+    def _require_network(self):
+        if self._network is not None and not self._network.connect():
+            raise NotConnected("network unavailable")
+
     def connect(self):
-        if self._network is not None and not self._network.isconnected():
-            self._network.connect()
+        self._require_network()
         self._sock = create_connection((self._hostaddr, self.port), self.timeout)
 
     # Drop buffers, any pending response, and the socket.
@@ -1094,8 +1096,7 @@ class HTTPConnection:
         if _DEBUG:
             print("send:", len(data), "bytes")
 
-        if self._network is not None and not self._network.isconnected():
-            self._network.connect()
+        self._require_network()
 
         if self._can_reconnect:
             if self._sock is not None:
