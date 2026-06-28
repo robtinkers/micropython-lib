@@ -62,7 +62,7 @@ class WifiManager:
                 return True
             if time.ticks_diff(time.ticks_ms(), t0) > self._timeout * 1000:
                 self.disconnect()
-                raise NotConnected("timeout connecting to wifi")
+                return False
             time.sleep_ms(100)
 
     def disconnect(self):
