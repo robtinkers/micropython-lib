@@ -371,9 +371,9 @@ def _parse_generator(s, keep_blank_values=False, strict_parsing=False,
         i = j + 1
 
 def parse_qs(qs, *args, **kwargs) -> dict:
-    kwargs['_decode'] = isinstance(qs, str)
+    _decode = isinstance(qs, str)
     out = {}
-    for key, val in _parse_generator(qs, *args, **kwargs):
+    for key, val in _parse_generator(qs, *args, **kwargs, _decode=_decode):
         if key in out:
             out[key].append(val)
         else:
@@ -381,13 +381,13 @@ def parse_qs(qs, *args, **kwargs) -> dict:
     return out
 
 def parse_qsl(qs, *args, **kwargs) -> list:
-    kwargs['_decode'] = isinstance(qs, str)
-    return list(_parse_generator(qs, *args, **kwargs))
+    _decode = isinstance(qs, str)
+    return list(_parse_generator(qs, *args, **kwargs, _decode=_decode))
 
 def urldecode(qs, *args, **kwargs) -> dict:
-    kwargs['_decode'] = isinstance(qs, str)
+    _decode = isinstance(qs, str)
     out = {}
-    for key, val in _parse_generator(qs, *args, **kwargs):
+    for key, val in _parse_generator(qs, *args, **kwargs, _decode=_decode):
         out[key] = val
     return out
 
