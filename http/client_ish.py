@@ -135,38 +135,38 @@ def _normalize_key(buf, start=0, end=None, lower=True):
 # Viper: transcode Latin-1 to UTF-8. Returns the required output length
 # when out==0, or -1 on 0x80-0x9F (C1 controls, invalid in headers).
 @micropython.viper
-def _latin1_to_utf8(buf: ptr8, buflen: int, out: ptr8) -> int:
+def _latin1_to_utf8(buf: ptr8, len_buf: int, out: ptr8) -> int:
     write = int(out) != 0
-    outlen = 0
+    len_out = 0
     i = 0
-    while i < buflen:
+    while i < len_buf:
         b = buf[i]
         i += 1
         if b < 128:
             if write:
-                out[outlen] = b
-            outlen += 1
+                out[len_out] = b
+            len_out += 1
         elif b < 160:
             return -1
         else:
             if write:
-                out[outlen+0] = 0xC0 | (b >> 6)
-                out[outlen+1] = 0x80 | (b & 0x3F)
-            outlen += 2
-    return outlen
+                out[len_out+0] = 0xC0 | (b >> 6)
+                out[len_out+1] = 0x80 | (b & 0x3F)
+            len_out += 2
+    return len_out
 
 # Decode Latin-1 bytes to str (MicroPython lacks the latin-1 codec).
 def decode_latin1(buf):
-    buflen = len(buf)
-    if buflen == 0:
+    len_buf = len(buf)
+    if len_buf == 0:
         return ""
-    utf8len = _latin1_to_utf8(buf, buflen, 0)
+    utf8len = _latin1_to_utf8(buf, len_buf, 0)
     if utf8len < 0:
         raise UnicodeError
-    if utf8len == buflen:
+    if utf8len == len_buf:
         return buf.decode()
     utf8out = bytearray(utf8len)
-    _latin1_to_utf8(buf, buflen, utf8out)
+    _latin1_to_utf8(buf, len_buf, utf8out)
     return utf8out.decode()
 
 # Response headers kept by default, bucketed by key length for cheap lookup.
@@ -630,15 +630,15 @@ class HTTPResponse:
                 self.close()
             return n
 
-        buflen = len(buf)
+        len_buf = len(buf)
         if isinstance(buf, memoryview):
             bmv = buf
         else:
             bmv = memoryview(buf)
 
         total = 0
-        while total < buflen:
-            amt = min(self._next_chunk(), buflen - total)
+        while total < len_buf:
+            amt = min(self._next_chunk(), len_buf - total)
             if amt == 0:
                 break
             if total == 0:
@@ -730,11 +730,11 @@ class HTTPResponse:
 
     # Yield the body as bytes blocks of up to blocksize.
     def iter_content(self, blocksize=None):
-        buflen = self.blocksize if blocksize is None else blocksize
-        buf = bytearray(buflen)
+        len_buf = self.blocksize if blocksize is None else blocksize
+        buf = bytearray(len_buf)
         bmv = memoryview(buf)
         for n in self.iter_content_into(bmv):
-            if n == buflen:
+            if n == len_buf:
                 yield bytes(buf)
             else:
                 yield bytes(bmv[:n])
@@ -951,17 +951,17 @@ class HTTPConnection:
                 if key is None:
                     raise ValueError("invalid key")
                 headers.append((key, value))
-                keylen = len(key)
-                if keylen == 4:
+                len_key = len(key)
+                if len_key == 4:
                     if _containslc(key, 4, b"host", 4):
                         have_host = True
-                elif keylen == 14:
+                elif len_key == 14:
                     if _containslc(key, 14, b"content-length", 14):
                         have_content_length = True
-                elif keylen == 15:
+                elif len_key == 15:
                     if _containslc(key, 15, b"accept-encoding", 15):
                         have_accept_encoding = True
-                elif keylen == 17:
+                elif len_key == 17:
                     if _containslc(key, 17, b"transfer-encoding", 17):
                         have_transfer_encoding = True
             del pairs
@@ -1133,12 +1133,12 @@ class HTTPConnection:
         header = b"%X\r\n" % len_data
         if self._merge_buffer is not None and self._merged == 0:
             len_header = len(header)
-            total_len = len_header + len_data + 2
-            if total_len <= self._merge_buffer_size:
+            total = len_header + len_data + 2
+            if total <= self._merge_buffer_size:
                 self._merge_buffer[:len_header] = header
                 self._merge_buffer[len_header:len_header+len_data] = data
-                self._merge_buffer[len_header+len_data:total_len] = _CRLF
-                self._send_raw(self._merge_buffmv[:total_len])
+                self._merge_buffer[len_header+len_data:total] = _CRLF
+                self._send_raw(self._merge_buffmv[:total])
                 return
         self._send_raw(header)
         self._send_raw(data)
@@ -1163,14 +1163,14 @@ class HTTPConnection:
             send(data)
 
         elif hasattr(data, "readinto"):
-            buflen = self.blocksize
-            buf = bytearray(buflen)
+            len_buf = self.blocksize
+            buf = bytearray(len_buf)
             bmv = memoryview(buf)
             while True:
                 n = data.readinto(buf)
                 if not n:
                     break
-                if n == buflen:
+                if n == len_buf:
                     send(buf)
                 else:
                     send(bmv[:n])
