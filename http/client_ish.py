@@ -246,21 +246,21 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
         if sep == -1:
             continue
 
-        start, end = 0, sep
-        while end > start and line[end - 1] <= 32: end -= 1
+        end = sep
+        while end > 0 and line[end - 1] <= 32: end -= 1
 
         key = None
-        cands = _get(end - start)
+        cands = _get(end)
         if cands is not None:
             for cand in cands:
-                if _containslc(line, end - start, cand, end - start):
+                if _containslc(line, end, cand, end):
                     key = cand
                     break
 
         if key is None:
             if not all_headers:
                 continue
-            key = _normalize_key(line, start, end)
+            key = _normalize_key(line, 0, end)
             if key is None:
                 continue
             if not isinstance(key, bytes):
