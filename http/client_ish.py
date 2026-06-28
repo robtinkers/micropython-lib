@@ -55,6 +55,7 @@ class WifiManager:
                 was_active = False
         if not was_active:
             self._active(True)
+            time.sleep(1)
         self._nic.connect(*self._args)
         t0, timeout_ms = time.ticks_ms(), self._timeout * 1000
         while True:
@@ -66,9 +67,13 @@ class WifiManager:
             time.sleep_ms(100)
 
     def disconnect(self):
-        try: self._nic.disconnect()
-        except Exception: pass
-        self._active(False)
+        if self._isconnected():
+            try: self._nic.disconnect()
+            except Exception: pass
+            time.sleep(1)
+        if self._active():
+            self._active(False)
+            time.sleep(1)
 
     def _isconnected(self):
         return self._nic.isconnected()
@@ -76,9 +81,7 @@ class WifiManager:
     def _active(self, arg=None):
         if arg is None:
             return self._nic.active()
-        val = self._nic.active(arg)
-        time.sleep(1)
-        return val
+        return self._nic.active(arg)
 
 # Viper: return 1 if buf[start:end] is free of C0 control chars
 # (invalid_flags bit 0 also forbids space and tab).
