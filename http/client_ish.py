@@ -322,6 +322,8 @@ class HTTPResponse:
 
     @property
     def reason(self):
+        if self._reason is None:
+            return None
         return self._reason.strip().decode()
 
     def fileno(self):
