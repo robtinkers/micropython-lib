@@ -416,10 +416,11 @@ class HTTPResponse:
             self._close(sock)
             raise IncompleteRead(self._bytes_read, self.length)
         if sock is not None:
-            # Unread body bytes would corrupt the next response on a reused socket.
+            self._sock = None
             if (self.will_close or self.chunked
                     or (self.length is not None and self._bytes_read < self.length)):
-                self._close(sock)
+                try: sock.close()
+                except OSError: pass
 
     def isclosed(self):
         return self._sock is None
