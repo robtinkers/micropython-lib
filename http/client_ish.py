@@ -900,9 +900,9 @@ class HTTPConnection:
 
     # Convenience wrapper: send request line, headers and body in one call.
     def request(self, method, url, body=None, headers=None, *, encode_chunked=None):
-        have_accept_encoding = False
+        skip_host = False
         have_content_length = False
-        have_host = False
+        skip_accept_encoding = False
         have_transfer_encoding = False
 
         pairs = None
@@ -924,13 +924,13 @@ class HTTPConnection:
                 len_key = len(key)
                 if len_key == 4:
                     if _containslc(key, 4, b"host", 4):
-                        have_host = True
+                        skip_host = True
                 elif len_key == 14:
                     if _containslc(key, 14, b"content-length", 14):
                         have_content_length = True
                 elif len_key == 15:
                     if _containslc(key, 15, b"accept-encoding", 15):
-                        have_accept_encoding = True
+                        skip_accept_encoding = True
                 elif len_key == 17:
                     if _containslc(key, 17, b"transfer-encoding", 17):
                         have_transfer_encoding = True
@@ -938,7 +938,7 @@ class HTTPConnection:
         else:
             headers = []
 
-        self.putrequest(method, url, skip_accept_encoding=have_accept_encoding, skip_host=have_host)
+        self.putrequest(method, url, skip_host=skip_host, skip_accept_encoding=skip_accept_encoding)
 
         if isinstance(body, str):
             body = body.encode()
