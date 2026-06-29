@@ -20,6 +20,7 @@ _DEFAULT_TIMEOUT = const(10)
 # Run gc.collect() after a response when free memory drops below this (bytes); 0 disables.
 _GC_THRESHOLD = const(32768)
 
+_MISSING = object()
 _SET_COOKIE = b"set-cookie"
 _BLANK = b""
 _CRLF = b"\r\n"
@@ -162,13 +163,16 @@ def _latin1_to_utf8(buf: ptr8, len_buf: int, out: ptr8) -> int:
     return len_out
 
 # Decode Latin-1 bytes to str (MicroPython lacks the latin-1 codec).
-def decode_latin1(buf):
+def decode_latin1(buf, default=_MISSING):
     len_buf = len(buf)
     if len_buf == 0:
         return ""
     utf8len = _latin1_to_utf8(buf, len_buf, 0)
     if utf8len < 0:
-        raise UnicodeError
+        if default is _MISSING:
+            raise UnicodeError
+        else:
+            return default
     if utf8len == len_buf:
         return buf.decode()
     utf8out = bytearray(utf8len)
@@ -817,13 +821,7 @@ class HTTPResponse:
             yield self._headers[i], self._headers[i+1]
 
     def getheader(self, key, default=None):
-        val = self.rawheader(key, None)
-        if val is not None:
-            try:
-                return decode_latin1(val)
-            except UnicodeError:
-                pass
-        return default
+        return decode_latin1(self.rawheader(key, None), default)
 
     # Raw value for key; repeated headers are joined with ", " per RFC 9110.
     def rawheader(self, key, default=None):
@@ -844,19 +842,11 @@ class HTTPResponse:
     def getcookie(self, name, default=None):
         if isinstance(name, str):
             name = name.encode()
-        val = self.rawcookie(name, None)
-        if val is not None:
-            try:
-                return decode_latin1(val)
-            except UnicodeError:
-                pass
-        return default
+        return decode_latin1(self.rawcookie(name, None), default)
 
     # Extract a cookie's raw value from Set-Cookie headers, stripping quotes.
     # (59/61/34 are ";", "=" and '"'.)
     def rawcookie(self, name, default=None):
-        if self._headers is None:
-            raise ResponseNotReady()
         len_name = len(name)
         for key, val in self.rawheaders():
             if key != _SET_COOKIE:
