@@ -909,7 +909,7 @@ class HTTPConnection:
             self.port = port
 
     def _require_network(self):
-        if self._network is not None and not self._network.connect():
+        if self._network is None or not self._network.connect():
             raise NotConnected("network unavailable")
 
     def connect(self):
