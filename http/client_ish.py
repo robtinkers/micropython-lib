@@ -413,14 +413,6 @@ class HTTPResponse:
                 try: sock.close()
                 except OSError: pass
 
-    def _require_nonchunked(self):
-        if self._chunked:
-            raise ValueError("operation requires a non-chunked stream")
-
-    def _require_blocking(self):
-        if not self._blocking:
-            raise ValueError("operation requires a blocking socket")
-
     # Switch to non-blocking reads (recv/recv_into). One-way; disables socket reuse.
     def setblocking(self, flag):
         if flag:
@@ -430,6 +422,14 @@ class HTTPResponse:
         except AttributeError: pass
         self._blocking = False
         self._will_close = True
+
+    def _require_blocking(self):
+        if not self._blocking:
+            raise ValueError("operation requires a blocking socket")
+
+    def _require_nonchunked(self):
+        if self._chunked:
+            raise ValueError("operation requires a non-chunked stream")
 
     def _read_wrapper(self, resumable, func, *args):
         while True:
