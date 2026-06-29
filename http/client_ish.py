@@ -720,18 +720,17 @@ class HTTPResponse:
                 self.close()
                 return 0
 
-        if self._blocking and not self._have_recv_into:
-            data = self.recv(min(amt, self.blocksize))
-            if data is None:
-                return None
-            n = len(data)
-            if n:
-                buf[:n] = data
-            return n
-
         try:
             if self._have_recv_into:
                 n = sock.recv_into(buf, amt)
+            elif self._blocking:
+                data = self.recv(min(amt, self.blocksize))
+                if data is None:
+                    n = None
+                else:
+                    n = len(data)
+                    if n:
+                        buf[:n] = data
             else:
                 n = sock.readinto(buf, amt)
         except OSError as e:
