@@ -300,13 +300,11 @@ def create_connection(address, timeout=None):
             return sock
         except OSError as e:
             err = e
-            if sock is not None:
-                try: sock.close()
-                except OSError: pass
+            try: sock.close()
+            except (AttributeError, OSError): pass
         except Exception as e:
-            if sock is not None:
-                try: sock.close()
-                except OSError: pass
+            try: sock.close()
+            except (AttributeError, OSError): pass
             raise e
     if err is not None:
         raise err
@@ -325,6 +323,10 @@ class HTTPResponse:
 
     def __init__(self, sock, method=None, url=None):
         self._sock = sock
+        # Cache recv_into support once. NOTE: for HTTPS this must be the
+        # TLS-wrapped socket (getresponse passes the wrapped self._sock), not
+        # the raw one -- don't reorder construction to before the wrap.
+        self._have_recv_into = hasattr(sock, "recv_into")
         self._method = method
         self._url = url
         self._headers = None
@@ -337,7 +339,6 @@ class HTTPResponse:
         self.will_close = True
         self._bytes_read = 0
         self._blocking = True
-        self._aborted = False
 
     # Read the status line and headers, then work out body framing and keep-alive.
     def begin(self, *, all_headers=False, and_cookies=None):
@@ -395,25 +396,61 @@ class HTTPResponse:
         if self.length is None and not self.chunked:
             self.will_close = True
 
-    def _abort(self):
-        self._aborted = True
-        sock = self._sock
-        if sock is not None:
-            self._sock = None
-            try: sock.close()
-            except OSError: pass
+    # Null self._sock first so isclosed() is truthful immediately, then close
+    # the captured socket. Never raises.
+    def _close(self, sock):
+        self._sock = None
+        try: sock.close()
+        except (AttributeError, OSError): pass
 
-    def _readline_or_abort(self):
+    # Release the socket; hard-close it only if it can't be safely reused.
+    # tainted=True marks the stream corrupt and raises IncompleteRead.
+    def close(self, tainted=False):
+        sock = self._sock
+        if tainted:
+            self._close(sock)
+            raise IncompleteRead(self._bytes_read, self.length)
+        if sock is not None:
+            # Unread body bytes would corrupt the next response on a reused socket.
+            if (self.will_close or self.chunked
+                    or (self.length is not None and self._bytes_read < self.length)):
+                self._close(sock)
+
+    def isclosed(self):
+        return self._sock is None
+
+    def _require_nonchunked(self):
+        if self.chunked:
+            raise ValueError("operation requires a non-chunked stream")
+
+    def _require_blocking(self):
+        if not self._blocking:
+            raise ValueError("operation requires a blocking socket")
+
+    # Switch to non-blocking reads (recv/recv_into). One-way; disables socket reuse.
+    def setblocking(self, flag):
+        if flag:
+            raise ValueError("can only transition to non-blocking")
+        self._require_nonchunked()
+        try: self._sock.setblocking(False)
+        except AttributeError: pass
+        self._blocking = False
+        self.will_close = True
+
+    def _readline(self):
+        sock = self._sock
+        if sock is None:
+            return None
         try:
-            return self._sock.readline()
+            return sock.readline()
         except OSError:
-            self._abort()
+            self._close(sock)
             raise
 
     # Parse the status line, transparently skipping 1xx interim responses (except 101).
     def _read_status(self):
         while True:
-            line = self._readline_or_abort()
+            line = self._readline()
             if _DEBUG:
                 print("status:", repr(line))
             if line == _CRLF or line == _LF:
@@ -443,7 +480,7 @@ class HTTPResponse:
             if not (100 <= status <= 199) or status == 101:
                 break
             while True:
-                line = self._readline_or_abort()
+                line = self._readline()
                 if line == _CRLF or line == _LF or not line:
                     break
                 if _DEBUG:
@@ -460,47 +497,12 @@ class HTTPResponse:
 
         return version, status, reason
 
-    # Release the socket; hard-close it only if it can't be safely reused.
-    # tainted=True marks the stream corrupt and raises IncompleteRead.
-    def close(self, tainted=False):
-        if tainted:
-            self._abort()
-            raise IncompleteRead(self._bytes_read, self.length)
-        sock = self._sock
-        if sock is not None:
-            self._sock = None
-            if self._aborted or self.will_close or self.chunked
-                    or (self.length is not None and self._bytes_read < self.length):
-                try: sock.close()
-                except OSError: pass
-
-    def isclosed(self):
-        return self._sock is None
-
-    # Switch to non-blocking reads (recv/recv_into). One-way; disables socket reuse.
-    def setblocking(self, flag):
-        if flag:
-            raise ValueError("can only transition to non-blocking")
-        self._require_nonchunked()
-        if self._sock is not None:
-            self._sock.setblocking(False)
-        self._blocking = False
-        self.will_close = True
-
-    def _require_blocking(self):
-        if not self._blocking:
-            raise ValueError("operation requires a blocking socket")
-
-    def _require_nonchunked(self):
-        if self.chunked:
-            raise ValueError("operation requires a non-chunked stream")
-
     # Advance chunked framing: consume size lines, inter-chunk CRLFs and the
     # trailer as needed; return bytes left in the current chunk (0 = end of body).
     def _next_chunk(self):
         while True:
             if self.chunk_left is None:
-                line = self._readline_or_abort()
+                line = self._readline()
                 if not line:
                     self.close(True)
                 sep = line.find(b";")
@@ -516,7 +518,7 @@ class HTTPResponse:
                     self.chunk_left = size
                     return size
                 while True:
-                    line = self._readline_or_abort()
+                    line = self._readline()
                     if line == _CRLF or line == _LF:
                         self.chunked = False
                         self.length = self._bytes_read
@@ -525,7 +527,7 @@ class HTTPResponse:
                     if not line:
                         self.close(True)
             elif self.chunk_left == 0:
-                line = self._readline_or_abort()
+                line = self._readline()
                 if line != _CRLF and line != _LF:
                     self.close(True)
                 self.chunk_left = None
@@ -535,15 +537,16 @@ class HTTPResponse:
     # Read up to amt bytes, or the entire remaining body if amt is None/negative.
     def read(self, amt=None):
         self._require_blocking()
-        if self.isclosed():
+        sock = self._sock
+        if sock is None:
             return _BLANK
 
         unbounded = amt is None or amt < 0
         if unbounded and self.length is None and not self.chunked:
             try:
-                data = self._sock.read()
+                data = sock.read()
             except OSError:
-                self._abort()
+                self._close(sock)
                 raise
             if not data:
                 self.close()
@@ -565,9 +568,9 @@ class HTTPResponse:
 
         if not self.chunked:
             try:
-                data = self._sock.read(amt)
+                data = sock.read(amt)
             except OSError:
-                self._abort()
+                self._close(sock)
                 raise
             if not data:
                 self.close(self.length is not None)
@@ -585,9 +588,9 @@ class HTTPResponse:
             if want == 0:
                 break
             try:
-                chunk = self._sock.read(want)
+                chunk = sock.read(want)
             except OSError:
-                self._abort()
+                self._close(sock)
                 raise
             if not chunk:
                 self.close(True)
@@ -608,8 +611,10 @@ class HTTPResponse:
     # Single recv-style read: at most one chunk/blocksize of data, possibly short.
     def readshort(self, amt=None):
         self._require_blocking()
-        if self.isclosed():
+        sock = self._sock
+        if sock is None:
             return _BLANK
+
         if amt is None or amt < 0:
             amt = self.blocksize
         if self.length is not None:
@@ -626,9 +631,9 @@ class HTTPResponse:
             if amt == 0:
                 return _BLANK
         try:
-            data = self._sock.read(amt)
+            data = sock.read(amt)
         except OSError:
-            self._abort()
+            self._close(sock)
             raise
         if not data:
             self.close(self.chunked or self.length is not None)
@@ -645,7 +650,8 @@ class HTTPResponse:
     # Fill buf as far as the body allows; returns bytes written (0 = end of body).
     def readinto(self, buf):
         self._require_blocking()
-        if self.isclosed() or not buf:
+        sock = self._sock
+        if sock is None or not buf:
             return 0
 
         if not self.chunked:
@@ -657,9 +663,9 @@ class HTTPResponse:
                     self.close()
                     return 0
             try:
-                n = self._sock.readinto(buf, amt)
+                n = sock.readinto(buf, amt)
             except OSError:
-                self._abort()
+                self._close(sock)
                 raise
             if not n:
                 self.close(self.length is not None)
@@ -682,11 +688,11 @@ class HTTPResponse:
                 break
             try:
                 if total == 0:
-                    n = self._sock.readinto(buf, amt)
+                    n = sock.readinto(buf, amt)
                 else:
-                    n = self._sock.readinto(bmv[total:], amt)
+                    n = sock.readinto(bmv[total:], amt)
             except OSError:
-                self._abort()
+                self._close(sock)
                 raise
             if not n:
                 self.close(True)
@@ -698,8 +704,10 @@ class HTTPResponse:
     # Non-blocking-friendly read: None while no data is available yet, b"" at end of body.
     def recv(self, amt=None):
         self._require_nonchunked()
-        if self.isclosed():
+        sock = self._sock
+        if sock is None:
             return _BLANK
+
         if amt is None or amt < 0:
             amt = self.blocksize
         if self.length is not None:
@@ -712,14 +720,14 @@ class HTTPResponse:
             return _BLANK
 
         try:
-            data = self._sock.recv(amt)
-            if data is None:
-                return None
+            data = sock.recv(amt)
         except OSError as e:
             if e.errno == errno.EAGAIN:
                 return None
-            self._abort()
+            self._close(sock)
             raise
+        if data is None:
+            return None
 
         if not data:
             self.close(self.length is not None)
@@ -733,8 +741,10 @@ class HTTPResponse:
     # Non-blocking-friendly readinto: None while no data is available yet, 0 at end of body.
     def recv_into(self, buf):
         self._require_nonchunked()
-        if self.isclosed() or not buf:
+        sock = self._sock
+        if sock is None or not buf:
             return 0
+
         if self.length is None:
             amt = len(buf)
         else:
@@ -743,7 +753,7 @@ class HTTPResponse:
                 self.close()
                 return 0
 
-        if self._blocking and not hasattr(self._sock, "recv_into"):
+        if self._blocking and not self._have_recv_into:
             data = self.recv(min(amt, self.blocksize))
             if data is None:
                 return None
@@ -753,17 +763,17 @@ class HTTPResponse:
             return n
 
         try:
-            if hasattr(self._sock, "recv_into"):
-                n = self._sock.recv_into(buf, amt)
+            if self._have_recv_into:
+                n = sock.recv_into(buf, amt)
             else:
-                n = self._sock.readinto(buf, amt)
-            if n is None:
-                return None
+                n = sock.readinto(buf, amt)
         except OSError as e:
             if e.errno == errno.EAGAIN:
                 return None
-            self._abort()
+            self._close(sock)
             raise
+        if n is None:
+            return None
 
         if n == 0:
             self.close(self.length is not None)
@@ -971,7 +981,7 @@ class HTTPConnection:
         self._sock = None
         if sock is not None:
             try: sock.close()
-            except OSError: pass
+            except (AttributeError, OSError): pass
 
     # Convenience wrapper: send request line, headers and body in one call.
     def request(self, method, url, body=None, headers=None, *, encode_chunked=None):
@@ -1150,17 +1160,16 @@ class HTTPConnection:
                     return
                 except OSError:
                     try: self._sock.close()
-                    except OSError: pass
+                    except (AttributeError, OSError): pass
                 self._sock = None
             try:
                 self.connect()
                 self._sock.sendall(data)
             except OSError as e:
-                sock = self._sock
-                self._sock = None
-                if sock is not None:
-                    try: sock.close()
-                    except OSError: pass
+                if self._sock is not None:
+                    try: self._sock.close()
+                    except (AttributeError, OSError): pass
+                    finally: self._sock = None
                 raise NotConnected(str(e))
             self._can_reconnect = False
             return
@@ -1262,7 +1271,7 @@ class HTTPConnection:
                 response.close()
             if sock is not None:
                 try: sock.close()
-                except OSError: pass
+                except (AttributeError, OSError): pass
             raise
         finally:
             # Help small heaps: header parsing fragments memory.
@@ -1314,7 +1323,7 @@ else:
                 self._sock = None
                 if raw is not None:
                     try: raw.close()
-                    except OSError: pass
+                    except (AttributeError, OSError): pass
                 if isinstance(e, OSError):
                     raise e
                 elif isinstance(e, MemoryError):
