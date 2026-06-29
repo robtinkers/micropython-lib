@@ -566,11 +566,7 @@ class HTTPResponse:
 
         # read-to-EOF: only read() on an unframed body reaches this.
         if unbounded and self._length is None and not self._chunked:
-            try:
-                data = self._read_wrapper(False, sock.read)
-            except OSError:
-                self._close(sock)
-                raise
+            data = self._read_wrapper(False, sock.read)
             if not data:
                 self.close()
                 return _BLANK
@@ -595,15 +591,11 @@ class HTTPResponse:
                 amt = min(amt, self._next_chunk())
                 if amt == 0:
                     return 0 if into else _BLANK
-            try:
-	            if into:
-	                n = self._read_wrapper(True, sock.readinto, buf, amt)
-	            else:
-	                data = self._read_wrapper(True, sock.read, amt)
-	                n = len(data) if data else 0
-            except OSError:
-                self._close(sock)
-                raise
+            if into:
+                n = self._read_wrapper(True, sock.readinto, buf, amt)
+            else:
+                data = self._read_wrapper(True, sock.read, amt)
+                n = len(data) if data else 0
             if not n:
                 # A truncated chunk taints; otherwise close iff length-framed.
                 self.close(self._chunked or self._length is not None)
@@ -623,11 +615,7 @@ class HTTPResponse:
                 want = min(self._next_chunk(), amt - total)
                 if want == 0:
                     break
-                try:
-                    n = self._read_wrapper(False, sock.readinto, buf if total == 0 else bmv[total:], want)
-                except OSError:
-                    self._close(sock)
-                    raise
+                n = self._read_wrapper(False, sock.readinto, buf if total == 0 else bmv[total:], want)
                 if not n:
                     self.close(True)
                 self._bytes_read += n
@@ -642,11 +630,7 @@ class HTTPResponse:
             want = avail if unbounded else min(amt - len_out, avail)
             if want == 0:
                 break
-            try:
-                chunk = self._read_wrapper(False, sock.read, want)
-            except OSError:
-                self._close(sock)
-                raise
+            chunk = self._read_wrapper(False, sock.read, want)
             if not chunk:
                 self.close(True)
                 break
@@ -1199,7 +1183,7 @@ class HTTPConnection:
         try:
             response = self.response_class(self._sock, self.method, self.url)
             response.begin(**kwargs)
-            if response.will_close:
+            if response._will_close:
                 self._sock = None
             else:
                 self.__response = response
