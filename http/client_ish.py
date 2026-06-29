@@ -1,6 +1,6 @@
 # http/client_ish.py
 #
-# http.client for Micropython, optimised for low memory-allocation.
+# http.client for Micropython, optimised for memory footprint and churn.
 # Extensions include chunking, cookies, reconnects, non-blocking I/O and more.
 
 import micropython, socket, errno, gc
