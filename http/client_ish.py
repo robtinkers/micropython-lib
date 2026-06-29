@@ -323,9 +323,6 @@ class HTTPResponse:
 
     def __init__(self, sock, method=None, url=None):
         self._sock = sock
-        # Cache recv_into support once. NOTE: for HTTPS this must be the
-        # TLS-wrapped socket (getresponse passes the wrapped self._sock), not
-        # the raw one -- don't reorder construction to before the wrap.
         self._have_recv_into = hasattr(sock, "recv_into")
         self._method = method
         self._url = url
@@ -396,8 +393,6 @@ class HTTPResponse:
         if self.length is None and not self.chunked:
             self.will_close = True
 
-    # Null self._sock first so isclosed() is truthful immediately, then close
-    # the captured socket. Never raises.
     def _close(self, sock):
         self._sock = None
         try: sock.close()
