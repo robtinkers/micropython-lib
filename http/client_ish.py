@@ -38,45 +38,6 @@ class CannotSendHeader(ImproperConnectionState): pass
 class ResponseNotReady(ImproperConnectionState): pass
 class IncompleteRead(HTTPException): pass
 
-#
-import network, time
-
-class WifiManager:
-    def __init__(self, *args, reset=False, timeout=10):
-        self._nic = network.WLAN(network.WLAN.IF_STA)
-        self._args = args
-        self._reset = reset
-        self._timeout = timeout
-
-    def connect(self):
-        was_active = self._nic.active()
-        if was_active:
-            if self._nic.isconnected():
-                return True
-            if self._reset:
-                self._disconnect()
-                was_active = False
-        if not was_active:
-            self._nic.active(True)
-            time.sleep(1)
-        self._nic.connect(*self._args)
-        t0, timeout_ms = time.ticks_ms(), self._timeout * 1000
-        while True:
-            if self._nic.isconnected():
-                return True
-            if time.ticks_diff(time.ticks_ms(), t0) > timeout_ms:
-                self._disconnect()
-                return False
-            time.sleep_ms(100)
-
-    def _disconnect(self):
-        try: self._nic.disconnect()
-        except Exception: pass
-        time.sleep(1)
-        if self._nic.active():
-            self._nic.active(False)
-            time.sleep(1)
-
 # Viper: return 1 if buf[start:end] is free of C0 control chars
 # (invalid_flags bit 0 also forbids space and tab).
 @micropython.viper
@@ -952,7 +913,7 @@ class HTTPConnection:
             self.port = port
 
     def _require_network(self):
-        if self._network is not None and not self._network.connect():
+        if self._network is not None and not self._network():
             raise NotConnected("network unavailable")
 
     def connect(self):
