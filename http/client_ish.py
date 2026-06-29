@@ -164,17 +164,23 @@ def _latin1_to_utf8(buf: ptr8, len_buf: int, out: ptr8) -> int:
 
 # Decode Latin-1 bytes to str (MicroPython lacks the latin-1 codec).
 def decode_latin1(buf, default=_MISSING):
+    if buf is None:
+        if default is _MISSING:
+            raise UnicodeError
+        return default
     len_buf = len(buf)
     if len_buf == 0:
         return ""
     utf8len = _latin1_to_utf8(buf, len_buf, 0)
+    if utf8len == len_buf:
+        try:
+            return buf.decode()
+        except UnicodeError:
+            utf8len = -1
     if utf8len < 0:
         if default is _MISSING:
             raise UnicodeError
-        else:
-            return default
-    if utf8len == len_buf:
-        return buf.decode()
+        return default
     utf8out = bytearray(utf8len)
     _latin1_to_utf8(buf, len_buf, utf8out)
     return utf8out.decode()
