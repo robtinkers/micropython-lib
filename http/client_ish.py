@@ -1226,10 +1226,10 @@ class HTTPConnection:
             if self._can_reconnect:
                 self.method = None
                 self.url = None
-		        resp, self._resp = self._resp, None
-		        if resp is not None:
-		            resp._sock = None
-		            resp._conn = None
+                resp, self._resp = self._resp, None
+                if resp is not None:
+                    resp._sock = None
+                    resp._conn = None
                 sock, self._sock = self._sock, None
                 if sock is not None:
                     try: sock.close()
