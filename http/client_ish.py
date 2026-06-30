@@ -916,13 +916,11 @@ class HTTPConnection:
         self._merged = 0
         self._merge_buffmv = None
         self._merge_buffer = None
-        resp = self._resp
-        self._resp = None
+        resp, self._resp = self._resp, None
         if resp is not None:
             resp._sock = None
             resp._conn = None
-        sock = self._sock
-        self._sock = None
+        sock, self._sock = self._sock, None
         if sock is not None:
             try: sock.close()
             except OSError: pass
@@ -1228,9 +1226,9 @@ class HTTPConnection:
                     resp.close()
             return resp
         except Exception:
-            sock, self._sock = self._sock, None
             if resp is not None:
                 resp._sock = None
+            sock, self._sock = self._sock, None
             if sock is not None:
                 try: sock.close()
                 except OSError: pass
@@ -1246,8 +1244,7 @@ class HTTPConnection:
             self._resp._sock = None
             self._resp._conn = None
             self._resp = None
-        sock = self._sock
-        self._sock = None
+        sock, self._sock = self._sock, None
         self._can_reconnect = False
         self._merged = 0
         self._merge_buffmv = None
