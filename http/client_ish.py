@@ -40,13 +40,17 @@ class IncompleteRead(HTTPException): pass
 
 # Viper: return 1 if buf[start:end] is free of C0 control chars
 @micropython.viper
-def _validate_not_c0(buf:ptr8, start:int, end:int, invalid_flags:int) -> int:
-    invalid_space = invalid_flags & 1
-    invalid_colon = invalid_flags & 2
+def _validate(buf:ptr8, start:int, end:int, flags:int) -> int:
+    invalid_space = bool(flags & 1)
+    invalid_tab   = bool(flags & 2)
+    invalid_colon = bool(flags & 4)
     i = start
     while i < end:
         b = buf[i]
-        if b < 32:
+        if b == 9:
+            if invalid_tab:
+                return 0
+        elif b < 32:
             return 0
         elif b == 32:
             if invalid_space:
@@ -54,18 +58,20 @@ def _validate_not_c0(buf:ptr8, start:int, end:int, invalid_flags:int) -> int:
         elif b == 58:
             if invalid_colon:
                 return 0
+        elif b == 127:
+            return 0
         i += 1
     return 1
 
 # Coerce a value to bytes and reject control characters in it.
-def _encode_and_validate(val, invalid_flags):
-    if isinstance(val, str):
-        val = val.encode()
-    elif not isinstance(val, (bytes, bytearray, memoryview)):
-        val = str(val).encode()
-    if not _validate_not_c0(val, 0, len(val), invalid_flags):
+def _encode_and_validate(x, flags):
+    if isinstance(x, str):
+        x = x.encode()
+    elif not isinstance(x, (bytes, bytearray, memoryview)):
+        x = str(x).encode()
+    if not _validate(x, 0, len(x), flags):
         raise ValueError("not ISO-8859-1")
-    return val
+    return x
 
 # Viper: ASCII-lower-case buf[start:end] into out, or with out==0 just
 # report whether it is already lower-case (returns 1 if unchanged).
@@ -85,15 +91,15 @@ def _lower_case(buf:ptr8, start:int, end:int, out:ptr8) -> int:
         i += 1
     return 1
 
-# Return a validated, lower-cased header key, avoiding a copy when possible.
-def _normalize_key(buf, start=0, end=None, lower=True):
+# Return a validated, lower-cased header name, avoiding a copy when possible.
+def _normalize_header_name(buf, start=0, end=None, lower=True):
     if isinstance(buf, str):
         buf = buf.encode()
     elif not isinstance(buf, (bytes, bytearray, memoryview)):
         buf = str(buf).encode()
     if end is None:
         end = len(buf)
-    if not _validate_not_c0(buf, start, end, 3):
+    if not _validate(buf, start, end, 7):
         return None
     if not lower or _lower_case(buf, start, end, 0):
         if isinstance(buf, memoryview):
@@ -151,7 +157,7 @@ def decode_latin1(buf, default=_MISSING):
     _latin1_to_utf8(buf, len_buf, utf8out)
     return utf8out.decode()
 
-# Response headers kept by default, bucketed by key length for cheap lookup.
+# Response headers kept by default, bucketed by name length for cheap lookup.
 _keep_response_headers = {
     4:[b"etag"],
     8:[b"location"],
@@ -164,18 +170,18 @@ _keep_response_headers = {
 }
 
 # Register an extra header to retain when parsing with all_headers=False.
-def keep_response_header(key):
-    key = _normalize_key(key)
-    if key is None:
-        raise ValueError("invalid key")
-    if not isinstance(key, bytes):
-        key = bytes(key)
-    len_key = len(key)
-    cands = _keep_response_headers.get(len_key)
+def keep_response_header(name):
+    name = _normalize_header_name(name)
+    if name is None:
+        raise ValueError("invalid header name")
+    if not isinstance(name, bytes):
+        name = bytes(name)
+    len_name = len(name)
+    cands = _keep_response_headers.get(len_name)
     if cands is None:
-        _keep_response_headers[len_key] = [key]
-    elif key not in cands:
-        cands.append(key)
+        _keep_response_headers[len_name] = [name]
+    elif name not in cands:
+        cands.append(name)
 
 # Viper: case-insensitively search for a (lower-case) needle in haystack
 @micropython.viper
@@ -200,7 +206,7 @@ def _containslc(haystack:ptr8, haystacklen:int, needle:ptr8, needlelen:int) -> i
         i += 1
     return 0
 
-# Read response headers into a flat [key, value, key, value, ...] list.
+# Read response headers into a flat [name, value, name, value, ...] list.
 # Malformed lines are skipped; unwanted headers are dropped unless all_headers.
 def parse_headers(sock, *, all_headers=False, and_cookies=None):
     if and_cookies is None:
@@ -226,29 +232,29 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
         end = sep
         while end > 0 and line[end - 1] <= 32: end -= 1
 
-        key = None
+        name = None
         cands = _keep_response_headers.get(end)
         if cands is not None:
             for cand in cands:
                 if _containslc(line, end, cand, end):
-                    key = cand
+                    name = cand
                     break
 
-        if key is None:
+        if name is None:
             if not all_headers:
                 continue
-            key = _normalize_key(line, 0, end)
-            if key is None:
+            name = _normalize_header_name(line, 0, end)
+            if name is None:
                 continue
-            if not isinstance(key, bytes):
-                key = bytes(key)
-        elif key == _SET_COOKIE and not and_cookies:
+            if not isinstance(name, bytes):
+                name = bytes(name)
+        elif name == _SET_COOKIE and not and_cookies:
             continue
 
         start, end = sep + 1, len(line)
         while start < end and line[start] <= 32: start += 1
         while end > start and line[end - 1] <= 32: end -= 1
-        headers.append(key)
+        headers.append(name)
         headers.append(line[start:end])
 
 # socket.create_connection() work-alike: try each resolved address in turn.
@@ -761,9 +767,9 @@ class HTTPResponse:
     # Decoded (str, str) header pairs; entries that fail Latin-1 decoding are dropped.
     def getheaders(self):
         out = []
-        for key, val in self.rawheaders():
+        for name, value in self.rawheaders():
             try:
-                out.append((decode_latin1(key), decode_latin1(val)))
+                out.append((decode_latin1(name), decode_latin1(value)))
             except UnicodeError:
                 pass
         return out
@@ -774,19 +780,19 @@ class HTTPResponse:
         for i in range(0, len(self._headers), 2):
             yield self._headers[i], self._headers[i+1]
 
-    def getheader(self, key, default=None):
-        return decode_latin1(self.rawheader(key, None), default)
+    def getheader(self, name, default=None):
+        return decode_latin1(self.rawheader(name, None), default)
 
-    # Raw value for key; repeated headers are joined with ", " per RFC 9110.
-    def rawheader(self, key, default=None):
+    # Raw value for name; repeated headers are joined with ", " per RFC 9110.
+    def rawheader(self, name, default=None):
         if self._headers is None:
             raise ResponseNotReady()
-        key = _normalize_key(key)
-        if key is None:
-            raise ValueError("invalid key")
+        name = _normalize_header_name(name)
+        if name is None:
+            raise ValueError("invalid header name")
         match = None
         for i in range(0, len(self._headers), 2):
-            if self._headers[i] == key:
+            if self._headers[i] == name:
                 if match is None:
                     match = self._headers[i+1]
                 else:
@@ -802,12 +808,12 @@ class HTTPResponse:
     # (59/61/34 are ";", "=" and '"'.)
     def rawcookie(self, name, default=None):
         len_name = len(name)
-        for key, val in self.rawheaders():
+        for key, value in self.rawheaders():
             if key != _SET_COOKIE:
                 continue
-            if val.startswith(name):
-                len_val = len(val)
-                if len_val == len_name or val[len_name] == 59:
+            if value.startswith(name):
+                len_value = len(value)
+                if len_value == len_name or value[len_name] == 59:
                     return _BLANK
                 if val[len_name] == 61:
                     start = len_name + 1
@@ -944,23 +950,23 @@ class HTTPConnection:
             else:
                 pairs = list(headers)
             headers = []
-            for key, value in pairs:
-                key = _normalize_key(key, lower=False)
-                if key is None:
-                    raise ValueError("invalid key")
-                headers.append((key, value))
-                len_key = len(key)
-                if len_key == 4:
-                    if _containslc(key, 4, b"host", 4):
+            for name, value in pairs:
+                name = _normalize_header_name(name, lower=False)
+                if name is None:
+                    raise ValueError("invalid header name")
+                headers.append((name, value))
+                len_name = len(name)
+                if len_name == 4:
+                    if _containslc(name, 4, b"host", 4):
                         skip_host = True
-                elif len_key == 14:
-                    if _containslc(key, 14, b"content-length", 14):
+                elif len_name == 14:
+                    if _containslc(name, 14, b"content-length", 14):
                         have_content_length = True
-                elif len_key == 15:
-                    if _containslc(key, 15, b"accept-encoding", 15):
+                elif len_name == 15:
+                    if _containslc(name, 15, b"accept-encoding", 15):
                         skip_accept_encoding = True
-                elif len_key == 17:
-                    if _containslc(key, 17, b"transfer-encoding", 17):
+                elif len_name == 17:
+                    if _containslc(name, 17, b"transfer-encoding", 17):
                         have_transfer_encoding = True
             del pairs
         else:
@@ -986,8 +992,8 @@ class HTTPConnection:
         if encode_chunked and not have_transfer_encoding:
             headers.append((b"Transfer-Encoding", b"chunked"))
 
-        for key, value in headers:
-            self.putheader(key, value)
+        for name, value in headers:
+            self.putheader(name, value)
 
         self.endheaders(body, encode_chunked=encode_chunked)
 
@@ -1002,11 +1008,11 @@ class HTTPConnection:
         self._can_reconnect = self.auto_open
         self._merged = 0
 
-        method = _encode_and_validate(method, 1)
+        method = _encode_and_validate(method, 3)
         if not isinstance(method, bytes):
             method = bytes(method)
 
-        url = _encode_and_validate(url, 1)
+        url = _encode_and_validate(url, 3)
         if not isinstance(url, bytes):
             url = bytes(url)
         if not url:
@@ -1024,7 +1030,7 @@ class HTTPConnection:
     def putheader(self, name, *values):
         if self._resp is not None or self.method is None:
             raise CannotSendHeader()
-        name = _encode_and_validate(name, 3)
+        name = _encode_and_validate(name, 7)
         if not values:
             self._putheaderparts(False, name, b":\r\n")
             return
@@ -1038,7 +1044,7 @@ class HTTPConnection:
     def putcookie(self, name, value):
         if self._resp is not None or self.method is None:
             raise CannotSendHeader()
-        name = _encode_and_validate(name, 1)
+        name = _encode_and_validate(name, 3)
         value = _encode_and_validate(value, 0)
         if not value or value.find(b'"') >= 0:
             self._putheaderparts(False, b"Cookie: ", name, b"=", value, _CRLF)
