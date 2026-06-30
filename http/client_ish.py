@@ -815,17 +815,17 @@ class HTTPResponse:
                 len_value = len(value)
                 if len_value == len_name or value[len_name] == 59:
                     return _BLANK
-                if val[len_name] == 61:
+                if value[len_name] == 61:
                     start = len_name + 1
-                    end = val.find(b";", start)
+                    end = value.find(b";", start)
                     if end == -1:
-                        end = len_val
-                    while start < end and val[start] <= 32: start += 1
-                    while end > start and val[end - 1] <= 32: end -= 1
-                    if end - start >= 2 and val[start] == 34 and val[end - 1] == 34:
+                        end = len_value
+                    while start < end and value[start] <= 32: start += 1
+                    while end > start and value[end - 1] <= 32: end -= 1
+                    if end - start >= 2 and value[start] == 34 and value[end - 1] == 34:
                         start += 1
                         end -= 1
-                    return val[start:end]
+                    return value[start:end]
         return default
 
 # http.client.HTTPConnection work-alike with small-write coalescing and
