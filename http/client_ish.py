@@ -29,6 +29,7 @@ _LF = b"\n"
 # Exception hierarchy mirroring CPython's http.client.
 class HTTPException(Exception): pass
 class NotConnected(HTTPException): pass
+class TimeoutError(NotConnected): pass
 class InvalidURL(HTTPException): pass
 class BadStatusLine(HTTPException): pass
 class RemoteDisconnected(BadStatusLine): pass
@@ -138,7 +139,7 @@ def _latin1_to_utf8(buf: ptr8, len_buf: int, out: ptr8) -> int:
 def decode_latin1(buf, default=_MISSING):
     if buf is None:
         if default is _MISSING:
-            raise UnicodeError
+            raise UnicodeError()
         return default
     len_buf = len(buf)
     if len_buf == 0:
@@ -151,7 +152,7 @@ def decode_latin1(buf, default=_MISSING):
             utf8len = -1
     if utf8len < 0:
         if default is _MISSING:
-            raise UnicodeError
+            raise UnicodeError()
         return default
     utf8out = bytearray(utf8len)
     _latin1_to_utf8(buf, len_buf, utf8out)
@@ -281,10 +282,10 @@ def create_connection(address, timeout=None):
             err = e
             try: sock.close()
             except (AttributeError, OSError): pass
-        except Exception as e:
+        except Exception:
             try: sock.close()
             except (AttributeError, OSError): pass
-            raise e
+            raise
     if err is not None:
         raise err
     raise OSError(errno.EHOSTUNREACH)
@@ -635,13 +636,20 @@ class HTTPResponse:
 
         # read-to-EOF: only read() on an unframed body reaches this.
         if unbounded and self._length is None and not self._chunked:
-            data = self._read_wrapper(False, sock.read)
-            if not data:
-                self.close()
-                return _BLANK
-            self._bytes_read += len(data)
-            self.close()
-            return data
+            out = _BLANK
+            while True:
+                data = self._read_wrapper(False, sock.read, self.blocksize)
+                if not data:
+                    self.close()
+                    return out
+                self._bytes_read += len(data)
+                if out is _BLANK:
+                    out = data
+                elif type(out) is bytes:
+                    out = bytearray(out)
+                    out.extend(data)
+                else:
+                    out.extend(data)
 
         if self._length is not None:
             remaining = self._length - self._bytes_read
@@ -752,7 +760,7 @@ class HTTPResponse:
             else:
                 n = sock.readinto(buf, amt)
         except OSError as e:
-            if e.errno == errno.EAGAIN or e.errno == errno.EINTR:
+            if e.errno == errno.EINTR or e.errno == errno.EAGAIN or e.errno == errno.ETIMEDOUT:
                 return None
             sock, self._sock = self._sock, None
             self._release_conn(True)
@@ -785,8 +793,10 @@ class HTTPResponse:
                 err = e.errno
                 if err == errno.EINTR:
                     continue
-                if resumable and (err == errno.ETIMEDOUT or err == errno.EAGAIN):
+                if err == errno.EAGAIN and resumable:
                     raise
+                if err == errno.ETIMEDOUT and resumable:
+                    raise TimeoutError()
                 sock, self._sock = self._sock, None
                 self._release_conn(True)
                 if sock is not None:
@@ -848,18 +858,14 @@ class HTTPConnection:
     def __init__(self, host, port=None, timeout=_DEFAULT_TIMEOUT, network=None):
         self.timeout = timeout
         self._network = network
-
         self._sock = None
         self._can_reconnect = False
         self._resp = None
-
         self.method = None
         self.url = None
-
         self._merge_buffer = None
         self._merge_buffmv = None
         self._merged = 0
-
         self._set_host(host, port)
 
     def __enter__(self):
@@ -877,7 +883,6 @@ class HTTPConnection:
 
     # Drop buffers, any pending response, and the socket.
     def close(self):
-        self._can_reconnect = False
         self.method = None
         self.url = None
         self._merged = 0
@@ -891,20 +896,21 @@ class HTTPConnection:
         if sock is not None:
             try: sock.close()
             except OSError: pass
+        self._can_reconnect = False
 
     # Hand over the underlying socket (e.g. after a 101 upgrade) and reset.
     def detach(self):
-        if self._resp is not None:
-            self._resp._sock = None
-            self._resp._conn = None
-            self._resp = None
-        sock, self._sock = self._sock, None
-        self._can_reconnect = False
         self.method = None
         self.url = None
         self._merged = 0
         self._merge_buffmv = None
         self._merge_buffer = None
+        resp, self._resp = self._resp, None
+        if resp is not None:
+            resp._sock = None
+            resp._conn = None
+        sock, self._sock = self._sock, None
+        self._can_reconnect = False
         return sock
 
     # Record host/port; IPv6 ([...]) and IPv4 literals skip DNS and TLS SNI.
@@ -959,7 +965,12 @@ class HTTPConnection:
 
     def connect(self):
         self.require_network()
-        self._sock = create_connection((self._hostaddr, self.port), self.timeout)
+        try:
+            self._sock = create_connection((self._hostaddr, self.port), self.timeout)
+        except OSError as e:
+            if e.errno == errno.ETIMEDOUT:
+                raise TimeoutError()
+            raise
 
     # Convenience wrapper: send request line, headers and body in one call.
     def request(self, method, url, body=None, headers=None, *, encode_chunked=None):
@@ -1038,8 +1049,6 @@ class HTTPConnection:
             raise ResponseNotReady()
         resp = None
         try:
-            self._merge_buffmv = None
-            self._merge_buffer = None
             resp = self.response_class(self._sock, self.method, self.url)
             resp.begin(**kwargs)
             if resp._will_close:
@@ -1069,10 +1078,9 @@ class HTTPConnection:
         if (self.method is not None and self._sock is not None
                 and (self._resp is None or not self._resp.closed)):
             raise CannotSendRequest()
-        self._resp = None
-
-        self._can_reconnect = self.auto_open
         self._merged = 0
+        self._resp = None
+        self._can_reconnect = self.auto_open
 
         method = _encode_and_validate(method, 3)
         if not isinstance(method, bytes):
@@ -1201,8 +1209,8 @@ class HTTPConnection:
                 self._merge_buffer[:len_part] = part
                 self._merged = len_part
         if flush and self._merged:
-            self._send_raw(self._merge_buffmv[:self._merged])
-            self._merged = 0
+            merged, self._merged = self._merged, 0
+            self._send_raw(self._merge_buffmv[:merged])
 
     # Write to the socket, reconnecting once if an idle keep-alive
     # connection turns out to have been dropped by the server.
@@ -1212,7 +1220,22 @@ class HTTPConnection:
         if _DEBUG:
             print("send:", len(data), "bytes")
 
-        self.require_network()
+        try:
+            self.require_network()
+        except NotConnected:
+            if self._can_reconnect:
+                self.method = None
+                self.url = None
+		        resp, self._resp = self._resp, None
+		        if resp is not None:
+		            resp._sock = None
+		            resp._conn = None
+                sock, self._sock = self._sock, None
+                if sock is not None:
+                    try: sock.close()
+                    except OSError: pass
+                self._can_reconnect = False
+            raise
 
         if self._can_reconnect:
             if self._sock is not None:
@@ -1221,24 +1244,40 @@ class HTTPConnection:
                     self._can_reconnect = False
                     return
                 except OSError:
-                    try: self._sock.close()
-                    except OSError: pass
-                self._sock = None
+                    sock, self._sock = self._sock, None
+                    if sock is not None:
+                        try: sock.close()
+                        except OSError: pass
+
             try:
                 self.connect()
-                self._sock.sendall(data)
+            except TimeoutError:
+                self._sock = None
+                self._can_reconnect = False
+                raise
             except OSError as e:
-                if self._sock is not None:
-                    try: self._sock.close()
+                sock, self._sock = self._sock, None
+                if sock is not None:
+                    try: sock.close()
                     except OSError: pass
-                    finally: self._sock = None
+                self._can_reconnect = False
                 raise NotConnected(str(e))
-            self._can_reconnect = False
-            return
 
         if self._sock is None:
             raise NotConnected("socket missing")
-        self._sock.sendall(data)
+
+        try:
+            self._sock.sendall(data)
+        except OSError as e:
+            sock, self._sock = self._sock, None
+            if sock is not None:
+                try: sock.close()
+                except OSError: pass
+            self._can_reconnect = False
+            if e.errno == errno.ETIMEDOUT:
+                raise TimeoutError()
+            raise NotConnected(str(e))
+
         self._can_reconnect = False
 
     # Send one chunked-encoding chunk; None sends the zero-length terminator.
@@ -1295,7 +1334,7 @@ else:
                     try: raw.close()
                     except OSError: pass
                 if isinstance(e, OSError):
-                    raise e
+                    raise
                 elif isinstance(e, MemoryError):
                     raise OSError(errno.ENOMEM)
                 else:
