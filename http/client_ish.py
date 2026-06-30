@@ -295,20 +295,23 @@ class HTTPResponse:
 
     def __init__(self, sock, method=None, url=None):
         self._sock = sock
-        self._have_recv_into = hasattr(sock, "recv_into")
+        self._conn = None
+        self._headers = None
+
         self.method = method
         self.url = url
         self.version = None
         self.status = None
         self._reason = None
+
         self._chunked = False
         self._chunk_left = None
         self._length = None
         self._will_close = True
         self._bytes_read = 0
+
         self._blocking = True
-        self._headers = None
-        self._conn = None
+        self._have_recv_into = hasattr(sock, "recv_into")
 
     def __enter__(self):
         return self
@@ -836,24 +839,28 @@ class HTTPResponse:
 # http.client.HTTPConnection work-alike with small-write coalescing and
 # transparent reconnection of idle keep-alive sockets.
 class HTTPConnection:
-    response_class = HTTPResponse
     default_port = HTTP_PORT
+    response_class = HTTPResponse
     auto_open = True
     blocksize = 2048
     _merge_buffer_size = 1024
 
     def __init__(self, host, port=None, timeout=_DEFAULT_TIMEOUT, network=None):
         self.timeout = timeout
+        self._network = network
+
         self._sock = None
+        self._can_reconnect = False
+        self._resp = None
+
+        self.method = None
+        self.url = None
+
         self._merge_buffer = None
         self._merge_buffmv = None
         self._merged = 0
-        self.method = None
-        self.url = None
+
         self._set_host(host, port)
-        self._network = network
-        self._can_reconnect = False
-        self._resp = None
 
     def __enter__(self):
         return self
