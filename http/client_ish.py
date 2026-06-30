@@ -206,11 +206,8 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
     if and_cookies is None:
         and_cookies = all_headers
     headers = []
-    _append = headers.append
-    _readline = sock.readline
-    _get = _keep_response_headers.get
     while True:
-        line = _readline()
+        line = sock.readline()
 
         if line == _CRLF or line == _LF:
             return headers
@@ -230,7 +227,7 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
         while end > 0 and line[end - 1] <= 32: end -= 1
 
         key = None
-        cands = _get(end)
+        cands = _keep_response_headers.get(end)
         if cands is not None:
             for cand in cands:
                 if _containslc(line, end, cand, end):
@@ -251,8 +248,8 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
         start, end = sep + 1, len(line)
         while start < end and line[start] <= 32: start += 1
         while end > start and line[end - 1] <= 32: end -= 1
-        _append(key)
-        _append(line[start:end])
+        headers.append(key)
+        headers.append(line[start:end])
 
 # socket.create_connection() work-alike: try each resolved address in turn.
 def create_connection(address, timeout=None):
@@ -364,15 +361,14 @@ class HTTPResponse:
         transfer_encoding = None
         connection = None
         content_length = None
-        _headers = self._headers
-        for i in range(0, len(_headers), 2):
-            k = _headers[i]
+        for i in range(0, len(self._headers), 2):
+            k = self._headers[i]
             if k == b"transfer-encoding":
-                transfer_encoding = _headers[i+1]
+                transfer_encoding = self._headers[i+1]
             elif k == b"connection":
-                connection = _headers[i+1]
+                connection = self._headers[i+1]
             elif k == b"content-length":
-                content_length = _headers[i+1]
+                content_length = self._headers[i+1]
 
         self._chunked = bool(transfer_encoding) and bool(_containslc(transfer_encoding, len(transfer_encoding), b"chunked", 7))
         self._chunk_left = None
@@ -756,9 +752,8 @@ class HTTPResponse:
     def iter_content_into(self, bmv):
         if not isinstance(bmv, memoryview):
             bmv = memoryview(bmv)
-        _readinto = self.readinto
         while True:
-            n = _readinto(bmv)
+            n = self.readinto(bmv)
             if n == 0:
                 return
             yield n
@@ -1053,35 +1048,29 @@ class HTTPConnection:
     # Append parts to the merge buffer, flushing to the socket as it fills
     # (or unconditionally when flush=True).
     def _putheaderparts(self, flush, *parts):
-        _send_raw = self._send_raw
-        _buffer_size = self._merge_buffer_size
-        if self._merge_buffer is None and _buffer_size:
-            self._merge_buffer = bytearray(_buffer_size)
+        if self._merge_buffer is None and self._merge_buffer_size:
+            self._merge_buffer = bytearray(self._merge_buffer_size)
             self._merge_buffmv = memoryview(self._merge_buffer)
-        _buffer = self._merge_buffer
-        _buffmv = self._merge_buffmv
-        _merged = self._merged
         for part in parts:
-            if _buffmv is None:
-                _send_raw(part)
+            if self._merge_buffmv is None:
+                self._send_raw(part)
                 continue
             len_part = len(part)
-            if len_part >= _buffer_size:
-                if _merged:
-                    _send_raw(_buffmv[:_merged])
-                    _merged = 0
-                _send_raw(part)
-            elif _merged + len_part <= _buffer_size:
-                _buffer[_merged:_merged+len_part] = part
-                _merged += len_part
+            if len_part >= self._merge_buffer_size:
+                if self._merged:
+                    self._send_raw(self._merge_buffmv[:self._merged])
+                    self._merged = 0
+                self._send_raw(part)
+            elif self._merged + len_part <= self._merge_buffer_size:
+                self._merge_buffer[self._merged:self._merged+len_part] = part
+                self._merged += len_part
             else:
-                _send_raw(_buffmv[:_merged])
-                _buffer[:len_part] = part
-                _merged = len_part
-        if flush and _merged:
-            _send_raw(_buffmv[:_merged])
-            _merged = 0
-        self._merged = _merged
+                self._send_raw(self._merge_buffmv[:self._merged])
+                self._merge_buffer[:len_part] = part
+                self._merged = len_part
+        if flush and self._merged:
+            self._send_raw(self._merge_buffmv[:self._merged])
+            self._merged = 0
 
     # Terminate the header block with a blank line and optionally send the body.
     def endheaders(self, message_body=None, *, encode_chunked=False):
