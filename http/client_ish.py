@@ -497,6 +497,9 @@ class HTTPResponse:
         for i in range(0, len(self._headers), 2):
             yield self._headers[i], self._headers[i+1]
 
+    def getheader(self, name, default=None):
+        return decode_latin1(self.rawheader(name, None), default)
+
     def rawheader(self, name, default=None):
         if self._headers is None:
             raise ResponseNotReady()
@@ -513,10 +516,21 @@ class HTTPResponse:
                     match = match + b", " + self._headers[i+1]
         return default if match is None else match
 
-    def getheader(self, name, default=None):
-        return decode_latin1(self.rawheader(name, None), default)
+    def getcookie(self, name, default=None):
+        rawvalue = self.getrawcookie(name, None)
+        if rawvalue is None:
+            return default
+        start, end = 0, rawvalue.find(b";")
+        if end == -1:
+            end = len(rawvalue)
+        while start < end and rawvalue[start] <= 32: start += 1
+        while end > start and rawvalue[end - 1] <= 32: end -= 1
+        if end - start >= 2 and rawvalue[start] == 34 and rawvalue[end - 1] == 34:
+            start += 1
+            end -= 1
+        return decode_latin1(rawvalue[start:end], default)
 
-    def rawcookie(self, name, default=None):
+    def getrawcookie(self, name, default=None):
         if isinstance(name, str):
             name = name.encode()
         len_name = len(name)
@@ -530,20 +544,6 @@ class HTTPResponse:
                 if val[len_name] == 61:  # '='
                     return val[len_name+1:]
         return default
-
-    def getcookie(self, name, default=None):
-        rawvalue = self.rawcookie(name, None)
-        if rawvalue is None:
-            return default
-        start, end = 0, rawvalue.find(b";")
-        if end == -1:
-            end = len(rawvalue)
-        while start < end and rawvalue[start] <= 32: start += 1
-        while end > start and rawvalue[end - 1] <= 32: end -= 1
-        if end - start >= 2 and rawvalue[start] == 34 and rawvalue[end - 1] == 34:
-            start += 1
-            end -= 1
-        return decode_latin1(rawvalue[start:end], default)
 
     def _read_wrapper(self, resumable, func, *args):
         while True:
@@ -1186,17 +1186,24 @@ class HTTPConnection:
                     self._fail_request()
                     raise
 
-
     def putcookie(self, name, value):
         if self._state != _CS_HEADERS:
             raise CannotSendHeader()
+        name = _encode_and_validate(name, 47)
+        value = _encode_and_validate(value, 0)
+        if value.find(b";") >= 0:
+            raise ValueError("bad cookie value")
+        self._putheaderparts(False, b"Cookie: ", name, b"=", value, _CRLF)
+
+    def putrawcookie(self, value):
+        if self._state != _CS_HEADERS:
+            raise CannotSendHeader()
         try:
-            name = _encode_and_validate(name, 47)
             value = _encode_and_validate(value, 0)
         except Exception:
             self._fail_request()
             raise
-        self._putheaderparts(False, b"Cookie: ", name, b"=", value, _CRLF)
+        self._putheaderparts(False, b"Cookie: ", value, _CRLF)
 
     def endheaders(self, message_body=None, *, encode_chunked=False):
         if self._state != _CS_HEADERS:
