@@ -14,6 +14,12 @@ _METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
 # gc.collect() after a response when free memory is below this many bytes; 0 disables.
 _GC_THRESHOLD = const(32768)
 
+_CS_IDLE     = const(0)  # no request in progress; socket may be closed or idle
+_CS_HEADERS  = const(1)  # request line sent; request headers are still open
+_CS_BODY     = const(2)  # headers ended; body may be sent; response may be read
+_CS_CHUNKING = const(3)  # manual chunked body started; final zero chunk not sent
+_CS_RESPONSE = const(4)  # response is active and owns the reusable connection
+
 _MISSING = object()
 _SET_COOKIE = b"set-cookie"
 _BLANK = b""
@@ -367,6 +373,7 @@ class HTTPResponse:
             conn._resp = None
             conn.method = None
             conn.url = None
+            conn._state = _CS_IDLE
             if discard:
                 conn._sock = None
 
@@ -869,6 +876,7 @@ class HTTPConnection:
         self._merge_buffer = None
         self._merge_buffmv = None
         self._merged = 0
+        self._state = _CS_IDLE
 
     def __enter__(self):
         return self
@@ -879,6 +887,7 @@ class HTTPConnection:
 
     # Clear all per-request state and return the live socket for the caller to close or hand off.
     def _reset(self):
+        self._state = _CS_IDLE
         self.method = None
         self.url = None
         self._merged = 0
@@ -906,6 +915,10 @@ class HTTPConnection:
 
     # Hand over the underlying socket (e.g. after a 101 upgrade) without closing it.
     def detach(self):
+        if self._state == _CS_HEADERS:
+            raise CannotSendHeader()
+        if self._state == _CS_BODY or self._state == _CS_CHUNKING:
+            raise ResponseNotReady()
         return self._reset()
 
     # Parse host/port. IPv4 and bracketed/IPv6 literals set _hostname=None to skip DNS and TLS SNI.
@@ -973,6 +986,9 @@ class HTTPConnection:
             raise
 
     def request(self, method, url, body=None, headers=None, *, encode_chunked=None):
+        if self._state != _CS_IDLE:
+            raise CannotSendRequest()
+
         skip_host = False
         have_content_length = False
         skip_accept_encoding = False
@@ -1058,8 +1074,8 @@ class HTTPConnection:
 
     # Read the response. The socket is kept for reuse unless framing forces closing it.
     def getresponse(self, **kwargs):
-        if (self._resp is not None
-            or self.method is None
+        if (self._state != _CS_BODY
+            or self._resp is not None
             or self._sock is None
             or self._merged):
             raise ResponseNotReady()
@@ -1069,7 +1085,11 @@ class HTTPConnection:
             resp.begin(**kwargs)
             if resp._will_close:
                 self._sock = None
+                self.method = None
+                self.url = None
+                self._state = _CS_IDLE
             else:
+                self._state = _CS_RESPONSE
                 self._resp = resp
                 resp._conn = self
                 if resp._length == 0 and not resp._chunked and resp.status != 101:
@@ -1089,7 +1109,7 @@ class HTTPConnection:
 
     # Auto-opens the socket if needed
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
-        if self.method is not None and self._sock is not None:
+        if self._state != _CS_IDLE:
             raise CannotSendRequest()
 
         method = _encode_and_validate(method, 3)
@@ -1113,6 +1133,7 @@ class HTTPConnection:
         self._resp = None
         self.method = method
         self.url = url
+        self._state = _CS_HEADERS
 
         self._putheaderparts(False, method, b" ", url, b" HTTP/1.1\r\n")
 
@@ -1122,9 +1143,8 @@ class HTTPConnection:
             self._putheaderparts(False, b"Accept-Encoding: identity\r\n")
 
     def putheader(self, name, *values):
-        if self._resp is not None or self.method is None:
+        if self._state != _CS_HEADERS:
             raise CannotSendHeader()
-
         try:
             name = _encode_and_validate(name, 19)
             if not values:
@@ -1143,7 +1163,7 @@ class HTTPConnection:
             self._putheaderparts(False, name, b": ", values, _CRLF)
 
     def putcookie(self, name, value):
-        if self._resp is not None or self.method is None:
+        if self._state != _CS_HEADERS:
             raise CannotSendHeader()
         try:
             name = _encode_and_validate(name, 47)
@@ -1162,14 +1182,17 @@ class HTTPConnection:
             self._putheaderparts(False, b"Cookie: ", name, b"=", value, _CRLF)
 
     def endheaders(self, message_body=None, *, encode_chunked=False):
-        if self._resp is not None or self.method is None:
+        if self._state != _CS_HEADERS:
             raise CannotSendHeader()
         self._putheaderparts(True, _CRLF)
+        self._state = _CS_BODY
         if message_body is not None or encode_chunked:
             self.send(message_body, encode_chunked=encode_chunked)
 
     def send(self, data, *, encode_chunked=False, final_chunk=True):
-        if self._resp is not None or self.method is None:
+        if self._state != _CS_BODY and self._state != _CS_CHUNKING:
+            raise CannotSendRequest()
+        if self._state == _CS_CHUNKING and not encode_chunked:
             raise CannotSendRequest()
         try:
             send = self._send_chunk if encode_chunked else self._send_raw
@@ -1219,6 +1242,10 @@ class HTTPConnection:
                 if _DEBUG:
                     print("send: terminator")
                 self._send_chunk(None)
+
+            if encode_chunked:
+                self._state = _CS_BODY if final_chunk else _CS_CHUNKING
+
         except Exception:
             self._fail_request()
             raise
@@ -1246,9 +1273,10 @@ class HTTPConnection:
                     self._send_raw(self._merge_buffmv[:self._merged])
                     self._merge_buffer[:len_part] = part
                     self._merged = len_part
-            if flush and self._merged:
-                self._send_raw(self._merge_buffmv[:self._merged])
-                self._merged = 0
+            if flush:
+                if self._merged:
+                    self._send_raw(self._merge_buffmv[:self._merged])
+                    self._merged = 0
                 self._merge_buffmv = None
                 self._merge_buffer = None
         except Exception:
