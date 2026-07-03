@@ -8,13 +8,9 @@ import micropython, socket, errno, gc
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
 
-# Compile-time switch: const(0) lets the compiler strip every 'if _DEBUG:' block from the bytecode.
 _DEBUG = const(0)
-
-_METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
-
 _DEFAULT_TIMEOUT = const(10)
-
+_METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
 # gc.collect() after a response when free memory is below this many bytes; 0 disables.
 _GC_THRESHOLD = const(32768)
 
@@ -26,30 +22,31 @@ _LF = b"\n"
 
 # errno sets, resolved at import; a name missing on a minimal port becomes an unmatchable -1.
 _WOULDBLOCK_ERRS = (
-    getattr(errno, "EAGAIN", -1),
+    errno.EAGAIN,
+    errno.EALREADY,
+    errno.EINPROGRESS,
+    errno.ETIMEDOUT,
     getattr(errno, "EWOULDBLOCK", -1),
-    getattr(errno, "ETIMEDOUT", -1),
-    getattr(errno, "EINPROGRESS", -1),
-    getattr(errno, "EALREADY", -1),
 )
 
 _CONNECTION_ERRS = (
-    getattr(errno, "ECONNRESET", -1),
-    getattr(errno, "ECONNABORTED", -1),
-    getattr(errno, "ENOTCONN", -1),
-    getattr(errno, "EPIPE", -1),
-    getattr(errno, "ESHUTDOWN", -1),
-    getattr(errno, "EHOSTUNREACH", -1),
-    getattr(errno, "ENETUNREACH", -1),
+    errno.EBADF,
+    errno.ECONNABORTED,
+    errno.ECONNREFUSED,
+    errno.ECONNRESET,
+    errno.EHOSTUNREACH,
+    errno.ENOBUFS,
+    errno.ENOTCONN,
+    getattr(errno, "EADDRNOTAVAIL", -1),
+    getattr(errno, "EHOSTDOWN", -1),
     getattr(errno, "ENETDOWN", -1),
     getattr(errno, "ENETRESET", -1),
-    getattr(errno, "ECONNREFUSED", -1),
-    getattr(errno, "EADDRNOTAVAIL", -1),
-    getattr(errno, "ENOBUFS", -1),
-    getattr(errno, "EBADF", -1),
+    getattr(errno, "ENETUNREACH", -1),
+    getattr(errno, "EPIPE", -1),
+    getattr(errno, "ESHUTDOWN", -1),
 )
 
-# Exception hierarchy mirroring CPython's http.client. TimeoutError is also an OSError so
+# Exception hierarchy mirroring CPython's http.client. TimeoutError also subclasses OSError.
 class HTTPException(Exception): pass
 class NotConnected(HTTPException): pass
 class TimeoutError(NotConnected, OSError): pass
@@ -72,13 +69,16 @@ class IncompleteRead(HTTPException):
         else:
             self.expected = None
 
-# Viper: 1 if buf[start:end] passes the char class selected by flags (see call sites for bits).
+# Viper: 1 if buf[start:end] passes the char class selected by flags.
 @micropython.viper
 def _validate(buf:ptr8, start:int, end:int, flags:int) -> int:
-    invalid_space = bool(flags & 1)
-    invalid_tab   = bool(flags & 2)
-    invalid_colon = bool(flags & 4)
-    check_ip4addr = bool(flags & 256)
+    invalid_space  = bool(flags & 1)
+    invalid_tab    = bool(flags & 2)
+    invalid_cookie = bool(flags & 4) # reject '"' ';' '\\'
+    invalid_comma  = bool(flags & 8)
+    invalid_colon  = bool(flags & 16)
+    invalid_equals = bool(flags & 32)
+    check_ip4addr  = bool(flags & 256)
     i = start
     while i < end:
         b = buf[i]
@@ -93,8 +93,17 @@ def _validate(buf:ptr8, start:int, end:int, flags:int) -> int:
         elif b == 32:
             if invalid_space:
                 return 0
+        elif b == 34 or b == 59 or b == 92:
+            if invalid_cookie:
+                return 0
+        elif b == 44:
+            if invalid_comma:
+                return 0
         elif b == 58:
             if invalid_colon:
+                return 0
+        elif b == 61:
+            if invalid_equals:
                 return 0
         elif b == 127:
             return 0
@@ -107,7 +116,7 @@ def _encode_and_validate(x, flags):
     elif not isinstance(x, (bytes, bytearray, memoryview)):
         x = str(x).encode()
     if not _validate(x, 0, len(x), flags):
-        raise ValueError("invalid control character")
+        raise ValueError("invalid character")
     return x
 
 @micropython.viper
@@ -134,7 +143,7 @@ def _normalize_header_name(buf, start=0, end=None, lower=True):
         return None
     if end is None:
         end = len(buf)
-    if not _validate(buf, start, end, 7):
+    if not _validate(buf, start, end, 19):
         return None
     if not lower or _lower_case(buf, start, end, 0):
         if start == 0 and end == len(buf):
@@ -203,7 +212,7 @@ _keep_response_headers = {
 def keep_response_header(name):
     name = _normalize_header_name(name)
     if name is None:
-        raise ValueError("invalid header name")
+        raise ValueError("bad header name")
     if not isinstance(name, bytes):
         name = bytes(name)
     len_name = len(name)
@@ -352,9 +361,6 @@ class HTTPResponse:
         self.close()
         return False
 
-    def __del__(self):
-        self.close()
-
     def _release_conn(self, discard):
         conn, self._conn = self._conn, None
         if conn is not None:
@@ -374,7 +380,7 @@ class HTTPResponse:
 
     # Keep the socket (for reuse) only if the body was fully consumed and framing allows it.
     def close(self):
-        discard = (self._will_close or self._chunked
+        discard = (self._will_close or self._chunked or self.status == 101
                 or (self._length is not None and self._bytes_read < self._length))
         self._teardown(discard)
 
@@ -401,7 +407,6 @@ class HTTPResponse:
         return decode_latin1(self._reason.strip(), "")
 
     def fileno(self):
-        # Connect before any request state exists, so a failure here leaves nothing to clean up.
         if self._sock is None:
             return None
         return self._sock.fileno()
@@ -479,7 +484,8 @@ class HTTPResponse:
     def rawheader(self, name, default=None):
         if self._headers is None:
             raise ResponseNotReady()
-        name = _encode_and_validate(name, 7)
+        if isinstance(name, str):
+            name = name.encode()
         len_name = len(name)
         match = None
         for i in range(0, len(self._headers), 2):
@@ -528,11 +534,7 @@ class HTTPResponse:
                 err = e.errno
                 if err == errno.EINTR:
                     continue
-                if resumable and err in _WOULDBLOCK_ERRS:
-
-                    # Resumable read: let the caller's loop resume; only convert timeout to TimeoutError.
-                    if err == errno.ETIMEDOUT:
-                        raise TimeoutError()
+                if resumable and err in _WOULDBLOCK_ERRS and err != errno.ETIMEDOUT:
                     raise
                 self._teardown(True)
                 if err == errno.ETIMEDOUT:
@@ -875,16 +877,6 @@ class HTTPConnection:
         self.close()
         return False
 
-    def __del__(self):
-        self._kill_socket()
-
-    # Close the socket only. Does NOT touch request state (callers rely on that).
-    def _kill_socket(self):
-        sock, self._sock = self._sock, None
-        if sock is not None:
-            try: sock.close()
-            except OSError: pass
-
     # Clear all per-request state and return the live socket for the caller to close or hand off.
     def _reset(self):
         self.method = None
@@ -968,6 +960,10 @@ class HTTPConnection:
             raise NotConnected("network unavailable")
 
     def connect(self):
+        self.close()
+        self._open_socket()
+
+    def _open_socket(self):
         self.require_network()
         try:
             self._sock = create_connection((self._hostaddr, self.port), self.timeout)
@@ -982,12 +978,13 @@ class HTTPConnection:
         skip_accept_encoding = False
         have_transfer_encoding = False
 
-        if self._sock is None:
-            self.connect()
-
         method = _encode_and_validate(method, 3)
+        if not method:
+            raise ValueError("bad method")
         if not isinstance(method, bytes):
             method = bytes(method)
+        if not method.isupper():
+            method = method.upper()
 
         pairs = None
         if headers is not None:
@@ -1002,7 +999,7 @@ class HTTPConnection:
             for key, val in pairs:
                 key = _normalize_header_name(key, lower=False)
                 if key is None:
-                    raise ValueError("invalid header name")
+                    raise ValueError("bad header name")
                 if not isinstance(key, bytes):
                     key = bytes(key)
                 val = _encode_and_validate(val, 0)
@@ -1088,24 +1085,29 @@ class HTTPConnection:
 
             # Header parsing fragments the heap; collect while the large read buffers are still freeable.
             if _GC_THRESHOLD and gc.mem_free() < _GC_THRESHOLD:
-                # The TLS handshake needs large contiguous allocations; collect first.
                 gc.collect()
 
-    # Requires a live socket: call connect() first (unlike CPython, there is no auto-open).
+    # Auto-opens the socket if needed
     def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
-        if (self.method is not None and self._sock is not None
-                and (self._resp is None or not self._resp.closed)):
+        if self.method is not None and self._sock is not None:
             raise CannotSendRequest()
 
         method = _encode_and_validate(method, 3)
+        if not method:
+            raise ValueError("bad method")
         if not isinstance(method, bytes):
             method = bytes(method)
+        if not method.isupper():
+            method = method.upper()
 
         url = _encode_and_validate(url, 3)
         if not isinstance(url, bytes):
             url = bytes(url)
         if not url:
             url = b"/"
+
+        if self._sock is None:
+            self._open_socket()
 
         self._merged = 0
         self._resp = None
@@ -1124,7 +1126,7 @@ class HTTPConnection:
             raise CannotSendHeader()
 
         try:
-            name = _encode_and_validate(name, 7)
+            name = _encode_and_validate(name, 19)
             if not values:
                 values = None
             elif len(values) == 1:
@@ -1143,18 +1145,21 @@ class HTTPConnection:
     def putcookie(self, name, value):
         if self._resp is not None or self.method is None:
             raise CannotSendHeader()
-
         try:
-            name = _encode_and_validate(name, 3)
-            value = _encode_and_validate(value, 0)
+            name = _encode_and_validate(name, 47)
+            try:
+                value = _encode_and_validate(value, 15)
+                quote = False
+            except ValueError:
+                value = _encode_and_validate(value, 6)
+                quote = True
         except Exception:
             self._fail_request()
             raise
-
-        if not value or value.find(b'"') >= 0:
-            self._putheaderparts(False, b"Cookie: ", name, b"=", value, _CRLF)
-        else:
+        if quote:
             self._putheaderparts(False, b"Cookie: ", name, b'="', value, b'"', _CRLF)
+        else:
+            self._putheaderparts(False, b"Cookie: ", name, b"=", value, _CRLF)
 
     def endheaders(self, message_body=None, *, encode_chunked=False):
         if self._resp is not None or self.method is None:
@@ -1164,7 +1169,7 @@ class HTTPConnection:
             self.send(message_body, encode_chunked=encode_chunked)
 
     def send(self, data, *, encode_chunked=False, final_chunk=True):
-        if self._resp is not None:
+        if self._resp is not None or self.method is None:
             raise CannotSendRequest()
         try:
             send = self._send_chunk if encode_chunked else self._send_raw
@@ -1242,9 +1247,8 @@ class HTTPConnection:
                     self._merge_buffer[:len_part] = part
                     self._merged = len_part
             if flush and self._merged:
-                if self._merged:
-                    self._send_raw(self._merge_buffmv[:self._merged])
-                    self._merged = 0
+                self._send_raw(self._merge_buffmv[:self._merged])
+                self._merged = 0
                 self._merge_buffmv = None
                 self._merge_buffer = None
         except Exception:
@@ -1308,8 +1312,8 @@ else:
                 context.verify_mode = ssl.CERT_NONE
             self._context = context
 
-        def connect(self):
-            super().connect()
+        def _open_socket(self):
+            super()._open_socket()
             # The TLS handshake needs large contiguous allocations.
             gc.collect()
             raw = self._sock
