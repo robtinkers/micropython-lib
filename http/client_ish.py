@@ -52,28 +52,40 @@ _CONNECTION_ERRS = (
     getattr(errno, "ESHUTDOWN", -1),
 )
 
-# Exception hierarchy mirroring CPython's http.client. TimeoutError also subclasses OSError.
+# Exception hierarchy mirroring CPython's http.client:
 class HTTPException(Exception): pass
 class NotConnected(HTTPException): pass
-class TimeoutError(NotConnected, OSError): pass
 class InvalidURL(HTTPException): pass
-class BadStatusLine(HTTPException): pass
-class RemoteDisconnected(BadStatusLine): pass
+# class InvalidURL(HTTPException): pass
+# class UnknownProtocol(HTTPException): pass
+# class UnknownTransferEncoding(HTTPException): pass
+# class UnimplementedFileMode(HTTPException): pass
+class IncompleteRead(HTTPException):
+#    def __init__(self, *args):
+#        super().__init__(*args)
+#        # CPython compatibility...
+#        self.partial = _BLANK
+#        if len(args) > 1 and args[0] is not None and args[1] is not None:
+#            self.expected = args[1] - args[0]
+#        else:
+#            self.expected = None
+        pass
 class ImproperConnectionState(HTTPException): pass
 class CannotSendRequest(ImproperConnectionState): pass
 class CannotSendHeader(ImproperConnectionState): pass
 class ResponseNotReady(ImproperConnectionState): pass
-
-class IncompleteRead(HTTPException):
-    def __init__(self, *args):
-        super().__init__(*args)
-
-        # NOTE: partial is always empty here (body bytes were already streamed to the caller).
-        self.partial = _BLANK
-        if len(args) > 1 and args[0] is not None and args[1] is not None:
-            self.expected = args[1] - args[0]
-        else:
-            self.expected = None
+class BadStatusLine(HTTPException):
+#    def __init__(self, *args):
+#        super().__init__(*args)
+#        # CPython compatibility...
+#        self.args = line
+#        self.line = line
+        pass
+# class LineTooLong(HTTPException): pass
+class RemoteDisconnected(BadStatusLine): pass
+# Custom exceptions:
+# class InvalidHeader(HTTPException): pass # TODO: use this for bad client headers/combos
+class TimeoutError(NotConnected, OSError): pass
 
 # Viper: 1 if buf[start:end] passes the char class selected by flags.
 @micropython.viper
@@ -485,9 +497,6 @@ class HTTPResponse:
         for i in range(0, len(self._headers), 2):
             yield self._headers[i], self._headers[i+1]
 
-    def getheader(self, name, default=None):
-        return decode_latin1(self.rawheader(name, None), default)
-
     def rawheader(self, name, default=None):
         if self._headers is None:
             raise ResponseNotReady()
@@ -504,10 +513,8 @@ class HTTPResponse:
                     match = match + b", " + self._headers[i+1]
         return default if match is None else match
 
-    def getcookie(self, name, default=None):
-        if isinstance(name, str):
-            name = name.encode()
-        return decode_latin1(self.rawcookie(name, None), default)
+    def getheader(self, name, default=None):
+        return decode_latin1(self.rawheader(name, None), default)
 
     def rawcookie(self, name, default=None):
         if isinstance(name, str):
@@ -518,20 +525,25 @@ class HTTPResponse:
                 continue
             if val.startswith(name):
                 len_val = len(val)
-                if len_val == len_name or val[len_name] == 59:
-                    return _BLANK
-                if val[len_name] == 61:
-                    start = len_name + 1
-                    end = val.find(b";", start)
-                    if end == -1:
-                        end = len_val
-                    while start < end and val[start] <= 32: start += 1
-                    while end > start and val[end - 1] <= 32: end -= 1
-                    if end - start >= 2 and val[start] == 34 and val[end - 1] == 34:
-                        start += 1
-                        end -= 1
-                    return val[start:end]
+                if len_val == len_name:
+                    return default
+                if val[len_name] == 61:  # '='
+                    return val[len_name+1:]
         return default
+
+    def getcookie(self, name, default=None):
+        rawvalue = self.rawcookie(name, None)
+        if rawvalue is None:
+            return default
+        start, end = 0, rawvalue.find(b";")
+        if end == -1:
+            end = len(rawvalue)
+        while start < end and rawvalue[start] <= 32: start += 1
+        while end > start and rawvalue[end - 1] <= 32: end -= 1
+        if end - start >= 2 and rawvalue[start] == 34 and rawvalue[end - 1] == 34:
+            start += 1
+            end -= 1
+        return decode_latin1(rawvalue[start:end], default)
 
     def _read_wrapper(self, resumable, func, *args):
         while True:
@@ -562,16 +574,22 @@ class HTTPResponse:
         return self._read_impl(None, amt, short=True)
 
     def readinto(self, buf):
+        if buf is None:
+            raise TypeError("buffer required")
         return self._read_impl(buf, None)
 
     def recv(self, amt=None):
         return self._read_impl(None, amt, non_blocking=True)
 
     def recv_into(self, buf):
+        if buf is None:
+            raise TypeError("buffer required")
         return self._read_impl(buf, None, non_blocking=True)
 
     # Unified body reader for read/readinto/recv/recv_into across all three framing modes.
     def _read_impl(self, buf, amt, short=False, non_blocking=False):
+        if self._headers is None:
+            raise ResponseNotReady()
         if non_blocking:
             self._require_nonchunked()
         else:
@@ -745,6 +763,10 @@ class HTTPResponse:
 
     # One-way switch to non-blocking. Releases the conn (no reuse) but keeps the socket live.
     def setblocking(self, flag):
+        if self._headers is None:
+            raise ResponseNotReady()
+        if self._sock is None:
+            raise NotConnected("socket missing")
         if flag:
             raise ValueError("can only transition to non-blocking")
         self._require_nonchunked()
@@ -915,9 +937,7 @@ class HTTPConnection:
 
     # Hand over the underlying socket (e.g. after a 101 upgrade) without closing it.
     def detach(self):
-        if self._state == _CS_HEADERS:
-            raise CannotSendHeader()
-        if self._state == _CS_BODY or self._state == _CS_CHUNKING:
+        if self._state == _CS_HEADERS or self._state == _CS_BODY or self._state == _CS_CHUNKING:
             raise ResponseNotReady()
         return self._reset()
 
@@ -1084,10 +1104,15 @@ class HTTPConnection:
             resp = self.response_class(self._sock, self.method, self.url)
             resp.begin(**kwargs)
             if resp._will_close:
+                # The returned response owns the closing socket. The connection
+                # has no reusable socket to protect, so it can accept a new
+                # request on a fresh socket immediately.
                 self._sock = None
                 self.method = None
                 self.url = None
                 self._state = _CS_IDLE
+                if resp._length == 0 and resp.status != 101:
+                    resp.close()
             else:
                 self._state = _CS_RESPONSE
                 self._resp = resp
@@ -1142,44 +1167,36 @@ class HTTPConnection:
         if not skip_accept_encoding:
             self._putheaderparts(False, b"Accept-Encoding: identity\r\n")
 
-    def putheader(self, name, *values):
+    def putheader(self, name, *values, strict=True):
         if self._state != _CS_HEADERS:
             raise CannotSendHeader()
         try:
             name = _encode_and_validate(name, 19)
-            if not values:
-                values = None
-            elif len(values) == 1:
-                values = _encode_and_validate(values[0], 0)
-            else:
-                values = b"\r\n\t".join(_encode_and_validate(v, 0) for v in values)
         except Exception:
             self._fail_request()
             raise
 
-        if values is None:
-            self._putheaderparts(False, name, b":\r\n")
-        else:
-            self._putheaderparts(False, name, b": ", values, _CRLF)
+        if not values:
+            values = (_BLANK,)
+        for v in values:
+            try:
+                self._putheaderparts(False, name, b": ", _encode_and_validate(v, 0), _CRLF)
+            except (ValueError, UnicodeError):
+                if strict:
+                    self._fail_request()
+                    raise
+
 
     def putcookie(self, name, value):
         if self._state != _CS_HEADERS:
             raise CannotSendHeader()
         try:
             name = _encode_and_validate(name, 47)
-            try:
-                value = _encode_and_validate(value, 15)
-                quote = False
-            except ValueError:
-                value = _encode_and_validate(value, 6)
-                quote = True
+            value = _encode_and_validate(value, 0)
         except Exception:
             self._fail_request()
             raise
-        if quote:
-            self._putheaderparts(False, b"Cookie: ", name, b'="', value, b'"', _CRLF)
-        else:
-            self._putheaderparts(False, b"Cookie: ", name, b"=", value, _CRLF)
+        self._putheaderparts(False, b"Cookie: ", name, b"=", value, _CRLF)
 
     def endheaders(self, message_body=None, *, encode_chunked=False):
         if self._state != _CS_HEADERS:
@@ -1308,7 +1325,7 @@ class HTTPConnection:
                 raise TimeoutError()
             if err in _CONNECTION_ERRS:
                 raise NotConnected("connection lost")
-            raise NotConnected(str(e))
+            raise
 
     # Send one chunk; None sends the zero-length terminator.
     def _send_chunk(self, data):
