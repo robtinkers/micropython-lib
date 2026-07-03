@@ -31,19 +31,19 @@ _WOULDBLOCK_ERRS = (
     errno.EAGAIN,
     errno.EALREADY,
     errno.EINPROGRESS,
-    errno.ETIMEDOUT,
+#    errno.ETIMEDOUT,
     getattr(errno, "EWOULDBLOCK", -1),
 )
 
 _CONNECTION_ERRS = (
-    errno.EBADF,
+#    errno.EBADF,
     errno.ECONNABORTED,
     errno.ECONNREFUSED,
     errno.ECONNRESET,
     errno.EHOSTUNREACH,
-    errno.ENOBUFS,
+#    errno.ENOBUFS,
     errno.ENOTCONN,
-    getattr(errno, "EADDRNOTAVAIL", -1),
+#    getattr(errno, "EADDRNOTAVAIL", -1),
     getattr(errno, "EHOSTDOWN", -1),
     getattr(errno, "ENETDOWN", -1),
     getattr(errno, "ENETRESET", -1),
@@ -90,13 +90,15 @@ class TimeoutError(NotConnected, OSError): pass
 # Viper: 1 if buf[start:end] passes the char class selected by flags.
 @micropython.viper
 def _validate(buf:ptr8, start:int, end:int, flags:int) -> int:
-    invalid_space  = bool(flags & 1)
-    invalid_tab    = bool(flags & 2)
-    invalid_cookie = bool(flags & 4) # reject '"' ';' '\\'
-    invalid_comma  = bool(flags & 8)
-    invalid_colon  = bool(flags & 16)
-    invalid_equals = bool(flags & 32)
-    check_ip4addr  = bool(flags & 256)
+    invalid_space     = bool(flags & 1)
+    invalid_tab       = bool(flags & 2)
+    invalid_dquote    = bool(flags & 4)
+    invalid_comma     = bool(flags & 8)
+    invalid_colon     = bool(flags & 16)
+    invalid_semicolon = bool(flags & 32)
+    invalid_equals    = bool(flags & 64)
+    invalid_backslash = bool(flags & 128)
+    check_ip4addr     = bool(flags & 256)
     i = start
     while i < end:
         b = buf[i]
@@ -111,8 +113,8 @@ def _validate(buf:ptr8, start:int, end:int, flags:int) -> int:
         elif b == 32:
             if invalid_space:
                 return 0
-        elif b == 34 or b == 59 or b == 92:
-            if invalid_cookie:
+        elif b == 34:
+            if invalid_dquote:
                 return 0
         elif b == 44:
             if invalid_comma:
@@ -120,8 +122,14 @@ def _validate(buf:ptr8, start:int, end:int, flags:int) -> int:
         elif b == 58:
             if invalid_colon:
                 return 0
+        elif b == 59:
+            if invalid_semicolon:
+                return 0
         elif b == 61:
             if invalid_equals:
+                return 0
+        elif b == 92:
+            if invalid_backslash:
                 return 0
         elif b == 127:
             return 0
@@ -553,7 +561,7 @@ class HTTPResponse:
                 err = e.errno
                 if err == errno.EINTR:
                     continue
-                if resumable and err in _WOULDBLOCK_ERRS and err != errno.ETIMEDOUT:
+                if resumable and err in _WOULDBLOCK_ERRS:
                     raise
                 self._teardown(True)
                 if err == errno.ETIMEDOUT:
@@ -643,6 +651,8 @@ class HTTPResponse:
                 if err == errno.EINTR or err in _WOULDBLOCK_ERRS:
                     return None
                 self._teardown(True)
+                if err == errno.ETIMEDOUT:
+                    raise TimeoutError()
                 if err in _CONNECTION_ERRS:
                     raise NotConnected("connection lost")
                 raise
@@ -1189,10 +1199,12 @@ class HTTPConnection:
     def putcookie(self, name, value):
         if self._state != _CS_HEADERS:
             raise CannotSendHeader()
-        name = _encode_and_validate(name, 47)
-        value = _encode_and_validate(value, 0)
-        if value.find(b";") >= 0:
-            raise ValueError("bad cookie value")
+        try:
+            name = _encode_and_validate(name, 239)
+            value = _encode_and_validate(value, 32)
+        except Exception:
+            self._fail_request()
+            raise
         self._putheaderparts(False, b"Cookie: ", name, b"=", value, _CRLF)
 
     def putrawcookie(self, value):
