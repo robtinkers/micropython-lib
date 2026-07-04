@@ -87,7 +87,7 @@ class BadStatusLine(HTTPException): pass
 class RemoteDisconnected(BadStatusLine, Transient): pass
 class TimeoutError(NotConnected, OSError):
     def __init__(self, reason="timeout"):
-        OSError.__init__(self, errno.ETIMEDOUT)
+        OSError.__init__(self, errno.ETIMEDOUT, reason)
         self.errno = errno.ETIMEDOUT
         self.reason = reason
 
