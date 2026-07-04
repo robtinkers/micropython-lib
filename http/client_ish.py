@@ -35,7 +35,7 @@ _WOULDBLOCK_ERRS = (
     errno.EAGAIN,
     errno.EALREADY,
     errno.EINPROGRESS,
-    getattr(errno, "EWOULDBLOCK", -1),
+    getattr(errno, "EWOULDBLOCK", None),
 )
 
 # Errnos that indicate the peer or network dropped the connection.
@@ -45,18 +45,20 @@ _CONNECTION_ERRS = (
     errno.ECONNRESET,
     errno.EHOSTUNREACH,
     errno.ENOTCONN,
-    getattr(errno, "EHOSTDOWN", -1),
-    getattr(errno, "ENETDOWN", -1),
-    getattr(errno, "ENETRESET", -1),
-    getattr(errno, "ENETUNREACH", -1),
-    getattr(errno, "EPIPE", -1),
-    getattr(errno, "ESHUTDOWN", -1),
+    getattr(errno, "EHOSTDOWN", None),
+    getattr(errno, "ENETDOWN", None),
+    getattr(errno, "ENETRESET", None),
+    getattr(errno, "ENETUNREACH", None),
+    getattr(errno, "EPIPE", None),
+    getattr(errno, "ESHUTDOWN", None),
+    getattr(errno, "ECANCELED", None),
+    getattr(errno, "EIO", None),
 )
 
 # Resource shortages that can succeed on a later retry.
 _TRANSIENT_ERRNOS = (
-    getattr(errno, "ENOBUFS", -1),
-    getattr(errno, "EADDRNOTAVAIL", -1),
+    getattr(errno, "ENOBUFS", None),
+    getattr(errno, "EADDRNOTAVAIL", None),
 )
 
 # Exception hierarchy mirrors common HTTP client errors while marking retryable cases.
@@ -979,9 +981,9 @@ class HTTPResponse:
                 if not line:
                     self.abort()
                 if line != _CRLF and line != _LF:
-			        self._severed = True
-			        self._teardown(True)
-			        raise IncompleteRead(self._bytes_read, self._length)
+                    self._severed = True
+                    self._teardown(True)
+                    raise IncompleteRead(self._bytes_read, self._length)
                 self._chunk_left = None
             else:
                 return self._chunk_left
