@@ -610,9 +610,9 @@ class HTTPResponse:
                 self._severed = True
                 self._teardown(True)
                 if err == errno.ETIMEDOUT:
-                    raise TimeoutError()
+                    raise TimeoutError("read")
                 if err in _CONNECTION_ERRS or err in _TRANSIENT_ERRNOS:
-                    raise NotConnected("lost")
+                    raise NotConnected("read")
                 raise
             except BaseException:
                 self._severed = True
@@ -658,7 +658,7 @@ class HTTPResponse:
 
         into = buf is not None
         if self._severed:
-            raise NotConnected("severed")
+            raise NotConnected("closed")
         if self._sock is None:
             return 0 if into else _BLANK
         if into and not buf:
@@ -710,9 +710,9 @@ class HTTPResponse:
                 self._severed = True
                 self._teardown(True)
                 if err == errno.ETIMEDOUT:
-                    raise TimeoutError()
+                    raise TimeoutError("read")
                 if err in _CONNECTION_ERRS or err in _TRANSIENT_ERRNOS:
-                    raise NotConnected("lost")
+                    raise NotConnected("read")
                 raise
             except BaseException:
                 self._severed = True
@@ -851,7 +851,7 @@ class HTTPResponse:
         if self._headers is None:
             raise ResponseNotReady()
         if self._sock is None:
-            raise NotConnected("socket")
+            raise NotConnected("closed")
         if flag:
             raise ValueError("can only transition to non-blocking")
         self._require_nonchunked()
@@ -1451,7 +1451,7 @@ class HTTPConnection:
 
         if self._sock is None:
             self._fail_request()
-            raise NotConnected("socket")
+            raise NotConnected("closed")
 
         try:
             self._sock.sendall(data)
@@ -1459,9 +1459,9 @@ class HTTPConnection:
             err = e.errno
             self._fail_request()
             if err == errno.ETIMEDOUT:
-                raise TimeoutError()
+                raise TimeoutError("send")
             if err in _CONNECTION_ERRS or err in _TRANSIENT_ERRNOS:
-                raise NotConnected("lost")
+                raise NotConnected("send")
             raise
 
     # Write one HTTP chunk, or the terminating zero-length chunk.
