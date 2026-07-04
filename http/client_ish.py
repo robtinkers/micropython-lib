@@ -35,7 +35,7 @@ _WOULDBLOCK_ERRS = (
     errno.EAGAIN,
     errno.EALREADY,
     errno.EINPROGRESS,
-    getattr(errno, "EWOULDBLOCK", None),
+    getattr(errno, "EWOULDBLOCK", _MISSING),
 )
 
 # Errnos that indicate the peer or network dropped the connection.
@@ -45,22 +45,22 @@ _CONNECTION_ERRS = (
     errno.ECONNRESET,
     errno.EHOSTUNREACH,
     errno.ENOTCONN,
-    getattr(errno, "EHOSTDOWN", None),
-    getattr(errno, "ENETDOWN", None),
-    getattr(errno, "ENETRESET", None),
-    getattr(errno, "ENETUNREACH", None),
-    getattr(errno, "EPIPE", None),
-    getattr(errno, "ESHUTDOWN", None),
-    getattr(errno, "ECANCELED", None),
-    getattr(errno, "EIO", None),
+    getattr(errno, "EHOSTDOWN", _MISSING),
+    getattr(errno, "ENETDOWN", _MISSING),
+    getattr(errno, "ENETRESET", _MISSING),
+    getattr(errno, "ENETUNREACH", _MISSING),
+    getattr(errno, "EPIPE", _MISSING),
+    getattr(errno, "ESHUTDOWN", _MISSING),
+    getattr(errno, "ECANCELED", _MISSING),
+    getattr(errno, "EIO", _MISSING),
 )
 
 # Resource shortages that can succeed on a later retry.
 _TRANSIENT_ERRNOS = (
     errno.ENOMEM,
     errno.EADDRINUSE,
-    getattr(errno, "ENOBUFS", None),
-    getattr(errno, "EADDRNOTAVAIL", None),
+    getattr(errno, "ENOBUFS", _MISSING),
+    getattr(errno, "EADDRNOTAVAIL", _MISSING),
 )
 
 # Exception hierarchy mirrors common HTTP client errors while marking retryable cases.
@@ -68,7 +68,7 @@ class Transient(Exception): pass
 
 class HTTPException(Exception): pass
 class NotConnected(Transient, HTTPException):
-    def __init__(self, reason="lost"):
+    def __init__(self, reason):
         super().__init__(reason)
         self.reason = reason
 class InvalidURL(HTTPException): pass
