@@ -57,6 +57,8 @@ _CONNECTION_ERRS = (
 
 # Resource shortages that can succeed on a later retry.
 _TRANSIENT_ERRNOS = (
+    errno.ENOMEM,
+    errno.EADDRINUSE,
     getattr(errno, "ENOBUFS", None),
     getattr(errno, "EADDRNOTAVAIL", None),
 )
