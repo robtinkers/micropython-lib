@@ -1,3 +1,4 @@
+
 # http/client_ish.py
 #
 # http.client for Micropython, optimised for memory footprint and churn.
@@ -1332,15 +1333,8 @@ class HTTPConnection:
         if self._state != _CS_HEADERS:
             raise CannotSendHeader()
         try:
-            # Flush request line and header fields before the commit point.
-            # If this fails, the terminating blank line was not written by us.
-            self._putheaderparts(True)
-
-            # Commit point: once this write is attempted, the server may have
-            # seen the blank line that makes the request application-visible.
+            self._putheaderparts(True, _CRLF)
             self.request_sent = True
-            self._send_raw(_CRLF)
-
             self._state = _CS_BODY
             if message_body is not None or encode_chunked:
                 self.send(message_body, encode_chunked=encode_chunked)
