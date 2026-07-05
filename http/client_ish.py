@@ -35,6 +35,7 @@ _CHUNKED = b"chunked"
 _CONNECTION = b"connection"
 _CONTENT_LENGTH = b"content-length"
 _COOKIE_COLON = b"cookie: "
+_HOST = b"host"
 _SET_COOKIE = b"set-cookie"
 _TRANSFER_ENCODING = b"transfer-encoding"
 
@@ -1169,7 +1170,7 @@ class HTTPConnection:
                 headers.append((key, val))
                 len_key = len(key)
                 if len_key == 4:
-                    if _containslc(key, 4, b"host", 4):
+                    if _containslc(key, 4, _HOST, 4):
                         skip_host = True
                 elif len_key == 14:
                     if _containslc(key, 14, _CONTENT_LENGTH, 14):
@@ -1290,9 +1291,9 @@ class HTTPConnection:
         self._putheaderparts(False, method, b" ", url, b" HTTP/1.1\r\n")
 
         if not skip_host:
-            self._putheaderparts(False, b"host: ", self._hostport, _CRLF)
+            self._putheaderparts(False, _HOST, ": ", self._hostport, _CRLF)
         if not skip_accept_encoding:
-            self._putheaderparts(False, b"accept-encoding: identity\r\n")
+            self._putheaderparts(False, _ACCEPT_ENCODING, b": identity\r\n")
 
     # Add one header line per supplied value.
     def putheader(self, name, *values, strict=True):
