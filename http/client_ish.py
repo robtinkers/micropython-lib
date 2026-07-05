@@ -24,12 +24,19 @@ _CS_CHUNKING = const(3)
 _CS_RESPONSE = const(4)
 
 # Small shared sentinels/constants to avoid repeated allocations.
-_MISSING = object()
-_SET_COOKIE = b"set-cookie"
 _CR = b"\r"
 _LF = b"\n"
 _CRLF = b"\r\n"
 _BLANK = b""
+_MISSING = object()
+
+_ACCEPT_ENCODING = b"accept-encoding"
+_CHUNKED = b"chunked"
+_CONNECTION = b"connection"
+_CONTENT_LENGTH = b"content-length"
+_COOKIE_COLON = b"cookie: "
+_SET_COOKIE = b"set-cookie"
+_TRANSFER_ENCODING = b"transfer-encoding"
 
 # Errnos that mean a non-blocking operation should be retried later.
 _WOULDBLOCK_ERRS = (
@@ -253,12 +260,12 @@ def decode_latin1(buf, default=_MISSING):
 _keep_response_headers = {
     4:[b"etag"],
     8:[b"location"],
-    10:[b"connection", _SET_COOKIE],
+    10:[_SET_COOKIE, _CONNECTION],
     11:[b"retry-after"],
     12:[b"content-type"],
-    14:[b"content-length"],
+    14:[_CONTENT_LENGTH],
     16:[b"content-encoding", b"www-authenticate"],
-    17:[b"transfer-encoding"],
+    17:[_TRANSFER_ENCODING],
 }
 
 # Allow callers to preserve additional response headers without parsing all of them.
@@ -501,14 +508,14 @@ class HTTPResponse:
         content_length = None
         for i in range(0, len(self._headers), 2):
             k = self._headers[i]
-            if k == b"transfer-encoding":
+            if k == _TRANSFER_ENCODING:
                 transfer_encoding = self._headers[i+1]
-            elif k == b"connection":
+            elif k == _CONNECTION:
                 connection = self._headers[i+1]
-            elif k == b"content-length":
+            elif k == _CONTENT_LENGTH:
                 content_length = self._headers[i+1]
 
-        self._chunked = bool(transfer_encoding) and bool(_containslc(transfer_encoding, len(transfer_encoding), b"chunked", 7))
+        self._chunked = bool(transfer_encoding) and bool(_containslc(transfer_encoding, len(transfer_encoding), _CHUNKED, 7))
         self._chunk_left = None
 
         if self.version == 10:
@@ -1165,13 +1172,13 @@ class HTTPConnection:
                     if _containslc(key, 4, b"host", 4):
                         skip_host = True
                 elif len_key == 14:
-                    if _containslc(key, 14, b"content-length", 14):
+                    if _containslc(key, 14, _CONTENT_LENGTH, 14):
                         have_content_length = True
                 elif len_key == 15:
-                    if _containslc(key, 15, b"accept-encoding", 15):
+                    if _containslc(key, 15, _ACCEPT_ENCODING, 15):
                         skip_accept_encoding = True
                 elif len_key == 17:
-                    if _containslc(key, 17, b"transfer-encoding", 17):
+                    if _containslc(key, 17, _TRANSFER_ENCODING, 17):
                         have_transfer_encoding = True
             del pairs
         else:
@@ -1187,21 +1194,21 @@ class HTTPConnection:
             elif body is None:
                 encode_chunked = False
                 if method in _METHODS_EXPECTING_BODY:
-                    headers.append((b"Content-Length", b"0"))
+                    headers.append((_CONTENT_LENGTH, b"0"))
                     have_content_length = True
             elif isinstance(body, (bytes, bytearray, memoryview)):
                 encode_chunked = False
-                headers.append((b"Content-Length", b"%d" % len(body)))
+                headers.append((_CONTENT_LENGTH, b"%d" % len(body)))
                 have_content_length = True
             else:
                 encode_chunked = True
-                headers.append((b"Transfer-Encoding", b"chunked"))
+                headers.append((_TRANSFER_ENCODING, _CHUNKED))
                 have_transfer_encoding = True
         elif encode_chunked and not have_transfer_encoding:
             if have_content_length:
                 encode_chunked = False
             else:
-                headers.append((b"Transfer-Encoding", b"chunked"))
+                headers.append((_TRANSFER_ENCODING, _CHUNKED))
                 have_transfer_encoding = True
 
         self.putrequest(method, url, skip_host=skip_host, skip_accept_encoding=skip_accept_encoding)
@@ -1283,9 +1290,9 @@ class HTTPConnection:
         self._putheaderparts(False, method, b" ", url, b" HTTP/1.1\r\n")
 
         if not skip_host:
-            self._putheaderparts(False, b"Host: ", self._hostport, _CRLF)
+            self._putheaderparts(False, b"host: ", self._hostport, _CRLF)
         if not skip_accept_encoding:
-            self._putheaderparts(False, b"Accept-Encoding: identity\r\n")
+            self._putheaderparts(False, b"accept-encoding: identity\r\n")
 
     # Add one header line per supplied value.
     def putheader(self, name, *values, strict=True):
@@ -1316,7 +1323,7 @@ class HTTPConnection:
         except Exception:
             self._fail_request()
             raise
-        self._putheaderparts(False, b"Cookie: ", name, b"=", value, _CRLF)
+        self._putheaderparts(False, _COOKIE_COLON, name, b"=", value, _CRLF)
 
     def putrawcookie(self, value):
         if self._state != _CS_HEADERS:
@@ -1326,7 +1333,7 @@ class HTTPConnection:
         except Exception:
             self._fail_request()
             raise
-        self._putheaderparts(False, b"Cookie: ", value, _CRLF)
+        self._putheaderparts(False, _COOKIE_COLON, value, _CRLF)
 
     # Finish the header section and optionally send the body immediately.
     def endheaders(self, message_body=None, *, encode_chunked=False):
