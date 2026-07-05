@@ -624,7 +624,7 @@ class HTTPResponse:
                 if err in _CONNECTION_ERRS or err in _TRANSIENT_ERRNOS:
                     raise NotConnected("read")
                 raise
-            except BaseException:
+            except Exception:
                 self._severed = True
                 self._teardown(True)
                 raise
@@ -724,7 +724,7 @@ class HTTPResponse:
                 if err in _CONNECTION_ERRS or err in _TRANSIENT_ERRNOS:
                     raise NotConnected("read")
                 raise
-            except BaseException:
+            except Exception:
                 self._severed = True
                 self._teardown(True)
                 raise
@@ -1244,7 +1244,7 @@ class HTTPConnection:
                 if resp._length == 0 and resp.status != 101 and not resp._chunked:
                     resp.close()
             return resp
-        except BaseException:
+        except Exception:
             if resp is not None:
                 if resp._sock is None:
                     self._sock = None
@@ -1290,7 +1290,7 @@ class HTTPConnection:
         self._putheaderparts(False, method, b" ", url, b" HTTP/1.1\r\n")
 
         if not skip_host:
-            self._putheaderparts(False, _HOST, ": ", self._hostport, _CRLF)
+            self._putheaderparts(False, _HOST, b": ", self._hostport, _CRLF)
         if not skip_accept_encoding:
             self._putheaderparts(False, _ACCEPT_ENCODING, b": identity\r\n")
 
@@ -1519,5 +1519,5 @@ else:
                         raise NotConnected("tls")
                     raise
                 if isinstance(e, MemoryError):
-                    raise OSError(errno.ENOMEM)
+                    raise
                 raise OSError(errno.EIO, str(e))
