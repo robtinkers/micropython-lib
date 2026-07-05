@@ -93,8 +93,10 @@ class TimeoutError(NotConnected, OSError):
 
 RETRYABLE = (Transient, IncompleteRead)
 
-# Retry only when the request can be safely replayed.
-def safe_to_retry(exc, *, sent=True, idempotent=False, replayable=True):
+def safe_to_retry(exc, *, idempotent=False, replayable=True,
+                  responded=False, sent=True):
+    if isinstance(exc, RemoteDisconnected) and not responded:
+        return replayable
     if isinstance(exc, Transient):
         if not sent:
             return True
@@ -103,7 +105,7 @@ def safe_to_retry(exc, *, sent=True, idempotent=False, replayable=True):
         return idempotent and replayable
     if isinstance(exc, MemoryError):
         gc.collect()
-        return idempotent and replayable
+        return (not sent) or (idempotent and replayable)
     return False
 
 # Viper keeps hot-path byte validation fast and allocation-free.
@@ -1098,7 +1100,7 @@ class HTTPConnection:
             self._hostport = b"%s:%d" % (self.host, port)
             self.port = port
 
-    # Optional hook lets callers fail fast when the network is known down.
+    # Bring the link up via the network callback.
     def require_network(self):
         if self._network is not None and not self._network():
             raise NotConnected("network")
@@ -1484,6 +1486,7 @@ except ImportError:
 else:
 
     # HTTPS variant wraps the TCP socket with MicroPython SSL support.
+    # WARNING: certificate verification is OFF unless you pass an ssl context.
     class HTTPSConnection(HTTPConnection):
         default_port = HTTPS_PORT
 
