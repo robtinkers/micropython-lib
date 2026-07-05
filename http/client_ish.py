@@ -1,4 +1,3 @@
-
 # http/client_ish.py
 #
 # http.client for Micropython, optimised for memory footprint and churn.
