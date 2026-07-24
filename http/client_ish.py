@@ -1199,4 +1199,3 @@ else:
                 _reraise_transport_error(e)
             finally:
                 gc.collect()
-
