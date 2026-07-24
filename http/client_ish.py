@@ -1,172 +1,122 @@
 # http/client_ish.py
-#
-# http.client for Micropython, optimised for memory footprint and churn.
-# Extensions include chunking, cookies, non-blocking I/O and more.
 
 import micropython, socket, errno, gc
 
-# Default TCP ports used by the connection classes.
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
+OK = const(200)
 
-# Tunables kept as consts so MicroPython can optimise them.
-_DEBUG = const(0)
 _DEFAULT_TIMEOUT = const(10)
 _METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
-_GC_THRESHOLD = const(32768)
+_GC_FREE_THRESHOLD = const(32768)
 
-# HTTPConnection state machine values.
-_CS_IDLE     = const(0)
-_CS_HEADERS  = const(1)
-_CS_BODY     = const(2)
-_CS_CHUNKING = const(3)
-_CS_RESPONSE = const(4)
+_RF_HOST = const(1)
+_RF_CONNECTION = const(2)
+_RF_CONNECTION_CLOSE = const(4)
+_RF_CONTENT_LENGTH = const(8)
+_RF_ACCEPT_ENCODING = const(16)
+_RF_TRANSFER_ENCODING = const(32)
+_RF_TRANSFER_CHUNKED = const(64)
 
-# Small shared sentinels/constants to avoid repeated allocations.
 _CR = b"\r"
 _LF = b"\n"
 _CRLF = b"\r\n"
-_BLANK = b""
-_MISSING = object()
+_EMPTY = b""
 
-_ACCEPT_ENCODING = b"accept-encoding"
+_ACCEPT_ENCODING = b"Accept-Encoding"
 _CHUNKED = b"chunked"
-_CONNECTION = b"connection"
-_CONTENT_LENGTH = b"content-length"
-_COOKIE_COLON = b"cookie: "
-_HOST = b"host"
-_SET_COOKIE = b"set-cookie"
-_TRANSFER_ENCODING = b"transfer-encoding"
+_CONNECTION = b"Connection"
+_CONTENT_LENGTH = b"Content-Length"
+_HOST = b"Host"
+_SET_COOKIE = b"Set-Cookie"
+_TRANSFER_ENCODING = b"Transfer-Encoding"
 
-# Errnos that mean a non-blocking operation should be retried later.
-_WOULDBLOCK_ERRS = (
-    errno.EAGAIN,
-    errno.EALREADY,
-    errno.EINPROGRESS,
-    getattr(errno, "EWOULDBLOCK", _MISSING),
-)
-
-# Errnos that indicate the peer or network dropped the connection.
-_CONNECTION_ERRS = (
+_CONNECTION_ERRNOS = (
     errno.ECONNABORTED,
     errno.ECONNREFUSED,
     errno.ECONNRESET,
-    errno.EHOSTUNREACH,
-    errno.ENOTCONN,
-    getattr(errno, "EHOSTDOWN", _MISSING),
-    getattr(errno, "ENETDOWN", _MISSING),
-    getattr(errno, "ENETRESET", _MISSING),
-    getattr(errno, "ENETUNREACH", _MISSING),
-    getattr(errno, "EPIPE", _MISSING),
-    getattr(errno, "ESHUTDOWN", _MISSING),
-    getattr(errno, "ECANCELED", _MISSING),
-    getattr(errno, "EIO", _MISSING),
+    getattr(errno, "EPIPE", errno.ECONNABORTED),
+    getattr(errno, "ESHUTDOWN", errno.ECONNRESET),
 )
-
-# Resource shortages that can succeed on a later retry.
-_TRANSIENT_ERRNOS = (
-    errno.ENOMEM,
-    errno.EADDRINUSE,
-    getattr(errno, "ENOBUFS", _MISSING),
-    getattr(errno, "EADDRNOTAVAIL", _MISSING),
-)
-
-# Exception hierarchy mirrors common HTTP client errors while marking retryable cases.
-class Transient(Exception): pass
 
 class HTTPException(Exception): pass
-class NotConnected(Transient, HTTPException):
-    def __init__(self, reason):
-        super().__init__(reason)
-        self.reason = reason
+
+class NotConnected(HTTPException): pass
+
 class InvalidURL(HTTPException): pass
+
+class BadStatusLine(HTTPException): pass
+
+class RemoteDisconnected(BadStatusLine): pass
+
+class UnknownProtocol(BadStatusLine): pass
+
 class IncompleteRead(HTTPException):
-    def __init__(self, bytes_read=None, length=None):
-        super().__init__(bytes_read, length)
-        if bytes_read is not None and length is not None:
-            self.expected = length - bytes_read
+    def __init__(self, value, partial, length):
+        super().__init__(value, partial, length)
+        self.value = value
+        self.partial = partial
+        self.length = length
+        if partial is not None and length is not None:
+            self.expected = length - partial
         else:
             self.expected = None
+
 class ImproperConnectionState(HTTPException): pass
-class CannotSendRequest(ImproperConnectionState): pass
-class CannotSendHeader(ImproperConnectionState): pass
-class ResponseNotReady(ImproperConnectionState): pass
-class BadStatusLine(HTTPException): pass
-class RemoteDisconnected(BadStatusLine, Transient): pass
-class TimeoutError(NotConnected, OSError):
-    def __init__(self, reason="timeout"):
-        OSError.__init__(self, errno.ETIMEDOUT, reason)
-        self.errno = errno.ETIMEDOUT
-        self.reason = reason
 
-RETRYABLE = (Transient, IncompleteRead)
+class ConnectionError(OSError): pass
 
-def safe_to_retry(exc, *, idempotent=False, replayable=True,
-                  responded=False, sent=True):
-    if isinstance(exc, RemoteDisconnected) and not responded:
-        return replayable
-    if isinstance(exc, Transient):
-        if not sent:
-            return True
-        return idempotent and replayable
-    if isinstance(exc, IncompleteRead):
-        return idempotent and replayable
-    if isinstance(exc, MemoryError):
-        gc.collect()
-        return (not sent) or (idempotent and replayable)
-    return False
+class TimeoutError(OSError):
+    def __init__(self, *args):
+        OSError.__init__(self, errno.ETIMEDOUT, *args)
 
-# Viper keeps hot-path byte validation fast and allocation-free.
+class NetworkError(Exception): pass
+
+def _reraise_transport_error(exc):
+    err = getattr(exc, "errno", None)
+    if err == errno.ETIMEDOUT:
+        raise TimeoutError()
+    if err == errno.ENOTCONN:
+        raise NotConnected()
+    if err in _CONNECTION_ERRNOS:
+        raise ConnectionError(*exc.args)
+    raise
+
+def _reraise_body_error(exc):
+    err = getattr(exc, "errno", None)
+    if err in _CONNECTION_ERRNOS:
+        raise OSError(errno.EIO, str(exc))
+    raise
+
+_generator = lambda: (yield)
+
+def isgeneratorfunction(obj):
+    return isinstance(obj, type(_generator))
+
 @micropython.viper
 def _validate(buf:ptr8, start:int, end:int, flags:int) -> int:
-    invalid_space     = bool(flags & 1)
-    invalid_tab       = bool(flags & 2)
-    invalid_dquote    = bool(flags & 4)
-    invalid_comma     = bool(flags & 8)
-    invalid_colon     = bool(flags & 16)
-    invalid_semicolon = bool(flags & 32)
-    invalid_equals    = bool(flags & 64)
-    invalid_backslash = bool(flags & 128)
-    check_ip4addr     = bool(flags & 256)
-    # Flags describe which ASCII punctuation is disallowed for the current field.
     i = start
     while i < end:
         b = buf[i]
-        if check_ip4addr:
+        if flags & 256:
             if not(b == 46 or (48 <= b and b <= 57)):
                 return 0
         elif b == 9:
-            if invalid_tab:
+            if flags & 2:
                 return 0
         elif b < 32:
             return 0
         elif b == 32:
-            if invalid_space:
-                return 0
-        elif b == 34:
-            if invalid_dquote:
-                return 0
-        elif b == 44:
-            if invalid_comma:
+            if flags & 1:
                 return 0
         elif b == 58:
-            if invalid_colon:
-                return 0
-        elif b == 59:
-            if invalid_semicolon:
-                return 0
-        elif b == 61:
-            if invalid_equals:
-                return 0
-        elif b == 92:
-            if invalid_backslash:
+            if flags & 16:
                 return 0
         elif b == 127:
             return 0
         i += 1
     return 1
 
-# Convert user input to bytes, then reject unsafe control/separator chars.
 def _encode_and_validate(x, flags):
     if isinstance(x, str):
         x = x.encode()
@@ -176,7 +126,9 @@ def _encode_and_validate(x, flags):
         raise ValueError("invalid character")
     return x
 
-# Return whether the slice is already lower-case, or write a lower-case copy.
+def decode_latin1(buf, default=None):
+    return default if buf is None else buf.decode()
+
 @micropython.viper
 def _lower_case(buf:ptr8, start:int, end:int, out:ptr8) -> int:
     write = int(out) != 0
@@ -193,8 +145,7 @@ def _lower_case(buf:ptr8, start:int, end:int, out:ptr8) -> int:
         i += 1
     return 1
 
-# Normalise header names while preserving the original object when possible.
-def _normalize_header_name(buf, start=0, end=None, lower=True):
+def normalize_header_name(buf, start=0, end=None):
     if isinstance(buf, str):
         buf = buf.encode()
     elif not isinstance(buf, (bytes, bytearray, memoryview)):
@@ -203,7 +154,7 @@ def _normalize_header_name(buf, start=0, end=None, lower=True):
         end = len(buf)
     if not _validate(buf, start, end, 19):
         return None
-    if not lower or _lower_case(buf, start, end, 0):
+    if _lower_case(buf, start, end, 0):
         if start == 0 and end == len(buf):
             return buf
         return buf[start:end]
@@ -211,52 +162,69 @@ def _normalize_header_name(buf, start=0, end=None, lower=True):
     _lower_case(buf, start, end, out)
     return out
 
-# HTTP header text is latin-1; this converts it to UTF-8 for MicroPython strings.
 @micropython.viper
-def _latin1_to_utf8(buf: ptr8, len_buf: int, out: ptr8) -> int:
-    write = int(out) != 0
-    len_out = 0
+def _equalsci(a:ptr8, b:ptr8, length:int) -> int:
     i = 0
-    while i < len_buf:
-        b = buf[i]
+    while i < length:
+        x = a[i]
+        y = b[i]
+        if x != y:
+            if 65 <= x and x <= 90:
+                x += 32
+            if 65 <= y and y <= 90:
+                y += 32
+            if x != y:
+                return 0
         i += 1
-        if b < 128:
-            if write:
-                out[len_out] = b
-            len_out += 1
-        elif b < 160:
-            return -1
-        else:
-            if write:
-                out[len_out+0] = 0xC0 | (b >> 6)
-                out[len_out+1] = 0x80 | (b & 0x3F)
-            len_out += 2
-    return len_out
+    return 1
 
-# Decode a header value, returning default instead of raising when requested.
-def decode_latin1(buf, default=_MISSING):
-    if buf is None:
-        if default is _MISSING:
-            raise UnicodeError()
-        return default
-    len_buf = len(buf)
-    if len_buf == 0:
-        return ""
-    utf8len = _latin1_to_utf8(buf, len_buf, 0)
-    if utf8len == len_buf:
+def _close_quietly(sock):
+    if sock is not None:
         try:
-            return buf.decode()
-        except UnicodeError:
-            utf8len = -1
-    if utf8len < 0:
-        if default is _MISSING:
-            raise UnicodeError()
-        return default
-    utf8out = bytearray(utf8len)
-    _latin1_to_utf8(buf, len_buf, utf8out)
-    return utf8out.decode()
+            sock.close()
+        except Exception:
+            pass
 
-# Headers retained by default; grouped by length for cheap matching.
+def create_connection(address, timeout=None, *, resolver=None, error=NetworkError):
+    host, port = address
+    if resolver is None:
+        resolver = socket.getaddrinfo
+    try:
+        infos = iter(resolver(host, port, 0, socket.SOCK_STREAM))
+    except Exception as e:
+        raise error(str(e))
+    exc, msg = None, None
+    for info in infos:
+        f, t, p, _, a = info
+        sock = None
+        try:
+            sock = socket.socket(f, t, p)
+            if timeout != 0:
+                sock.settimeout(timeout)
+
+            try:
+                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            except (AttributeError, OSError):
+                pass
+            try:
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            except (AttributeError, OSError):
+                pass
+            sock.connect(a)
+            return sock
+        except OSError as e:
+            if exc is None and msg is None:
+                msg = str(e)
+            _close_quietly(sock)
+        except Exception as e:
+            if exc is None:
+                exc = e
+            msg = None
+            _close_quietly(sock)
+    if exc is not None:
+        raise exc
+    raise OSError(errno.EHOSTUNREACH, msg)
+
 _keep_response_headers = {
     4:[b"etag"],
     8:[b"location"],
@@ -268,61 +236,19 @@ _keep_response_headers = {
     17:[_TRANSFER_ENCODING],
 }
 
-# Allow callers to preserve additional response headers without parsing all of them.
-def keep_response_header(name):
-    name = _normalize_header_name(name)
-    if name is None:
-        raise ValueError("bad header name")
-    if not isinstance(name, bytes):
-        name = bytes(name)
-    len_name = len(name)
-    cands = _keep_response_headers.get(len_name)
-    if cands is None:
-        _keep_response_headers[len_name] = [name]
-    elif name not in cands:
-        cands.append(name)
-
-# Case-insensitive contains check where the needle is already lower-case.
-@micropython.viper
-def _containslc(haystack:ptr8, haystacklen:int, needle:ptr8, needlelen:int) -> int:
-    if needlelen == 0:
-        return 1
-    if needlelen > haystacklen:
-        return 0
-    last = haystacklen - needlelen
-    i = 0
-    while i <= last:
-        j = 0
-        while j < needlelen:
-            x = haystack[i + j]
-            if 65 <= x and x <= 90:
-                x = x + 32
-            if x != needle[j]:
-                break
-            j += 1
-        if j == needlelen:
-            return 1
-        i += 1
-    return 0
-
-# Parse response headers into alternating name/value byte entries.
-def parse_headers(sock, *, all_headers=False, and_cookies=None):
+def _parse_headers(readline, all_headers=False, and_cookies=None):
     if and_cookies is None:
         and_cookies = all_headers
     headers = []
     while True:
-        if callable(sock):
-            line = sock()
-        else:
-            line = sock.readline()
+        line = readline()
 
         if line == _CRLF or line == _LF:
             return headers
 
         if not line or not line.endswith(_LF):
-            raise RemoteDisconnected()
+            raise BadStatusLine()
 
-        # Skip obsolete folded/continuation lines instead of buffering them.
         if line[0] <= 32:
             continue
 
@@ -330,22 +256,23 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
         if sep == -1:
             continue
 
+        if sep == 0 or line[sep - 1] <= 32:
+            raise HTTPException("invalid header")
         end = sep
-        while end > 0 and line[end - 1] <= 32: end -= 1
 
         name = None
-        # Fast path: only keep known headers unless all_headers=True.
+
         cands = _keep_response_headers.get(end)
         if cands is not None:
             for cand in cands:
-                if len(cand) == end and _containslc(line, end, cand, end):
+                if _equalsci(line, cand, end):
                     name = cand
                     break
 
         if name is None:
             if not all_headers:
                 continue
-            name = _normalize_header_name(line, 0, end)
+            name = normalize_header_name(line, 0, end)
             if name is None:
                 continue
             if not isinstance(name, bytes):
@@ -359,70 +286,143 @@ def parse_headers(sock, *, all_headers=False, and_cookies=None):
         headers.append(name)
         headers.append(line[start:end])
 
-# Resolve all addresses and connect to the first reachable endpoint.
-def create_connection(address, timeout=None):
-    host, port = address
-    try:
-        infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
-    except OSError:
-        raise NotConnected("dns")
-    err = None
-    for f, t, p, _, a in infos:
-        sock = None
-        try:
-            sock = socket.socket(f, t, p)
-            if timeout != 0:
-                sock.settimeout(timeout)
-            # Low-latency writes are preferred for small HTTP header/body chunks.
-            try:
-                sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            except (AttributeError, OSError):
-                pass
-            try:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            except (AttributeError, OSError):
-                pass
-            sock.connect(a)
-            return sock
-        except OSError as e:
-            err = e
-            try: sock.close()
-            except (AttributeError, OSError): pass
-        except Exception:
-            try: sock.close()
-            except (AttributeError, OSError): pass
-            raise
-    if err is not None:
-        raise err
-    raise OSError(errno.EHOSTUNREACH)
+def _parse_authority(host, port, default_port):
+    rest = ""
+    if host.startswith("["):
+        j = host.find("]")
+        if j == -1:
+            raise InvalidURL()
+        normalized_host, rest = host[:j+1], host[j+1:]
+        if rest:
+            if not rest.startswith(":"):
+                raise InvalidURL()
+            rest = rest[1:]
+        hostaddr = normalized_host[1:-1]
+        hostname = None
+    elif host.count(":") > 1:
+        normalized_host = "[" + host + "]"
+        hostaddr = host
+        hostname = None
+    else:
+        i = host.find(":")
+        if i >= 0:
+            normalized_host, rest = host[:i], host[i+1:]
+        else:
+            normalized_host = host
+        len_host = len(normalized_host)
+        if (len_host > 0 and
+                _validate(normalized_host, 0, len_host, 256)):
+            hostaddr = normalized_host
+            hostname = None
+        else:
+            hostaddr = normalized_host
+            hostname = normalized_host
 
-# Lightweight HTTP response reader with fixed-length, close-delimited, and chunked support.
+    if rest:
+        if rest.isdigit():
+            port = int(rest, 10)
+        else:
+            raise InvalidURL()
+
+    if port is None or port == default_port:
+        hostport = normalized_host.encode()
+        port = default_port
+    else:
+        hostport = b"%s:%d" % (normalized_host, port)
+
+    return normalized_host, hostaddr, hostname, hostport, port
+
+def _determine_response_framing(method, http_version, status, response_headers):
+    http10 = (http_version == 10)
+    content_length_value = None
+    transfer_encoding_chunked = None
+    reusable = None
+
+    for i in range(0, len(response_headers), 2):
+        name = response_headers[i]
+        value = response_headers[i+1]
+        len_value = len(value)
+
+        if name == _CONTENT_LENGTH:
+            try:
+                value = int(value, 10)
+            except (TypeError, ValueError):
+                value = -1
+
+            if value < 0:
+                content_length_value = -1
+            elif content_length_value is None:
+                content_length_value = value
+            elif content_length_value != value:
+                content_length_value = -1
+
+        elif name == _TRANSFER_ENCODING:
+            transfer_encoding_chunked = (len_value == 7) and _equalsci(value, _CHUNKED, 7)
+
+        elif name == _CONNECTION:
+            if (len_value == 5) and _equalsci(value, b"close", 5):
+                reusable = False
+            elif (
+                (len_value == 10) and _equalsci(value, b"keep-alive", 10)
+                and reusable is None and http10
+            ):
+                reusable = True
+
+    if reusable is None:
+        reusable = not http10
+
+    if method == b"HEAD" or status == 304:
+        transfer_encoding_chunked = False
+        content_length_value = 0
+
+    elif 100 <= status < 200 or status == 204:
+        if transfer_encoding_chunked is not None:
+            reusable = False
+        transfer_encoding_chunked = False
+        content_length_value = 0
+
+    elif transfer_encoding_chunked is None:
+        transfer_encoding_chunked = False
+        if content_length_value is None:
+            reusable = False
+        elif content_length_value < 0:
+            reusable = False
+            content_length_value = None
+
+    else:
+        if not transfer_encoding_chunked or content_length_value is not None or http10:
+            reusable = False
+        content_length_value = None
+
+    return transfer_encoding_chunked, content_length_value, reusable
+
 class HTTPResponse:
-    blocksize = 2048
+    _blocksize = 2048
 
-    def __init__(self, sock, method=None, url=None):
+    def __init__(self, sock, method, url, http_version, status, reason,
+                 response_headers, *, decode_chunked=None):
         self._sock = sock
         self._conn = None
-        self._headers = None
+        self._headers = response_headers
 
         self.method = method
         self.url = url
-        self.version = None
-        self.status = None
-        self._reason = None
+        self.version = http_version
+        self.status = status
+        self._reason = reason
 
-        # Body framing discovered from response headers.
-        self._chunked = False
+        self._response_chunked, self._response_length, self._reusable = (
+            _determine_response_framing(
+                method, http_version, status, response_headers)
+        )
+
+        if decode_chunked is not None and self._response_chunked != decode_chunked and self._response_length != 0:
+            self._response_chunked = bool(decode_chunked)
+            self._response_length = None
+            self._reusable = False
+
         self._chunk_left = None
-        self._length = None
-        self._will_close = True
-        self._bytes_read = 0
-
-        # Non-blocking mode is only allowed after headers and only for non-chunked bodies.
-        self._blocking = True
-        self._severed = False
-        self._have_recv = hasattr(sock, "recv")
-        self._have_recv_into = hasattr(sock, "recv_into")
+        self._response_bytes = 0
 
     def __enter__(self):
         return self
@@ -431,521 +431,687 @@ class HTTPResponse:
         self.close()
         return False
 
-    # Return a reusable socket to HTTPConnection, or mark it unusable.
-    def _release_conn(self, discard):
-        conn, self._conn = self._conn, None
-        if conn is not None:
-            conn._resp = None
-            conn.method = None
-            conn.url = None
-            conn._state = _CS_IDLE
-            if discard:
-                conn._sock = None
-
-    def detach(self):
-        sock, self._sock = self._sock, None
-        self._release_conn(True)
-        return sock
-
-    def _teardown(self, discard):
-        sock, self._sock = self._sock, None
-        self._release_conn(discard)
-        if sock is not None and discard:
-            try: sock.close()
-            except OSError: pass
-
-    def close(self):
-        # Keep the connection only when the full, non-upgrade body was consumed.
-        discard = (self._will_close or self._chunked or self.status == 101
-                or (self._length is not None and self._bytes_read < self._length))
-        self._teardown(discard)
-
-    def abort(self):
-        self._severed = True
-        self._teardown(True)
-        raise IncompleteRead(self._bytes_read, self._length)
-
-    @property
-    def closed(self):
-        return self._sock is None
-
-    @property
-    def chunked(self):
-        return self._chunked
-
     @property
     def length(self):
-        return None if self._length is None else self._length - self._bytes_read
+        return None if self._response_length is None else self._response_length - self._response_bytes
 
     @property
     def reason(self):
-        if self._reason is None:
-            return None
         return decode_latin1(self._reason.strip(), "")
-
-    def fileno(self):
-        if self._sock is None:
-            return None
-        return self._sock.fileno()
-
-    # Read the status line and headers, then decide how the body is framed.
-    def begin(self, *, all_headers=False, and_cookies=None):
-        if self._headers is not None:
-            return
-        self._require_blocking()
-        self.version, self.status, self._reason = self._read_status()
-        if _DEBUG:
-            print("status:", repr(self.version), repr(self.status), repr(self.reason))
-
-        self._headers = parse_headers(self._readline, all_headers=all_headers, and_cookies=and_cookies)
-        if _DEBUG:
-            for i in range(0, len(self._headers), 2):
-                print("header:", repr(self._headers[i]), "=", repr(self._headers[i+1]))
-
-        # Scan only the retained headers needed for body and connection handling.
-        transfer_encoding = None
-        connection = None
-        content_length = None
-        for i in range(0, len(self._headers), 2):
-            k = self._headers[i]
-            if k == _TRANSFER_ENCODING:
-                transfer_encoding = self._headers[i+1]
-            elif k == _CONNECTION:
-                connection = self._headers[i+1]
-            elif k == _CONTENT_LENGTH:
-                content_length = self._headers[i+1]
-
-        self._chunked = bool(transfer_encoding) and bool(_containslc(transfer_encoding, len(transfer_encoding), _CHUNKED, 7))
-        self._chunk_left = None
-
-        if self.version == 10:
-            self._will_close = (not connection) or not bool(_containslc(connection, len(connection), b"keep-alive", 10))
-        else:
-            self._will_close = bool(connection) and bool(_containslc(connection, len(connection), b"close", 5))
-
-        self._length = None
-        if content_length and not self._chunked:
-            try:
-                self._length = int(content_length, 10)
-                if self._length < 0:
-                    self._length = None
-            except ValueError:
-                pass
-        self._bytes_read = 0
-
-        # These responses never carry a message body.
-        if (100 <= self.status < 200
-            or self.status == 204 or self.status == 304
-            or self.method == b"HEAD"):
-            self._chunked = False
-            self._length = 0
-
-        if self._length is None and not self._chunked:
-            self._will_close = True
 
     def getheaders(self):
         out = []
-        for name, value in self.rawheaders():
+        headers = self._headers
+        for i in range(0, len(headers), 2):
             try:
-                out.append((decode_latin1(name), decode_latin1(value)))
+                out.append((decode_latin1(headers[i]),
+                            decode_latin1(headers[i+1])))
             except UnicodeError:
                 pass
         return out
 
-    def rawheaders(self):
-        if self._headers is None:
-            raise ResponseNotReady()
-        for i in range(0, len(self._headers), 2):
-            yield self._headers[i], self._headers[i+1]
+    def iter_rawheaders(self):
+        headers = self._headers
+        for i in range(0, len(headers), 2):
+            yield headers[i], headers[i+1]
 
     def getheader(self, name, default=None):
         return decode_latin1(self.rawheader(name, None), default)
 
-    def rawheader(self, name, default=None):
-        if self._headers is None:
-            raise ResponseNotReady()
+    def rawheader(self, name, default=None, *, join=b", "):
         if isinstance(name, str):
             name = name.encode()
         len_name = len(name)
-        match = None
+        result = None
         for i in range(0, len(self._headers), 2):
             key = self._headers[i]
-            if len(key) == len_name and _containslc(name, len_name, key, len_name):
-                if match is None:
-                    match = self._headers[i+1]
+            if len(key) == len_name and _equalsci(name, key, len_name):
+                if result is None:
+                    result = self._headers[i+1]
                 else:
-                    match = match + b", " + self._headers[i+1]
-        return default if match is None else match
-
-    def getcookie(self, name, default=None):
-        rawvalue = self.getrawcookie(name, None)
-        if rawvalue is None:
-            return default
-        start, end = 0, rawvalue.find(b";")
-        if end == -1:
-            end = len(rawvalue)
-        while start < end and rawvalue[start] <= 32: start += 1
-        while end > start and rawvalue[end - 1] <= 32: end -= 1
-        if end - start >= 2 and rawvalue[start] == 34 and rawvalue[end - 1] == 34:
-            start += 1
-            end -= 1
-        return decode_latin1(rawvalue[start:end], default)
-
-    def getrawcookie(self, name, default=None):
-        if isinstance(name, str):
-            name = name.encode()
-        len_name = len(name)
-        for key, val in self.rawheaders():
-            if key != _SET_COOKIE:
-                continue
-            if val.startswith(name):
-                len_val = len(val)
-                if len_val == len_name or val[len_name] == 59:
-                    return _BLANK
-                if val[len_name] == 61:
-                    return val[len_name+1:]
-        return default
-
-    # Convert socket errors into HTTP-specific exceptions and close bad sockets.
-    def _read_wrapper(self, resumable, func, *args):
-        while True:
-            try:
-                return func(*args)
-            except OSError as e:
-                err = e.errno
-                if err == errno.EINTR:
-                    continue
-                if resumable and err in _WOULDBLOCK_ERRS:
-                    raise
-                self._severed = True
-                self._teardown(True)
-                if err == errno.ETIMEDOUT:
-                    raise TimeoutError("read")
-                if err in _CONNECTION_ERRS or err in _TRANSIENT_ERRNOS:
-                    raise NotConnected("read")
-                raise
-            except Exception:
-                self._severed = True
-                self._teardown(True)
-                raise
+                    result += join + self._headers[i+1]
+        return default if result is None else result
 
     def read(self, amt=None):
         return self._read_impl(None, amt)
-
-    def readshort(self, amt=None):
-        return self._read_impl(None, amt, short=True)
 
     def readinto(self, buf):
         if buf is None:
             raise TypeError("buffer required")
         return self._read_impl(buf, None)
 
-    def recv(self, amt=None):
-        return self._read_impl(None, amt, non_blocking=True)
-
-    def recv_into(self, buf):
-        if buf is None:
-            raise TypeError("buffer required")
-        return self._read_impl(buf, None, non_blocking=True)
-
-    def _append_read_data(self, out, data):
-        if out is _BLANK:
-            return data
-        if type(out) is bytes:
-            out = bytearray(out)
-        out.extend(data)
-        return out
-
-    # Shared implementation for read/readshort/readinto/recv variants.
-    def _read_impl(self, buf, amt, short=False, non_blocking=False):
-        if self._headers is None:
-            raise ResponseNotReady()
-        if non_blocking:
-            # Non-blocking reads return None when no data is ready yet.
-            self._require_nonchunked()
-        else:
-            self._require_blocking()
-
-        into = buf is not None
-        if self._severed:
-            raise NotConnected("closed")
-        if self._sock is None:
-            return 0 if into else _BLANK
-        if into and not buf:
-            return 0
-        sock = self._sock
-
-        if into:
-            amt = len(buf) if (amt is None or amt < 0) else min(amt, len(buf))
-            unbounded = False
-        else:
-            unbounded = amt is None or amt < 0
-            if unbounded and (short or non_blocking):
-                amt = self.blocksize
-                unbounded = False
-
-        if not unbounded and amt == 0:
-            return 0 if into else _BLANK
-
-        if self._length is not None:
-            # Never read past Content-Length.
-            remaining = self._length - self._bytes_read
-            if remaining == 0:
-                self.close()
-                return 0 if into else _BLANK
-            if unbounded:
-                amt = remaining
-                unbounded = False
-            else:
-                amt = min(amt, remaining)
-
-        if non_blocking:
-            try:
-                if into:
-                    if self._have_recv_into:
-                        n = sock.recv_into(buf, amt)
-                    else:
-                        n = sock.readinto(buf, amt)
-                    data = None
-                else:
-                    if self._have_recv:
-                        data = sock.recv(amt)
-                    else:
-                        data = sock.read(amt)
-                    n = None if data is None else len(data)
-            except OSError as e:
-                err = e.errno
-                if err in _WOULDBLOCK_ERRS or err == errno.EINTR:
-                    return None
-                self._severed = True
-                self._teardown(True)
-                if err == errno.ETIMEDOUT:
-                    raise TimeoutError("read")
-                if err in _CONNECTION_ERRS or err in _TRANSIENT_ERRNOS:
-                    raise NotConnected("read")
-                raise
-            except Exception:
-                self._severed = True
-                self._teardown(True)
-                raise
-
-            if n is None:
-                return None
-
-            if n == 0:
-                if self._length is not None:
-                    self.abort()
-                self.close()
-                return 0 if into else _BLANK
-
-            self._bytes_read += n
-            if self._length is not None and self._bytes_read >= self._length:
-                self.close()
-            return n if into else data
-
-        if short or into:
-            if short and self._chunked:
-                amt = min(amt, self._next_chunk())
-                if amt == 0:
-                    return 0 if into else _BLANK
-
-            if self._chunked and into and not short:
-                # Chunked readinto may span several chunks.
-                bmv = buf if isinstance(buf, memoryview) else memoryview(buf)
-                total = 0
-                while total < amt:
-                    want = min(self._next_chunk(), amt - total)
-                    if want == 0:
-                        break
-                    n = self._read_wrapper(False, sock.readinto, bmv[total:], want)
-                    if not n:
-                        self.abort()
-                    self._bytes_read += n
-                    self._chunk_left -= n
-                    total += n
-                return total
-
-            if into:
-                n = self._read_wrapper(True, sock.readinto, buf, amt)
-                data = None
-            else:
-                data = self._read_wrapper(True, sock.read, amt)
-                n = len(data) if data else 0
-
-            if not n:
-                if self._length is not None or self._chunked:
-                    self.abort()
-                self.close()
-                return 0 if into else _BLANK
-
-            self._bytes_read += n
-            if self._chunked:
-                self._chunk_left -= n
-            elif self._length is not None and self._bytes_read >= self._length:
-                self.close()
-            return n if into else data
-
-        # From here on, read() is a fill API: it keeps reading until amt bytes
-        # have been decoded, the logical body ends, or a protocol/transport
-        # error occurs.
-        if self._chunked:
-            out = _BLANK
-            len_out = 0
-            while unbounded or len_out < amt:
-                avail = self._next_chunk()
-                if unbounded:
-                    want = min(avail, self.blocksize)
-                else:
-                    want = min(amt - len_out, avail, self.blocksize)
-                if want == 0:
-                    break
-                chunk = self._read_wrapper(False, sock.read, want)
-                if not chunk:
-                    self.abort()
-                len_chunk = len(chunk)
-                self._bytes_read += len_chunk
-                self._chunk_left -= len_chunk
-                len_out += len_chunk
-                out = self._append_read_data(out, chunk)
-            return out
-
-        # Fixed-length and close-delimited bodies.  For fixed-length bodies, amt
-        # has already been clamped to the remaining Content-Length.  For
-        # close-delimited bodies, EOF is the normal body terminator.
-        out = _BLANK
-        len_out = 0
-        while unbounded or len_out < amt:
-            if unbounded:
-                want = self.blocksize
-            else:
-                want = min(amt - len_out, self.blocksize)
-            if want == 0:
-                break
-            data = self._read_wrapper(False, sock.read, want)
-            if not data:
-                if self._length is not None:
-                    self.abort()
-                self.close()
-                break
-            len_data = len(data)
-            self._bytes_read += len_data
-            len_out += len_data
-            out = self._append_read_data(out, data)
-            if self._length is not None and self._bytes_read >= self._length:
-                self.close()
-                break
-        return out
-
-    # Stream the body without holding the full response in memory.
-    def iter_content(self, blocksize=None):
-        len_buf = self.blocksize if blocksize is None else blocksize
-        buf = bytearray(len_buf)
-        bmv = memoryview(buf)
-        for n in self.iter_content_into(bmv):
-            if n == len_buf:
-                yield bytes(buf)
-            else:
-                yield bytes(bmv[:n])
-
     def iter_content_into(self, bmv):
         if not isinstance(bmv, memoryview):
             bmv = memoryview(bmv)
+        if not bmv:
+            raise ValueError("buffer must not be empty")
         while True:
             n = self.readinto(bmv)
             if n == 0:
                 return
             yield n
 
-    # After switching to non-blocking mode, the connection cannot be reused.
-    def setblocking(self, flag):
-        if self._headers is None:
-            raise ResponseNotReady()
-        if self._sock is None:
-            raise NotConnected("closed")
-        if flag:
-            raise ValueError("can only transition to non-blocking")
-        self._require_nonchunked()
-        sock = self._sock
-        if sock is not None:
-            sock.setblocking(False)
-        self._release_conn(True)
-        self._blocking = False
-        self._will_close = True
+    def close(self):
+        reusable = (self._reusable and self.status != 101 and self._response_bytes == self._response_length)
+        self._finish_response(reusable)
 
-    # Hand the socket to asyncio after detaching it from this response.
-    def as_async_stream(self):
-        if self._sock is None:
-            return None
-        import asyncio
-        self.setblocking(False)
+    def abort(self, value="aborted"):
+        self._finish_response(False)
+        raise IncompleteRead(value, self._response_bytes, self._response_length)
+
+    def detach(self):
         sock, self._sock = self._sock, None
-        return asyncio.StreamReader(sock)
+        self._return_socket_to_connection(sock, False)
+        return sock
 
-    def _require_blocking(self):
-        if not self._blocking:
-            raise ValueError("operation requires a blocking socket")
+    def _finish_response(self, reusable):
+        sock = self._sock
+        if sock is None:
+            return
 
-    def _require_nonchunked(self):
-        if self._chunked:
-            raise ValueError("operation requires a non-chunked stream")
+        self._sock = None
+        reusable = self._return_socket_to_connection(sock, reusable)
+        if not reusable:
+            _close_quietly(sock)
 
-    def _readline(self):
-        if self._sock is None:
-            return None
-        return self._read_wrapper(False, self._sock.readline)
+    def _return_socket_to_connection(self, sock, reusable):
+        conn = self._conn
+        if conn is None:
+            return False
 
-    def _read_status_line(self):
+        self._conn = None
+        if conn._resp is not self or conn._sock is not sock:
+            return False
+
+        conn._resp = None
+        if not reusable:
+            conn._sock = None
+        conn._reset_request()
+        return reusable
+
+    def _call_body_io(self, func, *args):
+        loops = 3
+        while loops > 0:
+            loops -= 1
+            try:
+                return func(*args)
+            except OSError as e:
+                err = getattr(e, "errno", None)
+                if err == errno.EINTR and loops > 0:
+                    continue
+                self._finish_response(False)
+                if err == errno.EINTR:
+                    raise
+                _reraise_transport_error(e)
+            except Exception:
+                self._finish_response(False)
+                raise
+
+    def _get_chunk_left(self):
         while True:
+            if self._chunk_left is None:
+                line = self._call_body_io(self._sock.readline)
+                if not line:
+                    self.abort()
+                sep = line.find(b";")
+                try:
+                    if sep >= 0:
+                        line = line[:sep]
+                    size = int(line, 16)
+                    if size < 0:
+                        self.abort("negative chunk-size")
+                except MemoryError:
+                    self._finish_response(False)
+                    raise
+                except ValueError:
+                    self.abort("malformed chunk-size")
+                if size > 0:
+                    self._chunk_left = size
+                    return size
+                while True:
+                    line = self._call_body_io(self._sock.readline)
+                    if line == _CRLF or line == _LF:
+                        self._response_chunked = False
+                        self._response_length = self._response_bytes
+                        self.close()
+                        return 0
+                    if not line:
+                        self.abort()
+            elif self._chunk_left == 0:
+                line = self._call_body_io(self._sock.readline)
+                if not line:
+                    self.abort()
+                if line != _CRLF and line != _LF:
+                    self.abort("malformed terminator")
+                self._chunk_left = None
+            else:
+                return self._chunk_left
+
+    def _append_read_data(self, out, data):
+        try:
+            if out is _EMPTY:
+                return data
+            if type(out) is bytes:
+                out = bytearray(out)
+            out.extend(data)
+            return out
+        except MemoryError:
+            self._finish_response(False)
+            raise
+
+    def _read_impl(self, buf, amt):
+        into = buf is not None
+        sock = self._sock
+
+        if sock is None:
+            if (self._response_length is not None and
+                    self._response_bytes == self._response_length):
+                return 0 if into else _EMPTY
+            raise NotConnected()
+
+        if into and not buf:
+            return 0
+        if into:
+            amt = len(buf)
+            unbounded = False
+        else:
+            unbounded = amt is None or amt < 0
+
+        if not unbounded and amt == 0:
+            return 0 if into else _EMPTY
+
+        length = self._response_length
+        if length is not None:
+            remaining = length - self._response_bytes
+            if remaining == 0:
+                self.close()
+                return 0 if into else _EMPTY
+            if unbounded:
+                amt = remaining
+                unbounded = False
+            else:
+                amt = min(amt, remaining)
+
+        if into:
+            if self._response_chunked:
+                bmv = buf if isinstance(buf, memoryview) else memoryview(buf)
+                total = 0
+                while total < amt:
+                    want = min(self._get_chunk_left(), amt - total)
+                    if want == 0:
+                        break
+                    target = bmv[total:]
+                    n = self._call_body_io(sock.readinto, target, want)
+                    if not n:
+                        self.abort()
+                    self._response_bytes += n
+                    self._chunk_left -= n
+                    total += n
+                return total
+
+            n = self._call_body_io(sock.readinto, buf, amt)
+            if not n:
+                if self._response_length is None:
+                    self._response_length = self._response_bytes
+                    self.close()
+                    return 0
+                self.abort()
+
+            self._response_bytes += n
+            if length is not None and self._response_bytes >= length:
+                self.close()
+            return n
+
+        if self._response_chunked:
+            out = _EMPTY
+            len_out = 0
+            while unbounded or len_out < amt:
+                avail = self._get_chunk_left()
+                if unbounded:
+                    want = min(avail, self._blocksize)
+                else:
+                    want = min(amt - len_out, avail, self._blocksize)
+                if want == 0:
+                    break
+                chunk = self._call_body_io(sock.read, want)
+                if not chunk:
+                    self.abort()
+                len_chunk = len(chunk)
+                self._response_bytes += len_chunk
+                self._chunk_left -= len_chunk
+                len_out += len_chunk
+                out = self._append_read_data(out, chunk)
+            return out
+
+        out = _EMPTY
+        len_out = 0
+        while unbounded or len_out < amt:
+            if unbounded:
+                want = self._blocksize
+            else:
+                want = min(amt - len_out, self._blocksize)
+            data = self._call_body_io(sock.read, want)
+            if not data:
+                if self._response_length is None:
+                    self._response_length = self._response_bytes
+                    self.close()
+                    break
+                self.abort()
+            len_data = len(data)
+            self._response_bytes += len_data
+            len_out += len_data
+            out = self._append_read_data(out, data)
+            if length is not None and self._response_bytes >= length:
+                self.close()
+                break
+        return out
+
+class HTTPConnection:
+    default_port = HTTP_PORT
+    _blocksize = 2048
+    _request_head_size = 1024
+
+    def __init__(self, host, port=None, timeout=_DEFAULT_TIMEOUT,
+                 *, blocksize=None, network=None):
+        (self.host,
+         self._hostaddr,
+         self._hostname,
+         self._hostport,
+         self.port) = _parse_authority(host, port, self.default_port)
+        self.timeout = timeout
+        if blocksize is not None:
+            if blocksize <= 0:
+                raise ValueError("blocksize must be positive")
+            self._blocksize = blocksize
+        self._network = network
+        self._sock = None
+        self._resp = None
+        self._request_head = None
+        self._reset_request()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
+        return False
+
+    def connect(self):
+        self.close()
+        self._open_socket()
+
+    def close(self):
+        sock = self.detach()
+        _close_quietly(sock)
+
+    def detach(self):
+        self._reset_request()
+        resp = self._resp
+        if resp is not None:
+            self._sever_response(resp)
+        sock, self._sock = self._sock, None
+        return sock
+
+    def request(self, method, url, body=None, headers=None, *, encode_chunked=None):
+        self.putrequest(method, url)
+        try:
+            if headers is not None:
+                if isinstance(headers, dict):
+                    headers = headers.items()
+                for key, value in headers:
+                    self.putheader(key, value)
+        except Exception:
+            self._reset_request()
+            raise
+
+        self.endheaders(body, encode_chunked=encode_chunked)
+
+    def putrequest(self, method, url, *, skip_host=False):
+        self._reset_request()
+        try:
+            method = _encode_and_validate(method, 3)
+            if not method:
+                raise ValueError("bad method")
+            if not isinstance(method, bytes):
+                method = bytes(method)
+            if not method.isupper():
+                method = method.upper()
+
+            if url:
+                url = _encode_and_validate(url, 3)
+                if not isinstance(url, bytes):
+                    url = bytes(url)
+            else:
+                url = b"/"
+
+            self.method = method
+            self.url = url
+
+            if self._request_head is None:
+                self._request_head = bytearray(self._request_head_size)
+                self._request_head[:] = _EMPTY
+            self._request_head.extend(method)
+            self._request_head.extend(b" ")
+            self._request_head.extend(url)
+            self._request_head.extend(b" HTTP/1.1\r\n")
+
+            if skip_host:
+                self._request_flags |= _RF_HOST
+        except Exception:
+            self._reset_request()
+            raise
+
+    def putheader(self, name, value):
+        try:
+            name = _encode_and_validate(name, 19)
+            if value is not None:
+                value = _encode_and_validate(value, 0)
+                self._append_header(name, value)
+            self._track_request_header(name, value)
+        except Exception:
+            self._reset_request()
+            raise
+
+    def endheaders(self, body=None, *, encode_chunked=None):
+        try:
+            body = self._prep_request(body, encode_chunked)
+        except Exception:
+            self._reset_request()
+            raise
+
+        try:
             if self._sock is None:
-                raise RemoteDisconnected()
-            first = self._read_wrapper(False, self._sock.read, 1)
+                self._open_socket()
+            self._send_raw(self._request_head, False)
+            self._send_raw(_CRLF, False)
+            self._send_request_body(body)
+        except Exception:
+            self._abort_attempt()
+            raise
+
+    def _prep_request(self, body, encode_chunked):
+        if isinstance(body, str):
+            body = body.encode()
+        flags = self._request_flags
+
+        if encode_chunked is None:
+            self._request_chunked = bool(flags & _RF_TRANSFER_CHUNKED)
+        else:
+            self._request_chunked = bool(encode_chunked)
+
+        if self._request_length is not None and self._request_length < 0:
+            self._request_length = None
+            if not (flags & _RF_CONNECTION_CLOSE):
+                self._append_header(_CONNECTION, b"close")
+            self._request_flags |= _RF_CONNECTION_CLOSE
+
+        if not (flags & _RF_HOST):
+            self._append_header(_HOST, self._hostport)
+
+        if not (flags & _RF_ACCEPT_ENCODING):
+            self._append_header(_ACCEPT_ENCODING, b"identity")
+
+        if self._request_chunked:
+            if not (flags & _RF_TRANSFER_ENCODING):
+                self._append_header(_TRANSFER_ENCODING, _CHUNKED)
+        else:
+            if not (flags & _RF_CONTENT_LENGTH):
+                if body is None:
+                    if self.method in _METHODS_EXPECTING_BODY:
+                        self._request_length = 0
+                        self._append_header(_CONTENT_LENGTH, b"0")
+                elif isinstance(body, (bytes, bytearray, memoryview)):
+                    self._request_length = len(body)
+                    self._append_header(_CONTENT_LENGTH, str(len(body)).encode())
+
+        return body
+
+    def send(self, data):
+        try:
+            if isinstance(data, str):
+                data = data.encode()
+            self._send_request_body(data)
+        except Exception:
+            self._abort_attempt()
+            raise
+
+    def _send_request_body(self, data):
+        send = self._send_chunk if self._request_chunked else self._send_raw
+
+        if data is None:
+            return
+
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            send(data)
+            return
+
+        reader = getattr(data, "readinto", None)
+        if callable(reader):
+            buf = bytearray(self._blocksize)
+            bmv = memoryview(buf)
+            while True:
+                try:
+                    n = reader(buf)
+                except OSError as e:
+                    _reraise_body_error(e)
+                if n is None:
+                    continue
+                if type(n) is not int or n < 0 or n > self._blocksize:
+                    raise RuntimeError("invalid body part")
+                if n == 0:
+                    return
+                if n == self._blocksize:
+                    send(buf)
+                else:
+                    send(bmv[:n])
+
+        reader = getattr(data, "read", None)
+        if callable(reader):
+            while True:
+                try:
+                    buf = reader(self._blocksize)
+                except OSError as e:
+                    _reraise_body_error(e)
+                if buf is None:
+                    continue
+                if isinstance(buf, str):
+                    buf = buf.encode()
+                if not isinstance(buf, (bytes, bytearray, memoryview)):
+                    raise RuntimeError("invalid body part")
+                if not buf:
+                    return
+                send(buf)
+
+        try:
+            if isgeneratorfunction(data):
+                data = data()
+        except OSError as e:
+            _reraise_body_error(e)
+
+        try:
+            parts = iter(data)
+        except TypeError:
+            raise RuntimeError("invalid body")
+
+        while True:
+            try:
+                part = next(parts)
+            except StopIteration:
+                return
+            except OSError as e:
+                _reraise_body_error(e)
+
+            if isinstance(part, str):
+                part = part.encode()
+
+            if isinstance(part, (bytes, bytearray, memoryview)):
+                send(part)
+            else:
+                raise RuntimeError("invalid body part")
+
+    def _send_raw(self, data, accounting=True):
+        if not data:
+            return
+        sock = self._sock
+        if sock is None:
+            raise NotConnected()
+
+        try:
+            sock.sendall(data)
+            if accounting is True:
+                self._request_bytes += len(data)
+        except OSError as e:
+            _reraise_transport_error(e)
+
+    def _send_chunk(self, data, accounting=True):
+        if not data:
+            return
+        self._send_raw(b"%X\r\n" % len(data), False)
+        self._send_raw(data, accounting)
+        self._send_raw(_CRLF, False)
+
+    def getresponse(self, *, decode_chunked=None, all_headers=False, and_cookies=None):
+        if self._sock is None:
+            raise NotConnected()
+
+        response_reusable = not (self._request_flags & _RF_CONNECTION_CLOSE)
+        resp = None
+        try:
+            if self._request_chunked:
+                self._send_raw(b"0\r\n\r\n", False)
+            elif type(self._request_length) is int:
+                if self._request_bytes < self._request_length:
+                    raise ImproperConnectionState()
+                if self._request_bytes > self._request_length:
+                    response_reusable = False
+
+            http_version, status, reason = self._read_response_status()
+            response_headers = _parse_headers(self._read_head_line, all_headers, and_cookies)
+
+            resp = HTTPResponse(
+                self._sock, self.method, self.url,
+                http_version, status, reason, response_headers,
+                decode_chunked=decode_chunked)
+            resp._blocksize = self._blocksize
+            resp._reusable = resp._reusable and response_reusable
+
+            if resp._reusable:
+                self._resp = resp
+                resp._conn = self
+                if self._request_head is not None:
+                    self._request_head[:] = _EMPTY
+            else:
+                self._resp = None
+                resp._conn = None
+                self._sock = None
+                self._reset_request()
+
+            if resp._response_length == 0 and resp.status != 101:
+                resp.close()
+
+            return resp
+        except Exception:
+            self._abort_attempt(resp)
+            raise
+        finally:
+            if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
+                gc.collect()
+
+    def _append_header(self, name, value):
+        self._request_head.extend(name)
+        self._request_head.extend(b": ")
+        self._request_head.extend(value)
+        self._request_head.extend(_CRLF)
+
+    def _track_request_header(self, name, value):
+        len_name = len(name)
+        flags = self._request_flags
+
+        if len_name == 4:
+            if _equalsci(name, _HOST, 4):
+                flags |= _RF_HOST
+        elif len_name == 10:
+            if _equalsci(name, _CONNECTION, 10):
+                flags |= _RF_CONNECTION
+                if value is not None and len(value) == 5 and _equalsci(value, b"close", 5):
+                    flags |= _RF_CONNECTION_CLOSE
+        elif len_name == 14:
+            if _equalsci(name, _CONTENT_LENGTH, 14):
+                flags |= _RF_CONTENT_LENGTH
+                if value is not None:
+                    current = self._request_length
+                    try:
+                        value = int(value, 10)
+                    except (TypeError, ValueError):
+                        value = -1
+                    if value >= 0 and (current is None or current == value):
+                        self._request_length = value
+                    else:
+                        self._request_length = -1
+        elif len_name == 15:
+            if _equalsci(name, _ACCEPT_ENCODING, 15):
+                flags |= _RF_ACCEPT_ENCODING
+        elif len_name == 17:
+            if _equalsci(name, _TRANSFER_ENCODING, 17):
+                flags |= _RF_TRANSFER_ENCODING
+                if value is not None:
+                    if len(value) == 7 and _equalsci(value, _CHUNKED, 7):
+                        flags |= _RF_TRANSFER_CHUNKED
+
+        self._request_flags = flags
+
+    def _call_head_io(self, func, *args):
+        loops = 3
+        while loops > 0:
+            loops -= 1
+            try:
+                return func(*args)
+            except OSError as e:
+                err = getattr(e, "errno", None)
+                if err == errno.EINTR and loops > 0:
+                    continue
+                if err == errno.EINTR:
+                    raise
+                _reraise_transport_error(e)
+
+    def _read_head_line(self):
+        return self._call_head_io(self._sock.readline)
+
+    def _read_response_status(self):
+        while True:
+            first = self._call_head_io(self._sock.read, 1)
             if not first:
                 raise RemoteDisconnected()
-            if self._conn is not None:
-                self._conn.response_started = True
-            if first == _CR or first == _LF:
-                continue
             if first != b"H":
                 raise BadStatusLine()
-            rest = self._readline()
-            if not rest or not rest.endswith(_LF):
-                raise RemoteDisconnected()
-            return rest
+            line = self._read_head_line()
+            if not line or not line.endswith(_LF):
+                raise BadStatusLine()
 
-    # Consume informational 1xx responses before returning the final status.
-    def _read_status(self):
-        while True:
-            line = self._read_status_line()
-            if _DEBUG:
-                print("status-H: ", repr(line))
             if not line.startswith(b"TTP/"):
                 raise BadStatusLine()
 
-            line = line.split(None, 2)
-            if len(line) == 3:
-                version, status, reason = line
-                reason = reason.rstrip()
-            elif len(line) == 2:
-                version, status = line
-                reason = _BLANK
+            parts = line.split(None, 2)
+            if len(parts) == 3:
+                version, status, reason = parts
+            elif len(parts) == 2:
+                version, status = parts
+                reason = _EMPTY
             else:
                 raise BadStatusLine()
 
-            try:
-                status = int(status, 10)
-            except ValueError:
+            if len(status) != 3 or not status.isdigit():
                 raise BadStatusLine()
-            if not (100 <= status <= 999):
-                raise BadStatusLine()
-            if not (100 <= status <= 199) or status == 101:
+            status = int(status, 10)
+            if status == 101 or status >= 200:
                 break
+            if status < 100:
+                raise BadStatusLine()
 
             while True:
-                line = self._readline()
+                line = self._read_head_line()
                 if line == _CRLF or line == _LF or not line:
                     break
-                if _DEBUG:
-                    print("header:", repr(line))
                 if not line.endswith(_LF):
                     raise BadStatusLine()
 
@@ -954,531 +1120,56 @@ class HTTPResponse:
         elif version.startswith(b"TTP/1."):
             version = 11
         else:
-            raise BadStatusLine()
+            raise UnknownProtocol()
 
         return version, status, reason
 
-    # Return bytes left in the current chunk, parsing new chunk headers as needed.
-    def _next_chunk(self):
-        while True:
-            if self._chunk_left is None:
-                line = self._readline()
-                if not line:
-                    self.abort()
-                sep = line.find(b";")
-                if sep >= 0:
-                    line = line[:sep]
-                try:
-                    size = int(line, 16)
-                except ValueError:
-                    size = -1
-                if size < 0:
-                    self._severed = True
-                    self._teardown(True)
-                    raise IncompleteRead(self._bytes_read, self._length)
-                if size > 0:
-                    self._chunk_left = size
-                    return size
-                while True:
-                    line = self._readline()
-                    if line == _CRLF or line == _LF:
-                        self._chunked = False
-                        self._length = self._bytes_read
-                        self.close()
-                        return 0
-                    if not line:
-                        self.abort()
-            elif self._chunk_left == 0:
-                line = self._readline()
-                if not line:
-                    self.abort()
-                if line != _CRLF and line != _LF:
-                    self._severed = True
-                    self._teardown(True)
-                    raise IncompleteRead(self._bytes_read, self._length)
-                self._chunk_left = None
-            else:
-                return self._chunk_left
-
-# Minimal HTTP/1.1 client connection with optional keep-alive reuse.
-class HTTPConnection:
-    default_port = HTTP_PORT
-    response_class = HTTPResponse
-    blocksize = 2048
-    _merge_buffer_size = 1024
-
-    def __init__(self, host, port=None, timeout=_DEFAULT_TIMEOUT,
-                 *, blocksize=None, network=None):
-        self._set_host(host, port)
-        self.timeout = timeout
-        if blocksize is not None:
-            self.blocksize = blocksize
-        self._network = network
-        self._sock = None
-        self._resp = None
+    def _reset_request(self):
         self.method = None
         self.url = None
-        self.request_sent = False
-        self.response_started = False
-        self._merge_buffer = None
-        self._merged = 0
-        self._state = _CS_IDLE
+        self._request_length = None
+        self._request_bytes = 0
+        self._request_flags = 0
+        self._request_chunked = False
+        if self._request_head is not None:
+            self._request_head[:] = _EMPTY
 
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        self.close()
-        return False
-
-    # Drop all request/response state and detach any active response.
-    def _reset(self):
-        self._state = _CS_IDLE
-        self.method = None
-        self.url = None
-        self._merged = 0
-        self._merge_buffer = None
-        resp, self._resp = self._resp, None
+    def _abort_attempt(self, resp=None):
+        if resp is None:
+            resp = self._resp
+        resp_sock = None
         if resp is not None:
-            resp._sock = None
-            resp._conn = None
-            resp._severed = True
+            resp_sock = self._sever_response(resp)
         sock, self._sock = self._sock, None
+        _close_quietly(sock)
+        if resp_sock is not sock:
+            _close_quietly(resp_sock)
+
+    def _sever_response(self, resp):
+        sock = resp._sock
+        if self._resp is resp:
+            self._resp = None
+        if resp._conn is self:
+            resp._conn = None
+        resp._sock = None
         return sock
 
-    def _fail_request(self):
-        sock = self._reset()
-        if sock is not None:
-            try: sock.close()
-            except OSError: pass
-
-    def close(self):
-        sock = self._reset()
-        if sock is not None:
-            try: sock.close()
-            except OSError: pass
-
-    def detach(self):
-        if self._state == _CS_RESPONSE:
-            raise ImproperConnectionState("response active; use response.detach()")
-        if self._state != _CS_IDLE:
-            raise ResponseNotReady()
-        return self._reset()
-
-    # Parse host[:port], including bracketed and raw IPv6 literals.
-    def _set_host(self, host, port=None):
-        rest = ""
-        if host.startswith("["):
-            j = host.find("]")
-            if j == -1:
-                raise InvalidURL()
-            self.host, rest = host[:j+1], host[j+1:]
-            if rest:
-                if not rest.startswith(":"):
-                    raise InvalidURL()
-                rest = rest[1:]
-            self._hostaddr = self.host[1:-1]
-            self._hostname = None
-        elif host.count(":") > 1:
-            self.host = "[" + host + "]"
-            self._hostaddr = host
-            self._hostname = None
-        else:
-            i = host.find(":")
-            if i >= 0:
-                self.host, rest = host[:i], host[i+1:]
-            else:
-                self.host = host
-            len_host = len(self.host)
-            if len_host > 0 and _validate(self.host, 0, len_host, 256):
-                self._hostaddr = self.host
-                self._hostname = None
-            else:
-                self._hostaddr = self.host
-                self._hostname = self.host
-        if rest:
-            if rest.isdigit():
-                port = int(rest, 10)
-            else:
-                raise InvalidURL()
-        if port is None or port == self.default_port:
-            self._hostport = self.host.encode()
-            self.port = self.default_port
-        else:
-            self._hostport = b"%s:%d" % (self.host, port)
-            self.port = port
-
-    # Bring the link up via the network callback.
-    def require_network(self):
-        if self._network is not None and not self._network():
-            raise NotConnected("network")
-
-    def connect(self):
-        self.close()
-        self.request_sent = False
-        self.response_started = False
-        self._open_socket()
-
-    # Open a TCP socket and normalise common connection failures.
     def _open_socket(self):
-        try:
-            self._sock = create_connection((self._hostaddr, self.port), self.timeout)
-        except OSError as e:
-            err = e.errno
-            if err == errno.ETIMEDOUT:
-                raise TimeoutError("connect")
-            if err is not None and (err < 0 or err in _CONNECTION_ERRS
-                                    or err in _TRANSIENT_ERRNOS):
-                raise NotConnected("connect")
-            raise
-
-    # Convenience wrapper that builds headers, sends the request, and writes the body.
-    def request(self, method, url, body=None, headers=None, *, encode_chunked=None):
-        if self._state != _CS_IDLE:
-            raise CannotSendRequest()
-
-        skip_host = False
-        have_content_length = False
-        skip_accept_encoding = False
-        have_transfer_encoding = False
-
-        method = _encode_and_validate(method, 3)
-        if not method:
-            raise ValueError("bad method")
-        if not isinstance(method, bytes):
-            method = bytes(method)
-        if not method.isupper():
-            method = method.upper()
-
-        pairs = None
-        if headers is not None:
-            if isinstance(headers, dict):
-                pairs = headers.items()
-            elif isinstance(headers, (list, tuple)):
-                pairs = headers
-            else:
-                pairs = list(headers)
-            headers = []
-            for key, val in pairs:
-                key = _normalize_header_name(key, lower=False)
-                if key is None:
-                    raise ValueError("bad header name")
-                if not isinstance(key, bytes):
-                    key = bytes(key)
-                val = _encode_and_validate(val, 0)
-                headers.append((key, val))
-                len_key = len(key)
-                if len_key == 4:
-                    if _containslc(key, 4, _HOST, 4):
-                        skip_host = True
-                elif len_key == 14:
-                    if _containslc(key, 14, _CONTENT_LENGTH, 14):
-                        have_content_length = True
-                elif len_key == 15:
-                    if _containslc(key, 15, _ACCEPT_ENCODING, 15):
-                        skip_accept_encoding = True
-                elif len_key == 17:
-                    if _containslc(key, 17, _TRANSFER_ENCODING, 17):
-                        have_transfer_encoding = True
-            del pairs
-        else:
-            headers = []
-
-        if isinstance(body, str):
-            body = body.encode()
-
-        # Choose Content-Length when possible; otherwise fall back to chunked upload.
-        if encode_chunked is None:
-            if have_content_length or have_transfer_encoding:
-                encode_chunked = False
-            elif body is None:
-                encode_chunked = False
-                if method in _METHODS_EXPECTING_BODY:
-                    headers.append((_CONTENT_LENGTH, b"0"))
-                    have_content_length = True
-            elif isinstance(body, (bytes, bytearray, memoryview)):
-                encode_chunked = False
-                headers.append((_CONTENT_LENGTH, b"%d" % len(body)))
-                have_content_length = True
-            else:
-                encode_chunked = True
-                headers.append((_TRANSFER_ENCODING, _CHUNKED))
-                have_transfer_encoding = True
-        elif encode_chunked and not have_transfer_encoding:
-            if have_content_length:
-                encode_chunked = False
-            else:
-                headers.append((_TRANSFER_ENCODING, _CHUNKED))
-                have_transfer_encoding = True
-
-        self.putrequest(method, url, skip_host=skip_host, skip_accept_encoding=skip_accept_encoding)
-
-        for key, val in headers:
-            self.putheader(key, val)
-
-        self.endheaders(body, encode_chunked=encode_chunked)
-
-    # Finalise the request by parsing the response and tracking socket reusability.
-    def getresponse(self, **kwargs):
-        if (self._state != _CS_BODY
-            or self._resp is not None
-            or self._sock is None
-            or self._merged):
-            raise ResponseNotReady()
-        resp = None
-        try:
-            resp = self.response_class(self._sock, self.method, self.url)
-            resp._conn = self
-            resp.begin(**kwargs)
-            if resp._will_close:
-                self._sock = None
-                self.method = None
-                self.url = None
-                self._state = _CS_IDLE
-                resp._conn = None
-                if resp._length == 0 and resp.status != 101:
-                    resp.close()
-            else:
-                self._state = _CS_RESPONSE
-                self._resp = resp
-                if resp._length == 0 and resp.status != 101 and not resp._chunked:
-                    resp.close()
-            return resp
-        except Exception:
-            if resp is not None:
-                if resp._sock is None:
-                    self._sock = None
-                resp._sock = None
-                resp._conn = None
-            self._fail_request()
-            raise
-        finally:
-            if _GC_THRESHOLD and gc.mem_free() < _GC_THRESHOLD:
-                gc.collect()
-
-    # Start the request line and mandatory default headers.
-    def putrequest(self, method, url, skip_host=False, skip_accept_encoding=False):
-        if self._state != _CS_IDLE:
-            raise CannotSendRequest()
-
-        method = _encode_and_validate(method, 3)
-        if not method:
-            raise ValueError("bad method")
-        if not isinstance(method, bytes):
-            method = bytes(method)
-        if not method.isupper():
-            method = method.upper()
-
-        url = _encode_and_validate(url, 3)
-        if not isinstance(url, bytes):
-            url = bytes(url)
-        if not url:
-            url = b"/"
-
-        self.request_sent = False
-        self.response_started = False
-        self.require_network()
-        if self._sock is None:
-            self._open_socket()
-
-        self._merged = 0
-        self._resp = None
-        self.method = method
-        self.url = url
-        self._state = _CS_HEADERS
-
-        self._putheaderparts(False, method, b" ", url, b" HTTP/1.1\r\n")
-
-        if not skip_host:
-            self._putheaderparts(False, _HOST, b": ", self._hostport, _CRLF)
-        if not skip_accept_encoding:
-            self._putheaderparts(False, _ACCEPT_ENCODING, b": identity\r\n")
-
-    # Add one header line per supplied value.
-    def putheader(self, name, *values, strict=True):
-        if self._state != _CS_HEADERS:
-            raise CannotSendHeader()
-        try:
-            name = _encode_and_validate(name, 19)
-        except Exception:
-            self._fail_request()
-            raise
-
-        if not values:
-            values = (_BLANK,)
-        for v in values:
+        network = self._network
+        if network is not None:
             try:
-                self._putheaderparts(False, name, b": ", _encode_and_validate(v, 0), _CRLF)
-            except (ValueError, UnicodeError):
-                if strict:
-                    self._fail_request()
-                    raise
-
-    def putcookie(self, name, value):
-        if self._state != _CS_HEADERS:
-            raise CannotSendHeader()
+                ready = network()
+            except Exception as e:
+                raise NetworkError(str(e))
+            if not ready:
+                raise NetworkError()
+        if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
+            gc.collect()
         try:
-            name = _encode_and_validate(name, 239)
-            value = _encode_and_validate(value, 32)
-        except Exception:
-            self._fail_request()
-            raise
-        self._putheaderparts(False, _COOKIE_COLON, name, b"=", value, _CRLF)
-
-    def putrawcookie(self, value):
-        if self._state != _CS_HEADERS:
-            raise CannotSendHeader()
-        try:
-            value = _encode_and_validate(value, 0)
-        except Exception:
-            self._fail_request()
-            raise
-        self._putheaderparts(False, _COOKIE_COLON, value, _CRLF)
-
-    # Finish the header section and optionally send the body immediately.
-    def endheaders(self, message_body=None, *, encode_chunked=False):
-        if self._state != _CS_HEADERS:
-            raise CannotSendHeader()
-        try:
-            self._putheaderparts(True, _CRLF)
-            self.request_sent = True
-            self._state = _CS_BODY
-            if message_body is not None or encode_chunked:
-                self.send(message_body, encode_chunked=encode_chunked)
-        except Exception:
-            self._fail_request()
-            raise
-
-    # Send bytes, strings, file-like objects, or iterables as the request body.
-    def send(self, data, *, encode_chunked=False, final_chunk=True):
-        if self._state != _CS_BODY and self._state != _CS_CHUNKING:
-            raise CannotSendRequest()
-        if self._state == _CS_CHUNKING and not encode_chunked:
-            raise CannotSendRequest()
-        try:
-            send = self._send_chunk if encode_chunked else self._send_raw
-
-            if isinstance(data, str):
-                data = data.encode()
-
-            if _DEBUG:
-                print("send:", type(data).__name__)
-
-            if data is None:
-                pass
-
-            elif isinstance(data, (bytes, bytearray, memoryview)):
-                send(data)
-
-            elif hasattr(data, "readinto"):
-                len_buf = self.blocksize
-                buf = bytearray(len_buf)
-                bmv = memoryview(buf)
-                while True:
-                    n = data.readinto(buf)
-                    if not n:
-                        break
-                    if n == len_buf:
-                        send(buf)
-                    else:
-                        send(bmv[:n])
-
-            elif hasattr(data, "read"):
-                while True:
-                    d = data.read(self.blocksize)
-                    if isinstance(d, str):
-                        d = d.encode()
-                    if not d:
-                        break
-                    send(d)
-
-            else:
-                for d in data:
-                    if isinstance(d, str):
-                        d = d.encode()
-                    if d is not None:
-                        send(d)
-
-            if encode_chunked and final_chunk:
-                if _DEBUG:
-                    print("send: terminator")
-                self._send_chunk(None)
-
-            if encode_chunked:
-                self._state = _CS_BODY if final_chunk else _CS_CHUNKING
-
-        except Exception:
-            self._fail_request()
-            raise
-
-    # Merge tiny header fragments into one buffer before writing to the socket.
-    def _putheaderparts(self, flush, *parts):
-        try:
-            buf = self._merge_buffer
-            if buf is None:
-                if not self._merge_buffer_size:
-                    for part in parts:
-                        self._send_raw(part)
-                    return
-                buf = self._merge_buffer = bytearray(self._merge_buffer_size)
-            size = len(buf)
-            for part in parts:
-                len_part = len(part)
-                if len_part >= size:
-                    if self._merged:
-                        self._send_raw(memoryview(buf)[:self._merged])
-                        self._merged = 0
-                    self._send_raw(part)
-                elif self._merged + len_part <= size:
-                    buf[self._merged:self._merged+len_part] = part
-                    self._merged += len_part
-                else:
-                    self._send_raw(memoryview(buf)[:self._merged])
-                    buf[:len_part] = part
-                    self._merged = len_part
-            if flush:
-                if self._merged:
-                    self._send_raw(memoryview(buf)[:self._merged])
-                    self._merged = 0
-                self._merge_buffer = None
-        except Exception:
-            self._fail_request()
-            raise
-
-    # Send all bytes or convert socket failure into a connection-level error.
-    def _send_raw(self, data):
-        if not data:
-            return
-        if _DEBUG:
-            print("send:", len(data), "bytes")
-
-        if self._sock is None:
-            self._fail_request()
-            raise NotConnected("closed")
-
-        try:
-            self._sock.sendall(data)
+            self._sock = create_connection(
+                (self._hostaddr, self.port), self.timeout)
         except OSError as e:
-            err = e.errno
-            self._fail_request()
-            if err == errno.ETIMEDOUT:
-                raise TimeoutError("send")
-            if err in _CONNECTION_ERRS or err in _TRANSIENT_ERRNOS:
-                raise NotConnected("send")
-            raise
-
-    # Write one HTTP chunk, or the terminating zero-length chunk.
-    def _send_chunk(self, data):
-        if data is None:
-            if _DEBUG:
-                print("send: terminating chunk")
-            self._send_raw(b"0\r\n\r\n")
-            return
-        if not data:
-            return
-        self._send_raw(b"%X\r\n" % len(data))
-        self._send_raw(data)
-        self._send_raw(_CRLF)
+            _reraise_transport_error(e)
 
 try:
     import ssl
@@ -1486,38 +1177,26 @@ except ImportError:
     pass
 else:
 
-    # HTTPS variant wraps the TCP socket with MicroPython SSL support.
-    # WARNING: certificate verification is OFF unless you pass an ssl context.
     class HTTPSConnection(HTTPConnection):
         default_port = HTTPS_PORT
 
         def __init__(self, *args, context=None, **kwargs):
             super().__init__(*args, **kwargs)
             if context is None:
-                # Default context favours compatibility on devices without CA stores.
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                 context.verify_mode = ssl.CERT_NONE
             self._context = context
 
-        # Replace the raw socket with a TLS-wrapped socket.
         def _open_socket(self):
             super()._open_socket()
-            gc.collect()
             raw = self._sock
+            gc.collect()
             try:
                 self._sock = self._context.wrap_socket(raw, server_hostname=self._hostname)
             except Exception as e:
                 self._sock = None
-                if raw is not None:
-                    try: raw.close()
-                    except OSError: pass
-                if isinstance(e, OSError):
-                    err = e.errno
-                    if err == errno.ETIMEDOUT:
-                        raise TimeoutError("tls")
-                    if err in _CONNECTION_ERRS or err in _TRANSIENT_ERRNOS:
-                        raise NotConnected("tls")
-                    raise
-                if isinstance(e, MemoryError):
-                    raise
-                raise OSError(errno.EIO, str(e))
+                _close_quietly(raw)
+                _reraise_transport_error(e)
+            finally:
+                gc.collect()
+
