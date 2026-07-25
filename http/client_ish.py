@@ -22,9 +22,9 @@ _CR = b"\r"
 _LF = b"\n"
 _CRLF = b"\r\n"
 _EMPTY = b""
+_CHUNKED = b"chunked"
 
 _ACCEPT_ENCODING = b"Accept-Encoding"
-_CHUNKED = b"chunked"
 _CONNECTION = b"Connection"
 _CONTENT_LENGTH = b"Content-Length"
 _HOST = b"Host"
@@ -35,8 +35,8 @@ _CONNECTION_ERRNOS = (
     errno.ECONNABORTED,
     errno.ECONNREFUSED,
     errno.ECONNRESET,
-    getattr(errno, "EPIPE", errno.ECONNABORTED),
-    getattr(errno, "ESHUTDOWN", errno.ECONNRESET),
+    getattr(errno, "EPIPE", 32),
+    getattr(errno, "ESHUTDOWN", 108),
 )
 
 class HTTPException(Exception): pass
@@ -88,45 +88,28 @@ def _reraise_body_error(exc):
         raise OSError(errno.EIO, str(exc))
     raise
 
-_generator = lambda: (yield)
-
-def isgeneratorfunction(obj):
-    return isinstance(obj, type(_generator))
-
 @micropython.viper
-def _validate(buf:ptr8, start:int, end:int, flags:int) -> int:
-    i = start
-    while i < end:
+def _ip4match(buf:ptr8, length:int) -> int:
+    i = 0
+    while i < length:
         b = buf[i]
-        if flags & 256:
-            if not(b == 46 or (48 <= b and b <= 57)):
-                return 0
-        elif b == 9:
-            if flags & 2:
-                return 0
-        elif b < 32:
-            return 0
-        elif b == 32:
-            if flags & 1:
-                return 0
-        elif b == 58:
-            if flags & 16:
-                return 0
-        elif b == 127:
+        if not (b == 46 or (48 <= b and b <= 57)):
             return 0
         i += 1
     return 1
 
-def _encode_and_validate(x, flags):
+def _encode_and_validate(x):
+    if x is None:
+        return None
     if isinstance(x, str):
         x = x.encode()
     elif not isinstance(x, (bytes, bytearray, memoryview)):
         x = str(x).encode()
-    if not _validate(x, 0, len(x), flags):
-        raise ValueError("invalid character")
+    if b"\r" in x or b"\n" in x:
+        return None
     return x
 
-def decode_latin1(buf, default=None):
+def _decode_latin1(buf, default=None):
     return default if buf is None else buf.decode()
 
 @micropython.viper
@@ -145,21 +128,16 @@ def _lower_case(buf:ptr8, start:int, end:int, out:ptr8) -> int:
         i += 1
     return 1
 
-def normalize_header_name(buf, start=0, end=None):
+def _normalize_name(buf):
     if isinstance(buf, str):
         buf = buf.encode()
     elif not isinstance(buf, (bytes, bytearray, memoryview)):
         return None
-    if end is None:
-        end = len(buf)
-    if not _validate(buf, start, end, 19):
-        return None
-    if _lower_case(buf, start, end, 0):
-        if start == 0 and end == len(buf):
-            return buf
-        return buf[start:end]
-    out = bytearray(end - start)
-    _lower_case(buf, start, end, out)
+    len_buf = len(buf)
+    if _lower_case(buf, 0, len_buf, 0):
+        return buf
+    out = bytearray(len_buf)
+    _lower_case(buf, 0, len_buf, out)
     return out
 
 @micropython.viper
@@ -206,10 +184,6 @@ def create_connection(address, timeout=None, *, resolver=None, error=NetworkErro
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             except (AttributeError, OSError):
                 pass
-            try:
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            except (AttributeError, OSError):
-                pass
             sock.connect(a)
             return sock
         except OSError as e:
@@ -252,42 +226,36 @@ def _parse_headers(readline, all_headers=False, and_cookies=None):
         if line[0] <= 32:
             continue
 
-        sep = line.find(b":")
-        if sep == -1:
+        pos = line.find(b":")
+        if pos == -1:
             continue
 
-        if sep == 0 or line[sep - 1] <= 32:
-            raise HTTPException("invalid header")
-        end = sep
-
         name = None
-
-        cands = _keep_response_headers.get(end)
+        cands = _keep_response_headers.get(pos)
         if cands is not None:
             for cand in cands:
-                if _equalsci(line, cand, end):
+                if _equalsci(line, cand, pos):
                     name = cand
                     break
 
         if name is None:
             if not all_headers:
                 continue
-            name = normalize_header_name(line, 0, end)
-            if name is None:
-                continue
-            if not isinstance(name, bytes):
-                name = bytes(name)
+            name = line[:pos]
         elif name == _SET_COOKIE and not and_cookies:
             continue
 
-        start, end = sep + 1, len(line)
+        start, end = pos + 1, len(line)
         while start < end and line[start] <= 32: start += 1
         while end > start and line[end - 1] <= 32: end -= 1
-        headers.append(name)
-        headers.append(line[start:end])
+        headers.append((name, line[start:end]))
 
 def _parse_authority(host, port, default_port):
+    if not isinstance(host, str):
+        raise TypeError("host must be str")
+
     rest = ""
+    ip4check = False
     if host.startswith("["):
         j = host.find("]")
         if j == -1:
@@ -309,14 +277,8 @@ def _parse_authority(host, port, default_port):
             normalized_host, rest = host[:i], host[i+1:]
         else:
             normalized_host = host
-        len_host = len(normalized_host)
-        if (len_host > 0 and
-                _validate(normalized_host, 0, len_host, 256)):
-            hostaddr = normalized_host
-            hostname = None
-        else:
-            hostaddr = normalized_host
-            hostname = normalized_host
+        hostaddr = normalized_host
+        ip4check = True
 
     if rest:
         if rest.isdigit():
@@ -324,13 +286,41 @@ def _parse_authority(host, port, default_port):
         else:
             raise InvalidURL()
 
+    encoded_host = normalized_host.encode()
+
+    if ip4check:
+        if encoded_host and _ip4match(encoded_host, len(encoded_host)):
+            hostname = None
+        else:
+            hostname = normalized_host
+
     if port is None or port == default_port:
-        hostport = normalized_host.encode()
+        hostport = encoded_host
         port = default_port
     else:
-        hostport = b"%s:%d" % (normalized_host, port)
+        hostport = b"%s:%d" % (encoded_host, port)
 
     return normalized_host, hostaddr, hostname, hostport, port
+
+def _parse_hostport_from_url(url):
+    if url.startswith(b"http://"):
+        start = 7
+    elif url.startswith(b"https://"):
+        start = 8
+    else:
+        return None
+    end = len(url)
+
+    for separator in (b"/", b"?", b"#"):
+        pos = url.find(separator, start)
+        if start <= pos < end:
+            end = pos
+
+    pos = url.rfind(b"@", start, end)
+    if start <= pos < end:
+        start = pos + 1
+
+    return url[start:end]
 
 def _determine_response_framing(method, http_version, status, response_headers):
     http10 = (http_version == 10)
@@ -338,35 +328,36 @@ def _determine_response_framing(method, http_version, status, response_headers):
     transfer_encoding_chunked = None
     reusable = None
 
-    for i in range(0, len(response_headers), 2):
-        name = response_headers[i]
-        value = response_headers[i+1]
-        len_value = len(value)
+    for key, val in response_headers:
+        len_key = len(key)
 
-        if name == _CONTENT_LENGTH:
+        if len_key == 14 and _equalsci(key, _CONTENT_LENGTH, 14):
             try:
-                value = int(value, 10)
+                val = int(val, 10)
             except (TypeError, ValueError):
-                value = -1
+                val = -1
 
-            if value < 0:
+            if val < 0:
                 content_length_value = -1
             elif content_length_value is None:
-                content_length_value = value
-            elif content_length_value != value:
+                content_length_value = val
+            elif content_length_value != val:
                 content_length_value = -1
 
-        elif name == _TRANSFER_ENCODING:
-            transfer_encoding_chunked = (len_value == 7) and _equalsci(value, _CHUNKED, 7)
+        elif len_key == 17 and _equalsci(key, _TRANSFER_ENCODING, 17):
+            if transfer_encoding_chunked is not False:
+                len_val = len(val)
+                if len_val == 7:
+                    transfer_encoding_chunked = bool(_equalsci(val, _CHUNKED, 7))
+                elif len_val > 7:
+                    transfer_encoding_chunked = val.endswith(_CHUNKED)
 
-        elif name == _CONNECTION:
-            if (len_value == 5) and _equalsci(value, b"close", 5):
-                reusable = False
-            elif (
-                (len_value == 10) and _equalsci(value, b"keep-alive", 10)
-                and reusable is None and http10
-            ):
-                reusable = True
+        elif len_key == 10 and _equalsci(key, _CONNECTION, 10):
+            if reusable is not False:
+                if http10:
+                    reusable = (len(val) == 10 and _equalsci(val, b"keep-alive", 10))
+                elif len(val) == 5 and _equalsci(val, b"close", 5):
+                    reusable = False
 
     if reusable is None:
         reusable = not http10
@@ -433,43 +424,39 @@ class HTTPResponse:
 
     @property
     def length(self):
-        return None if self._response_length is None else self._response_length - self._response_bytes
+        return None if (self._response_length is None) else (self._response_length - self._response_bytes)
 
     @property
     def reason(self):
-        return decode_latin1(self._reason.strip(), "")
+        return _decode_latin1(self._reason.strip(), "")
 
     def getheaders(self):
         out = []
-        headers = self._headers
-        for i in range(0, len(headers), 2):
+        for key, val in self._headers:
             try:
-                out.append((decode_latin1(headers[i]),
-                            decode_latin1(headers[i+1])))
+                out.append((_decode_latin1(key),
+                            _decode_latin1(val)))
             except UnicodeError:
                 pass
         return out
 
     def iter_rawheaders(self):
-        headers = self._headers
-        for i in range(0, len(headers), 2):
-            yield headers[i], headers[i+1]
+        return iter(self._headers)
 
     def getheader(self, name, default=None):
-        return decode_latin1(self.rawheader(name, None), default)
+        return _decode_latin1(self.rawheader(name, None), default)
 
     def rawheader(self, name, default=None, *, join=b", "):
-        if isinstance(name, str):
-            name = name.encode()
+        name = _normalize_name(name)
         len_name = len(name)
         result = None
-        for i in range(0, len(self._headers), 2):
-            key = self._headers[i]
-            if len(key) == len_name and _equalsci(name, key, len_name):
-                if result is None:
-                    result = self._headers[i+1]
-                else:
-                    result += join + self._headers[i+1]
+        for key, val in self._headers:
+            if len(key) != len_name or not _equalsci(key, name, len_name):
+                continue
+            if result is None:
+                result = val
+            else:
+                result += join + val
         return default if result is None else result
 
     def read(self, amt=None):
@@ -495,7 +482,7 @@ class HTTPResponse:
         reusable = (self._reusable and self.status != 101 and self._response_bytes == self._response_length)
         self._finish_response(reusable)
 
-    def abort(self, value="aborted"):
+    def _abort(self, value="aborted"):
         self._finish_response(False)
         raise IncompleteRead(value, self._response_bytes, self._response_length)
 
@@ -530,59 +517,48 @@ class HTTPResponse:
         return reusable
 
     def _call_body_io(self, func, *args):
-        loops = 3
-        while loops > 0:
-            loops -= 1
-            try:
-                return func(*args)
-            except OSError as e:
-                err = getattr(e, "errno", None)
-                if err == errno.EINTR and loops > 0:
-                    continue
-                self._finish_response(False)
-                if err == errno.EINTR:
-                    raise
-                _reraise_transport_error(e)
-            except Exception:
-                self._finish_response(False)
-                raise
+        try:
+            return func(*args)
+        except Exception as e:
+            self._finish_response(False)
+            _reraise_transport_error(e)
 
     def _get_chunk_left(self):
         while True:
             if self._chunk_left is None:
                 line = self._call_body_io(self._sock.readline)
                 if not line:
-                    self.abort()
-                sep = line.find(b";")
+                    self._abort()
+                pos = line.find(b";")
                 try:
-                    if sep >= 0:
-                        line = line[:sep]
+                    if pos >= 0:
+                        line = line[:pos]
                     size = int(line, 16)
                     if size < 0:
-                        self.abort("negative chunk-size")
+                        self._abort("negative chunk-size")
                 except MemoryError:
                     self._finish_response(False)
                     raise
                 except ValueError:
-                    self.abort("malformed chunk-size")
+                    self._abort("malformed chunk-size")
                 if size > 0:
                     self._chunk_left = size
                     return size
                 while True:
                     line = self._call_body_io(self._sock.readline)
-                    if line == _CRLF or line == _LF:
+                    if (line == _CRLF or line == _LF):
                         self._response_chunked = False
                         self._response_length = self._response_bytes
                         self.close()
                         return 0
                     if not line:
-                        self.abort()
+                        self._abort()
             elif self._chunk_left == 0:
                 line = self._call_body_io(self._sock.readline)
                 if not line:
-                    self.abort()
-                if line != _CRLF and line != _LF:
-                    self.abort("malformed terminator")
+                    self._abort()
+                if not (line == _CRLF or line == _LF):
+                    self._abort("malformed terminator")
                 self._chunk_left = None
             else:
                 return self._chunk_left
@@ -604,8 +580,7 @@ class HTTPResponse:
         sock = self._sock
 
         if sock is None:
-            if (self._response_length is not None and
-                    self._response_bytes == self._response_length):
+            if (self._response_length is not None) and (self._response_bytes >= self._response_length):
                 return 0 if into else _EMPTY
             raise NotConnected()
 
@@ -616,13 +591,11 @@ class HTTPResponse:
             unbounded = False
         else:
             unbounded = amt is None or amt < 0
-
         if not unbounded and amt == 0:
             return 0 if into else _EMPTY
 
-        length = self._response_length
-        if length is not None:
-            remaining = length - self._response_bytes
+        if (self._response_length is not None):
+            remaining = self._response_length - self._response_bytes
             if remaining == 0:
                 self.close()
                 return 0 if into else _EMPTY
@@ -643,7 +616,7 @@ class HTTPResponse:
                     target = bmv[total:]
                     n = self._call_body_io(sock.readinto, target, want)
                     if not n:
-                        self.abort()
+                        self._abort()
                     self._response_bytes += n
                     self._chunk_left -= n
                     total += n
@@ -651,14 +624,14 @@ class HTTPResponse:
 
             n = self._call_body_io(sock.readinto, buf, amt)
             if not n:
-                if self._response_length is None:
+                if (self._response_length is None):
                     self._response_length = self._response_bytes
                     self.close()
                     return 0
-                self.abort()
+                self._abort()
 
             self._response_bytes += n
-            if length is not None and self._response_bytes >= length:
+            if (self._response_length is not None) and (self._response_bytes >= self._response_length):
                 self.close()
             return n
 
@@ -675,7 +648,7 @@ class HTTPResponse:
                     break
                 chunk = self._call_body_io(sock.read, want)
                 if not chunk:
-                    self.abort()
+                    self._abort()
                 len_chunk = len(chunk)
                 self._response_bytes += len_chunk
                 self._chunk_left -= len_chunk
@@ -692,16 +665,16 @@ class HTTPResponse:
                 want = min(amt - len_out, self._blocksize)
             data = self._call_body_io(sock.read, want)
             if not data:
-                if self._response_length is None:
+                if (self._response_length is None):
                     self._response_length = self._response_bytes
                     self.close()
                     break
-                self.abort()
+                self._abort()
             len_data = len(data)
             self._response_bytes += len_data
             len_out += len_data
             out = self._append_read_data(out, data)
-            if length is not None and self._response_bytes >= length:
+            if (self._response_length is not None) and (self._response_bytes >= self._response_length):
                 self.close()
                 break
         return out
@@ -768,56 +741,50 @@ class HTTPConnection:
 
     def putrequest(self, method, url, *, skip_host=False):
         self._reset_request()
-        try:
-            method = _encode_and_validate(method, 3)
-            if not method:
-                raise ValueError("bad method")
-            if not isinstance(method, bytes):
-                method = bytes(method)
-            if not method.isupper():
-                method = method.upper()
 
-            if url:
-                url = _encode_and_validate(url, 3)
-                if not isinstance(url, bytes):
-                    url = bytes(url)
-            else:
-                url = b"/"
+        method = _encode_and_validate(method)
+        if not method:
+            raise ValueError("bad method")
+        if type(method) is not bytes:
+            method = bytes(method)
+        if not method.isupper():
+            method = method.upper()
 
-            self.method = method
-            self.url = url
+        if not url:
+            url = b"/"
+        url = _encode_and_validate(url)
+        if url is None:
+            raise ValueError("bad url")
+        if type(url) is not bytes:
+            url = bytes(url)
 
-            if self._request_head is None:
-                self._request_head = bytearray(self._request_head_size)
-                self._request_head[:] = _EMPTY
-            self._request_head.extend(method)
-            self._request_head.extend(b" ")
-            self._request_head.extend(url)
-            self._request_head.extend(b" HTTP/1.1\r\n")
+        self.method = method
+        self.url = url
 
-            if skip_host:
-                self._request_flags |= _RF_HOST
-        except Exception:
-            self._reset_request()
-            raise
+        if self._request_head is None:
+            self._request_head = bytearray(self._request_head_size)
+            self._request_head[:] = _EMPTY
+        self._request_head.extend(method)
+        self._request_head.extend(b" ")
+        self._request_head.extend(url)
+        self._request_head.extend(b" HTTP/1.1\r\n")
+
+        if skip_host:
+            self._request_flags |= _RF_HOST
 
     def putheader(self, name, value):
-        try:
-            name = _encode_and_validate(name, 19)
-            if value is not None:
-                value = _encode_and_validate(value, 0)
-                self._append_header(name, value)
-            self._track_request_header(name, value)
-        except Exception:
-            self._reset_request()
-            raise
+        name = _encode_and_validate(name)
+        if name is None:
+            raise ValueError("invalid header name")
+        if value is not None:
+            value = _encode_and_validate(value)
+            if value is None:
+                raise ValueError("invalid header value")
+            self._append_header(name, value)
+        self._track_request_header(name, value)
 
     def endheaders(self, body=None, *, encode_chunked=None):
-        try:
-            body = self._prep_request(body, encode_chunked)
-        except Exception:
-            self._reset_request()
-            raise
+        body = self._prep_request(body, encode_chunked)
 
         try:
             if self._sock is None:
@@ -836,17 +803,24 @@ class HTTPConnection:
 
         if encode_chunked is None:
             self._request_chunked = bool(flags & _RF_TRANSFER_CHUNKED)
+            if body is not None and not isinstance(body, (bytes, bytearray, memoryview)):
+                if not (flags & (_RF_CONTENT_LENGTH | _RF_TRANSFER_ENCODING)):
+                    self._request_chunked = True
         else:
             self._request_chunked = bool(encode_chunked)
 
-        if self._request_length is not None and self._request_length < 0:
+        if (self._request_length is not None) and (self._request_length < 0):
             self._request_length = None
             if not (flags & _RF_CONNECTION_CLOSE):
                 self._append_header(_CONNECTION, b"close")
             self._request_flags |= _RF_CONNECTION_CLOSE
 
         if not (flags & _RF_HOST):
-            self._append_header(_HOST, self._hostport)
+            request_hostport = _parse_hostport_from_url(self.url)
+            if request_hostport:
+                self._append_header(_HOST, request_hostport)
+            elif request_hostport is None:
+                self._append_header(_HOST, self._hostport)
 
         if not (flags & _RF_ACCEPT_ENCODING):
             self._append_header(_ACCEPT_ENCODING, b"identity")
@@ -862,7 +836,7 @@ class HTTPConnection:
                         self._append_header(_CONTENT_LENGTH, b"0")
                 elif isinstance(body, (bytes, bytearray, memoryview)):
                     self._request_length = len(body)
-                    self._append_header(_CONTENT_LENGTH, str(len(body)).encode())
+                    self._append_header(_CONTENT_LENGTH, b"%d" % len(body))
 
         return body
 
@@ -923,7 +897,7 @@ class HTTPConnection:
                 send(buf)
 
         try:
-            if isgeneratorfunction(data):
+            if callable(data):
                 data = data()
         except OSError as e:
             _reraise_body_error(e)
@@ -979,7 +953,7 @@ class HTTPConnection:
         try:
             if self._request_chunked:
                 self._send_raw(b"0\r\n\r\n", False)
-            elif type(self._request_length) is int:
+            elif (self._request_length is not None):
                 if self._request_bytes < self._request_length:
                     raise ImproperConnectionState()
                 if self._request_bytes > self._request_length:
@@ -1061,18 +1035,10 @@ class HTTPConnection:
         self._request_flags = flags
 
     def _call_head_io(self, func, *args):
-        loops = 3
-        while loops > 0:
-            loops -= 1
-            try:
-                return func(*args)
-            except OSError as e:
-                err = getattr(e, "errno", None)
-                if err == errno.EINTR and loops > 0:
-                    continue
-                if err == errno.EINTR:
-                    raise
-                _reraise_transport_error(e)
+        try:
+            return func(*args)
+        except OSError as e:
+            _reraise_transport_error(e)
 
     def _read_head_line(self):
         return self._call_head_io(self._sock.readline)
