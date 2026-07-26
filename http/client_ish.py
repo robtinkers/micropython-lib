@@ -127,7 +127,7 @@ def _encode_and_validate(x):
     if isinstance(x, str):
         x = bytes(x)
     elif not isinstance(x, (bytes, bytearray, memoryview)):
-        x = bytes(str(x))
+        x = str(x).encode()
     if _CR in x or _LF in x:
         return None
     return x
