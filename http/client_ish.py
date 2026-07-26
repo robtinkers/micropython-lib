@@ -7,7 +7,7 @@ OK = const(200)
 _DEFAULT_TIMEOUT = const(10)
 _METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
 _GC_FREE_THRESHOLD = const(32768)
-_READ_CAN_RETURN_BYTEARRAY = const(1)
+_READ_MUST_RETURN_BYTES = const(0)
 
 _RF_HOST = const(1)
 _RF_CONNECTION = const(2)
@@ -610,7 +610,7 @@ class HTTPResponse:
                 self._chunk_bytes_left -= len_chunk
                 len_out += len_chunk
                 out = self._append_read_data(out, chunk)
-            if not _READ_CAN_RETURN_BYTEARRAY and type(out) is not bytes:
+            if _READ_MUST_RETURN_BYTES and type(out) is not bytes:
                 out = bytes(out)
             return out
 
@@ -635,7 +635,7 @@ class HTTPResponse:
             if (self._response_length is not None) and (self._response_bytes >= self._response_length):
                 self.close()
                 break
-        if not _READ_CAN_RETURN_BYTEARRAY and type(out) is not bytes:
+        if _READ_MUST_RETURN_BYTES and type(out) is not bytes:
             out = bytes(out)
         return out
 
