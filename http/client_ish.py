@@ -639,34 +639,34 @@ class HTTPConnection:
         self._reset_request()
 
     def _set_authority(self, host, port):
-        valid_host = _encode_and_validate(host)
-        if not valid_host:
+        the_host = _encode_and_validate(host)
+        if not the_host:
             raise InvalidURL(host)
 
-        hostaddr = valid_host
+        hostaddr = the_host
         hostname = None
-        colons = valid_host.count(_COLON)
+        colons = the_host.count(_COLON)
 
-        if valid_host.startswith(_LBRACKET):
-            if colons < 2 or not valid_host.endswith(_RBRACKET):
+        if the_host.startswith(_LBRACKET):
+            if colons < 2 or not the_host.endswith(_RBRACKET):
                 raise InvalidURL(host)
-            hostaddr = valid_host[1:-1]
+            hostaddr = the_host[1:-1]
         elif colons == 1:
             raise InvalidURL(host)
         elif colons:
-            valid_host = _LBRACKET + valid_host + _RBRACKET
-        elif not _looks_like_ip4(valid_host, len(valid_host)):
-            hostname = valid_host
+            the_host = _LBRACKET + the_host + _RBRACKET
+        elif not _looks_like_ip4(the_host, len(the_host)):
+            hostname = the_host
 
         if port is None:
             port = self.default_port
 
         if port == self.default_port:
-            hostport = valid_host
+            hostport = the_host
         else:
-            hostport = b"%s:%d" % (valid_host, port)
+            hostport = b"%s:%d" % (the_host, port)
 
-        self.host = valid_host
+        self.host = the_host
         self._hostaddr = hostaddr
         self._hostname = hostname
         self._hostport = hostport
