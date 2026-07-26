@@ -125,9 +125,9 @@ def _encode_and_validate(x):
     if x is None:
         return None
     if isinstance(x, str):
-        x = x.encode()
+        x = bytes(x)
     elif not isinstance(x, (bytes, bytearray, memoryview)):
-        x = str(x).encode()
+        x = bytes(str(x))
     if _CR in x or _LF in x:
         return None
     return x
@@ -836,7 +836,7 @@ class HTTPConnection:
 
         try:
             if isinstance(body, str):
-                body = body.encode()
+                body = bytes(body)
             self._send_body(body)
         except Exception:
             self._abort_request()
@@ -942,7 +942,7 @@ class HTTPConnection:
 
     def _prep_request(self, body, encode_chunked):
         if isinstance(body, str):
-            body = body.encode()
+            body = bytes(body)
         body_is_bytes = isinstance(body, (bytes, bytearray, memoryview))
         length = self._request_length
         flags = self._request_flags
@@ -1042,7 +1042,7 @@ class HTTPConnection:
                 if buf is None:
                     continue
                 if isinstance(buf, str):
-                    buf = buf.encode()
+                    buf = bytes(buf)
                 if not isinstance(buf, (bytes, bytearray, memoryview)):
                     raise TypeError("invalid body part")
                 if not buf:
@@ -1063,7 +1063,7 @@ class HTTPConnection:
                 _reraise_body_error(e)
 
             if isinstance(part, str):
-                part = part.encode()
+                part = bytes(part)
             if not isinstance(part, (bytes, bytearray, memoryview)):
                 raise TypeError("invalid body part")
             send(part)
