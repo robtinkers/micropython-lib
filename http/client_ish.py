@@ -116,8 +116,7 @@ def _reraise_transport_error(exc):
     raise
 
 def _reraise_body_error(exc):
-    err = exc.errno
-    if err in _CONNECTION_ERRNOS:
+    if exc.errno in _CONNECTION_ERRNOS:
         raise OSError(errno.EIO, str(exc))
     raise
 
