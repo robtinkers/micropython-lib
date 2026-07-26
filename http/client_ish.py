@@ -151,7 +151,7 @@ def _equal_ci(a:ptr8, b:ptr8, length:int) -> int:
 @micropython.viper
 def _looks_like_ip4(buf:ptr8, length:int) -> int:
     if length <= 0:
-        return
+        return 0
     i = 0
     while i < length:
         b = buf[i]
