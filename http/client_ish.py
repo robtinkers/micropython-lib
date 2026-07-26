@@ -1030,7 +1030,7 @@ class HTTPConnection:
                     raise TypeError("invalid body part")
                 if not n:
                     return
-                send(buf if n == self._blocksize else bmv[:n])
+                send(bmv if n == self._blocksize else bmv[:n])
 
         reader = getattr(body, "read", None)
         if callable(reader):
