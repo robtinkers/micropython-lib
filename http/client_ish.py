@@ -1158,7 +1158,10 @@ else:
             raw = self._sock
             gc.collect()
             try:
-                self._sock = self._context.wrap_socket(raw, server_hostname=self._hostname)
+                if self._hostname:
+                    self._sock = self._context.wrap_socket(raw, server_hostname=self._hostname)
+                else:
+                    self._sock = self._context.wrap_socket(raw)
             except Exception as e:
                 self._sock = None
                 _close_quietly(raw)
