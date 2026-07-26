@@ -871,7 +871,6 @@ class HTTPConnection:
                 http_version, status, reason, response_headers)
 
             self._sock = None
-            resp._blocksize = self._blocksize
             resp._reusable = resp._reusable and not (self._request_flags & _RF_CONNECTION_CLOSE)
 
             if resp._reusable:
