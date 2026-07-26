@@ -352,7 +352,7 @@ def _derive_response_framing(method, http_version, status, response_headers):
         return False, 0, reusable
 
     if 100 <= status < 200 or status == 204:
-        if chunked is not None:
+        if status == 101 or chunked is not None:
             reusable = False
         return False, 0, reusable
 
@@ -448,7 +448,7 @@ class HTTPResponse:
         return sock
 
     def close(self):
-        self._release_socket(self._reusable and self.status != 101 and
+        self._release_socket(self._reusable and
                              self._response_bytes == self._response_length)
 
     def _abort(self, value="aborted"):
@@ -822,10 +822,11 @@ class HTTPConnection:
             self._send_bytes(_CRLF, False)
             self._buffer[:] = _EMPTY
             self._state = _CS_REQUEST_SENT
-            self._send_body(body)
         except Exception:
             self._abort_request()
             raise
+
+        self.send(body)
 
     def send(self, body):
         if self._state != _CS_REQUEST_SENT:
@@ -1049,7 +1050,10 @@ class HTTPConnection:
                     return
                 send(buf)
 
-        parts = iter(body)
+        try:
+            parts = iter(body)
+        except OSError as e:
+            _reraise_body_error(e)
 
         while True:
             try:
