@@ -1,4 +1,4 @@
-import micropython, socket, errno, gc
+import micropython, socket, ssl, errno, gc
 
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
@@ -7,6 +7,8 @@ OK = const(200)
 _DEFAULT_TIMEOUT = const(10)
 _METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
 _GC_FREE_THRESHOLD = const(32768)
+_REQUEST_BLOCKSIZE = const(1024)
+_RESPONSE_BLOCKSIZE = const(2048)
 _READ_MUST_RETURN_BYTES = const(0)
 
 _RF_HOST = const(1)
@@ -132,7 +134,7 @@ def _encode_and_validate(x):
     return x
 
 @micropython.viper
-def _equal_ci(a:ptr8, b:ptr8, length:int) -> int:
+def _equals_ci(a:ptr8, b:ptr8, length:int) -> int:
     i = 0
     while i < length:
         x = a[i]
@@ -294,7 +296,7 @@ def _parse_headers(sock, all_headers=False, and_cookies=None):
         cands = _KEEP_RESPONSE_HEADERS.get(pos)
         if cands:
             for cand in cands:
-                if _equal_ci(line, cand, pos):
+                if _equals_ci(line, cand, pos):
                     name = cand
                     break
 
@@ -310,8 +312,8 @@ def _parse_headers(sock, all_headers=False, and_cookies=None):
         while end > start and line[end - 1] <= 32: end -= 1
         headers.append((name, line[start:end]))
 
-def _derive_response_framing(method, http_version, status, response_headers):
-    http10 = (http_version == 10)
+def _derive_response_framing(method, version, status, response_headers):
+    http10 = (version == 10)
     length = None
     chunked = None
     reusable = None
@@ -335,15 +337,15 @@ def _derive_response_framing(method, http_version, status, response_headers):
             if chunked is not False:
                 len_val = len(val)
                 if len_val == 7:
-                    chunked = bool(_equal_ci(val, _CHUNKED, 7))
+                    chunked = bool(_equals_ci(val, _CHUNKED, 7))
                 elif len_val > 7:
                     chunked = val.endswith(_CHUNKED)
 
         elif key is _CONNECTION:
             if reusable is not False:
                 if http10:
-                    reusable = (len(val) == 10 and _equal_ci(val, b"keep-alive", 10))
-                elif len(val) == 5 and _equal_ci(val, b"close", 5):
+                    reusable = (len(val) == 10 and _equals_ci(val, b"keep-alive", 10))
+                elif len(val) == 5 and _equals_ci(val, b"close", 5):
                     reusable = False
 
     if reusable is None:
@@ -369,23 +371,21 @@ def _derive_response_framing(method, http_version, status, response_headers):
     return False, length, reusable
 
 class HTTPResponse:
-    _blocksize = 2048
 
-    def __init__(self, sock, debuglevel, method, url,
-                 http_version, status, reason, response_headers):
+    def __init__(self, sock, method, url,
+                 version, status, reason, response_headers):
         self._conn = None
         self._sock = sock
-        self.debuglevel = debuglevel
         self.method = method
         self.url = url
-        self.version = http_version
+        self.version = version
         self.status = status
         self.reason = reason
         self._headers = response_headers
 
         self._response_chunked, self._response_length, self._reusable = (
             _derive_response_framing(
-                method, http_version, status, response_headers)
+                method, version, status, response_headers)
         )
 
         self._chunk_bytes_left = None
@@ -397,18 +397,6 @@ class HTTPResponse:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
         return False
-
-    @property
-    def chunked(self):
-        return self._response_chunked
-
-    @property
-    def length(self):
-        return None if (self._response_length is None) else (self._response_length - self._response_bytes)
-
-    @property
-    def will_close(self):
-        return not self._reusable
 
     @property
     def closed(self):
@@ -424,7 +412,7 @@ class HTTPResponse:
         len_name = len(name)
         result = None
         for key, val in self._headers:
-            if len(key) != len_name or not _equal_ci(key, name, len_name):
+            if len(key) != len_name or not _equals_ci(key, name, len_name):
                 continue
             if result is None:
                 result = val
@@ -595,9 +583,9 @@ class HTTPResponse:
             while unbounded or len_out < amt:
                 avail = self._get_chunk_bytes_left()
                 if unbounded:
-                    want = min(avail, self._blocksize)
+                    want = min(avail, _RESPONSE_BLOCKSIZE)
                 else:
-                    want = min(amt - len_out, avail, self._blocksize)
+                    want = min(amt - len_out, avail, _RESPONSE_BLOCKSIZE)
                 if want == 0:
                     break
                 chunk = self._iowrapper(sock.read, want)
@@ -616,9 +604,9 @@ class HTTPResponse:
         len_out = 0
         while unbounded or len_out < amt:
             if unbounded:
-                want = self._blocksize
+                want = _RESPONSE_BLOCKSIZE
             else:
-                want = min(amt - len_out, self._blocksize)
+                want = min(amt - len_out, _RESPONSE_BLOCKSIZE)
             data = self._iowrapper(sock.read, want)
             if not data:
                 if (self._response_length is None):
@@ -638,16 +626,12 @@ class HTTPResponse:
         return out
 
 class HTTPConnection:
-    debuglevel = 0
     default_port = HTTP_PORT
-    _blocksize = 1024
 
-    def __init__(self, host, port=None, timeout=_DEFAULT_TIMEOUT,
-                 *, blocksize=None, network=None):
+    def __init__(self, host, port=None, *,
+                 timeout=_DEFAULT_TIMEOUT, network=None):
         self._set_authority(host, port)
-        self.timeout = timeout
-        if blocksize is not None:
-            self._blocksize = blocksize
+        self._timeout = timeout
         self._network = network
         self._sock = None
         self._resp = None
@@ -658,47 +642,31 @@ class HTTPConnection:
         valid_host = _encode_and_validate(host)
         if not valid_host:
             raise InvalidURL(host)
-        rest = _EMPTY
+
+        hostaddr = valid_host
         hostname = None
+        colons = valid_host.count(_COLON)
 
         if valid_host.startswith(_LBRACKET):
-            j = valid_host.find(_RBRACKET)
-            if j == -1:
+            if colons < 2 or not valid_host.endswith(_RBRACKET):
                 raise InvalidURL(host)
-            normalized_host, rest = valid_host[:j + 1], valid_host[j + 1:]
-            if rest:
-                if not rest.startswith(_COLON):
-                    raise InvalidURL(host)
-                rest = rest[1:]
-            hostaddr = normalized_host[1:-1]
-        elif valid_host.count(_COLON) > 1:
-            normalized_host = _LBRACKET + valid_host + _RBRACKET
-            hostaddr = valid_host
-        else:
-            i = valid_host.find(_COLON)
-            if i >= 0:
-                normalized_host, rest = valid_host[:i], valid_host[i + 1:]
-            else:
-                normalized_host = valid_host
-            hostaddr = normalized_host
-            hostname = normalized_host
+            hostaddr = valid_host[1:-1]
+        elif colons == 1:
+            raise InvalidURL(host)
+        elif colons:
+            valid_host = _LBRACKET + valid_host + _RBRACKET
+        elif not _looks_like_ip4(valid_host, len(valid_host)):
+            hostname = valid_host
 
-        if rest:
-            if rest.isdigit():
-                port = int(rest, 10)
-            else:
-                raise InvalidURL(host)
-
-        if _looks_like_ip4(hostname, len(hostname)):
-            hostname = None
-
-        if port is None or port == self.default_port:
-            hostport = normalized_host
+        if port is None:
             port = self.default_port
-        else:
-            hostport = b"%s:%d" % (normalized_host, port)
 
-        self.host = normalized_host
+        if port == self.default_port:
+            hostport = valid_host
+        else:
+            hostport = b"%s:%d" % (valid_host, port)
+
+        self.host = valid_host
         self._hostaddr = hostaddr
         self._hostname = hostname
         self._hostport = hostport
@@ -774,7 +742,7 @@ class HTTPConnection:
             self.url = valid_url
 
             if self._buffer is None:
-                self._buffer = bytearray(self._blocksize)
+                self._buffer = bytearray(_REQUEST_BLOCKSIZE)
                 self._buffer[:] = _EMPTY
             self._buffer.extend(method)
             self._buffer.extend(b" ")
@@ -859,14 +827,14 @@ class HTTPConnection:
                     self._request_length)
 
             try:
-                http_version, status, reason = _parse_status_line(self._sock)
+                version, status, reason = _parse_status_line(self._sock)
                 response_headers = _parse_headers(self._sock, all_headers, and_cookies)
             except OSError as e:
                 _reraise_transport_error(e)
 
             resp = HTTPResponse(
-                self._sock, self.debuglevel, self.method, self.url,
-                http_version, status, reason, response_headers)
+                self._sock, self.method, self.url,
+                version, status, reason, response_headers)
 
             self._sock = None
             resp._reusable = resp._reusable and not (self._request_flags & _RF_CONNECTION_CLOSE)
@@ -901,15 +869,15 @@ class HTTPConnection:
         flags = self._request_flags
 
         if len_name == 4:
-            if _equal_ci(name, _HOST, 4):
+            if _equals_ci(name, _HOST, 4):
                 flags |= _RF_HOST
         elif len_name == 10:
-            if _equal_ci(name, _CONNECTION, 10):
+            if _equals_ci(name, _CONNECTION, 10):
                 flags |= _RF_CONNECTION
-                if value is not None and len(value) == 5 and _equal_ci(value, b"close", 5):
+                if value is not None and len(value) == 5 and _equals_ci(value, b"close", 5):
                     flags |= _RF_CONNECTION_CLOSE
         elif len_name == 14:
-            if _equal_ci(name, _CONTENT_LENGTH, 14):
+            if _equals_ci(name, _CONTENT_LENGTH, 14):
                 flags |= _RF_CONTENT_LENGTH
                 if value is not None:
                     current = length
@@ -922,15 +890,15 @@ class HTTPConnection:
                     else:
                         length = -1
         elif len_name == 15:
-            if _equal_ci(name, _ACCEPT_ENCODING, 15):
+            if _equals_ci(name, _ACCEPT_ENCODING, 15):
                 flags |= _RF_ACCEPT_ENCODING
         elif len_name == 17:
-            if _equal_ci(name, _TRANSFER_ENCODING, 17):
+            if _equals_ci(name, _TRANSFER_ENCODING, 17):
                 flags |= _RF_TRANSFER_ENCODING
                 if value is not None:
                     len_value = len(value)
                     flags &= ~ _RF_TRANSFER_CHUNKED
-                    if len_value == 7 and _equal_ci(value, _CHUNKED, 7):
+                    if len_value == 7 and _equals_ci(value, _CHUNKED, 7):
                         flags |= _RF_TRANSFER_CHUNKED
                     elif len_value > 7 and value.endswith(_CHUNKED):
                         flags |= _RF_TRANSFER_CHUNKED
@@ -989,7 +957,6 @@ class HTTPConnection:
                 if self.method in _METHODS_EXPECTING_BODY:
                     self._request_length = 0
                     self._append_header(_CONTENT_LENGTH, b"0")
-
             elif body_is_bytes:
                 self._request_length = len(body)
                 self._append_header(_CONTENT_LENGTH, b"%d" % self._request_length)
@@ -1015,7 +982,7 @@ class HTTPConnection:
         reader = getattr(body, "readinto", None)
         if callable(reader):
             buf = self._buffer
-            buf[:] = bytes(self._blocksize)
+            buf[:] = bytes(_REQUEST_BLOCKSIZE)
             bmv = memoryview(buf)
             while True:
                 try:
@@ -1024,17 +991,17 @@ class HTTPConnection:
                     _reraise_body_error(e)
                 if n is None:
                     continue
-                if type(n) is not int or n < 0 or n > self._blocksize:
+                if type(n) is not int or n < 0 or n > _REQUEST_BLOCKSIZE:
                     raise TypeError("invalid body part")
                 if not n:
                     return
-                send(bmv if n == self._blocksize else bmv[:n])
+                send(bmv if n == _REQUEST_BLOCKSIZE else bmv[:n])
 
         reader = getattr(body, "read", None)
         if callable(reader):
             while True:
                 try:
-                    buf = reader(self._blocksize)
+                    buf = reader(_REQUEST_BLOCKSIZE)
                 except OSError as e:
                     _reraise_body_error(e)
                 if buf is None:
@@ -1101,7 +1068,7 @@ class HTTPConnection:
             gc.collect()
         try:
             self._sock = create_connection(
-                (self._hostaddr, self.port), self.timeout)
+                (self._hostaddr, self.port), self._timeout)
         except OSError as e:
             _reraise_transport_error(e)
 
@@ -1134,34 +1101,28 @@ class HTTPConnection:
         resp._conn = None
         return sock
 
-try:
-    import ssl
-except ImportError:
-    pass
-else:
+class HTTPSConnection(HTTPConnection):
+    default_port = HTTPS_PORT
 
-    class HTTPSConnection(HTTPConnection):
-        default_port = HTTPS_PORT
+    def __init__(self, *args, context=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if context is None:
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.verify_mode = ssl.CERT_NONE
+        self._context = context
 
-        def __init__(self, *args, context=None, **kwargs):
-            super().__init__(*args, **kwargs)
-            if context is None:
-                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-                context.verify_mode = ssl.CERT_NONE
-            self._context = context
-
-        def _open_socket(self):
-            super()._open_socket()
-            raw = self._sock
+    def _open_socket(self):
+        super()._open_socket()
+        raw = self._sock
+        gc.collect()
+        try:
+            if self._hostname:
+                self._sock = self._context.wrap_socket(raw, server_hostname=self._hostname)
+            else:
+                self._sock = self._context.wrap_socket(raw)
+        except Exception as e:
+            self._sock = None
+            _close_quietly(raw)
+            _reraise_transport_error(e)
+        finally:
             gc.collect()
-            try:
-                if self._hostname:
-                    self._sock = self._context.wrap_socket(raw, server_hostname=self._hostname)
-                else:
-                    self._sock = self._context.wrap_socket(raw)
-            except Exception as e:
-                self._sock = None
-                _close_quietly(raw)
-                _reraise_transport_error(e)
-            finally:
-                gc.collect()
