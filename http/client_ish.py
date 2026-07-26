@@ -150,6 +150,8 @@ def _equal_ci(a:ptr8, b:ptr8, length:int) -> int:
 
 @micropython.viper
 def _looks_like_ip4(buf:ptr8, length:int) -> int:
+    if length <= 0:
+        return
     i = 0
     while i < length:
         b = buf[i]
@@ -688,7 +690,7 @@ class HTTPConnection:
             else:
                 raise InvalidURL(host)
 
-        if hostname and _looks_like_ip4(hostname, len(hostname)):
+        if _looks_like_ip4(hostname, len(hostname)):
             hostname = None
 
         if port is None or port == self.default_port:
