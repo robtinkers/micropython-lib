@@ -7,8 +7,8 @@ OK = const(200)
 _DEFAULT_TIMEOUT = const(10)
 _METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
 _GC_FREE_THRESHOLD = const(32768)
-_REQUEST_BLOCKSIZE = const(1024)
-_RESPONSE_BLOCKSIZE = const(2048)
+_REQUEST_HEAD_SIZE = const(1024)
+_READ_BLOCK_SIZE = const(2048)
 _READ_MUST_RETURN_BYTES = const(0)
 
 _RF_HOST = const(1)
@@ -44,11 +44,11 @@ _SET_COOKIE = b"Set-Cookie"
 _TRANSFER_ENCODING = b"Transfer-Encoding"
 
 _KEEP_RESPONSE_HEADERS = {
-    8:[_LOCATION],
-    10:[_SET_COOKIE, _CONNECTION],
-    12:[_CONTENT_TYPE],
-    14:[_CONTENT_LENGTH],
-    17:[_TRANSFER_ENCODING],
+    8: (_LOCATION,),
+    10:(_SET_COOKIE, _CONNECTION),
+    12:(_CONTENT_TYPE,),
+    14:(_CONTENT_LENGTH,),
+    17:(_TRANSFER_ENCODING,),
 }
 
 _CONNECTION_ERRNOS = (
@@ -583,9 +583,9 @@ class HTTPResponse:
             while unbounded or len_out < amt:
                 avail = self._get_chunk_bytes_left()
                 if unbounded:
-                    want = min(avail, _RESPONSE_BLOCKSIZE)
+                    want = min(avail, _READ_BLOCK_SIZE)
                 else:
-                    want = min(amt - len_out, avail, _RESPONSE_BLOCKSIZE)
+                    want = min(amt - len_out, avail, _READ_BLOCK_SIZE)
                 if want == 0:
                     break
                 chunk = self._iowrapper(sock.read, want)
@@ -604,9 +604,9 @@ class HTTPResponse:
         len_out = 0
         while unbounded or len_out < amt:
             if unbounded:
-                want = _RESPONSE_BLOCKSIZE
+                want = _READ_BLOCK_SIZE
             else:
-                want = min(amt - len_out, _RESPONSE_BLOCKSIZE)
+                want = min(amt - len_out, _READ_BLOCK_SIZE)
             data = self._iowrapper(sock.read, want)
             if not data:
                 if (self._response_length is None):
@@ -635,7 +635,6 @@ class HTTPConnection:
         self._network = network
         self._sock = None
         self._resp = None
-        self._buffer = None
         self._reset_request()
 
     def _set_authority(self, host, port):
@@ -741,13 +740,13 @@ class HTTPConnection:
             self.method = method
             self.url = valid_url
 
-            if self._buffer is None:
-                self._buffer = bytearray(_REQUEST_BLOCKSIZE)
-                self._buffer[:] = _EMPTY
-            self._buffer.extend(method)
-            self._buffer.extend(b" ")
-            self._buffer.extend(valid_url)
-            self._buffer.extend(b" HTTP/1.1\r\n")
+            if self._request_head is None:
+                self._request_head = bytearray(_REQUEST_HEAD_SIZE)
+                self._request_head[:] = _EMPTY
+            self._request_head.extend(method)
+            self._request_head.extend(b" ")
+            self._request_head.extend(valid_url)
+            self._request_head.extend(b" HTTP/1.1\r\n")
 
             if skip_host:
                 self._request_flags |= _RF_HOST
@@ -784,9 +783,9 @@ class HTTPConnection:
         try:
             if self._sock is None:
                 self._open_socket()
-            self._send_bytes(self._buffer, False)
+            self._send_bytes(self._request_head, False)
             self._send_bytes(_CRLF, False)
-            self._buffer[:] = _EMPTY
+            self._request_head = None
             self._state = _CS_REQUEST_SENT
         except Exception:
             self._abort_request()
@@ -858,10 +857,10 @@ class HTTPConnection:
                 gc.collect()
 
     def _append_header(self, name, value):
-        self._buffer.extend(name)
-        self._buffer.extend(b": ")
-        self._buffer.extend(value)
-        self._buffer.extend(_CRLF)
+        self._request_head.extend(name)
+        self._request_head.extend(b": ")
+        self._request_head.extend(value)
+        self._request_head.extend(_CRLF)
 
     def _track_request_header(self, name, value):
         len_name = len(name)
@@ -981,8 +980,7 @@ class HTTPConnection:
 
         reader = getattr(body, "readinto", None)
         if callable(reader):
-            buf = self._buffer
-            buf[:] = bytes(_REQUEST_BLOCKSIZE)
+            buf = bytearray(_READ_BLOCK_SIZE)
             bmv = memoryview(buf)
             while True:
                 try:
@@ -991,17 +989,17 @@ class HTTPConnection:
                     _reraise_body_error(e)
                 if n is None:
                     continue
-                if type(n) is not int or n < 0 or n > _REQUEST_BLOCKSIZE:
+                if type(n) is not int or n < 0 or n > _READ_BLOCK_SIZE:
                     raise TypeError("invalid body part")
                 if not n:
                     return
-                send(bmv if n == _REQUEST_BLOCKSIZE else bmv[:n])
+                send(bmv if n == _READ_BLOCK_SIZE else bmv[:n])
 
         reader = getattr(body, "read", None)
         if callable(reader):
             while True:
                 try:
-                    buf = reader(_REQUEST_BLOCKSIZE)
+                    buf = reader(_READ_BLOCK_SIZE)
                 except OSError as e:
                     _reraise_body_error(e)
                 if buf is None:
@@ -1080,8 +1078,7 @@ class HTTPConnection:
         self._request_bytes = 0
         self._request_flags = 0
         self._request_chunked = False
-        if self._buffer is not None:
-            self._buffer[:] = _EMPTY
+        self._request_head = None
 
     def _abort_request(self, resp=None):
         try:
@@ -1126,3 +1123,4 @@ class HTTPSConnection(HTTPConnection):
             _reraise_transport_error(e)
         finally:
             gc.collect()
+
