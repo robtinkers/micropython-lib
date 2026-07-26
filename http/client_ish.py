@@ -642,7 +642,7 @@ class HTTPResponse:
 class HTTPConnection:
     debuglevel = 0
     default_port = HTTP_PORT
-    _blocksize = 2048
+    _blocksize = 1024
 
     def __init__(self, host, port=None, timeout=_DEFAULT_TIMEOUT,
                  *, blocksize=None, network=None):
