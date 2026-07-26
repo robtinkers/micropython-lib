@@ -480,7 +480,7 @@ class HTTPResponse:
             self._release_socket(False)
             _reraise_transport_error(e)
 
-    def _append_read_data(self, out, data):
+    def _append_data(self, out, data):
         try:
             if not out:
                 return data
@@ -505,9 +505,6 @@ class HTTPResponse:
                     size = int(line, 16)
                     if size < 0:
                         self._abort("negative chunk-size")
-                except MemoryError:
-                    self._release_socket(False)
-                    raise
                 except ValueError:
                     self._abort("malformed chunk-size")
                 if size > 0:
@@ -609,7 +606,7 @@ class HTTPResponse:
                 self._response_bytes += len_chunk
                 self._chunk_bytes_left -= len_chunk
                 len_out += len_chunk
-                out = self._append_read_data(out, chunk)
+                out = self._append_data(out, chunk)
             if _READ_MUST_RETURN_BYTES and type(out) is not bytes:
                 out = bytes(out)
             return out
@@ -631,7 +628,7 @@ class HTTPResponse:
             len_data = len(data)
             self._response_bytes += len_data
             len_out += len_data
-            out = self._append_read_data(out, data)
+            out = self._append_data(out, data)
             if (self._response_length is not None) and (self._response_bytes >= self._response_length):
                 self.close()
                 break
