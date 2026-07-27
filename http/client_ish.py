@@ -33,6 +33,7 @@ _COLON = b":"
 _LBRACKET = b"["
 _RBRACKET = b"]"
 _CHUNKED = b"chunked"
+_CLOSE = b"close"
 
 _ACCEPT_ENCODING = b"Accept-Encoding"
 _CONNECTION = b"Connection"
@@ -346,7 +347,7 @@ def _derive_response_framing(method, version, status, response_headers):
             if reusable is not False:
                 if http10:
                     reusable = (len(val) == 10 and _equals_ci(val, b"keep-alive", 10))
-                elif len(val) == 5 and _equals_ci(val, b"close", 5):
+                elif len(val) == 5 and _equals_ci(val, _CLOSE, 5):
                     reusable = False
 
     if reusable is None:
@@ -870,7 +871,7 @@ class HTTPConnection:
         elif len_name == 10:
             if _equals_ci(name, _CONNECTION, 10):
                 flags |= _RF_CONNECTION
-                if value is not None and len(value) == 5 and _equals_ci(value, b"close", 5):
+                if value is not None and len(value) == 5 and _equals_ci(value, _CLOSE, 5):
                     flags |= _RF_CONNECTION_CLOSE
         elif len_name == 14:
             if _equals_ci(name, _CONTENT_LENGTH, 14):
@@ -930,7 +931,7 @@ class HTTPConnection:
                 or length == -1):
             self._request_length = None
             if not (flags & _RF_CONNECTION_CLOSE):
-                self._append_header(_CONNECTION, b"close")
+                self._append_header(_CONNECTION, _CLOSE)
             flags |= _RF_CONNECTION_CLOSE
             self._request_flags = flags
 
