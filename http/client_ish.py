@@ -1,4 +1,8 @@
-import micropython, socket, ssl, errno, gc
+import micropython, socket, errno, gc
+try:
+    import ssl
+except ImportError:
+    ssl = None
 
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
@@ -1097,28 +1101,30 @@ class HTTPConnection:
         resp._conn = None
         return sock
 
-class HTTPSConnection(HTTPConnection):
-    default_port = HTTPS_PORT
+if ssl is not None:
 
-    def __init__(self, *args, context=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        if context is None:
-            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            context.verify_mode = ssl.CERT_NONE
-        self._context = context
+    class HTTPSConnection(HTTPConnection):
+        default_port = HTTPS_PORT
 
-    def _open_socket(self):
-        super()._open_socket()
-        raw = self._sock
-        gc.collect()
-        try:
-            if self._hostname:
-                self._sock = self._context.wrap_socket(raw, server_hostname=self._hostname)
-            else:
-                self._sock = self._context.wrap_socket(raw)
-        except Exception as e:
-            self._sock = None
-            _close_quietly(raw)
-            _reraise_transport_error(e)
-        finally:
+        def __init__(self, *args, context=None, **kwargs):
+            super().__init__(*args, **kwargs)
+            if context is None:
+                context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                context.verify_mode = ssl.CERT_NONE
+            self._context = context
+
+        def _open_socket(self):
+            super()._open_socket()
+            raw = self._sock
             gc.collect()
+            try:
+                if self._hostname:
+                    self._sock = self._context.wrap_socket(raw, server_hostname=self._hostname)
+                else:
+                    self._sock = self._context.wrap_socket(raw)
+            except Exception as e:
+                self._sock = None
+                _close_quietly(raw)
+                _reraise_transport_error(e)
+            finally:
+                gc.collect()
