@@ -19,7 +19,7 @@ _READ_BLOCK_SIZE = const(2048)
 _READ_MUST_RETURN_BYTES = const(0)
 _RECYCLE_HEADER_BUFFER = const(0)
 _REQUEST_HEAD_SIZE = const(1024)
-_USE_VIPER = const(1)
+_USE_VIPER = const(0)
 
 _RF_HOST = const(1)
 _RF_CONNECTION = const(2)
