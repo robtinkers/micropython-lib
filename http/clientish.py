@@ -234,14 +234,13 @@ def _parse_hostport_from_url(url):
 
 def _parse_status_line(sock):
     while True:
-        line = None
         first = sock.read(1)
         if not first:
             raise RemoteDisconnected()
         if first == _CR or first == _LF:
             continue
         if first != b"H":
-            break
+            raise BadStatusLine(first + b"...")
         line = sock.readline()
         if not line.endswith(_LF):
             break
@@ -260,27 +259,17 @@ def _parse_status_line(sock):
         if len(status) != 3 or not status.isdigit():
             break
         status = int(status, 10)
-        if status == 101 or status >= 200:
-            if version == b"TTP/1.0":
-                version = 10
-            elif version.startswith(b"TTP/1."):
-                version = 11
-            else:
-                raise UnknownProtocol(first + version)
-            return version, status, reason
         if status < 100:
             break
 
-        while True:
-            line = sock.readline()
-            if not line:
-                raise RemoteDisconnected()
-            if not line.endswith(_LF):
-                raise BadStatusLine(line)
-            if line == _CRLF or line == _LF:
-                break
+        if version == b"TTP/1.0":
+            return 10, status, reason
+        elif version.startswith(b"TTP/1."):
+            return 11, status, reason
+        else:
+            raise UnknownProtocol(first + version)
 
-    raise BadStatusLine(first + (b"..." if line is None else line))
+    raise BadStatusLine(first + line)
 
 def _parse_headers(sock, all_headers=False, and_cookies=None):
     if and_cookies is None:
@@ -314,7 +303,7 @@ def _parse_headers(sock, all_headers=False, and_cookies=None):
             if not all_headers:
                 continue
             name = line[:pos]
-        elif name == _SET_COOKIE and not and_cookies:
+        elif name is _SET_COOKIE and not and_cookies:
             continue
 
         start, end = pos + 1, len(line)
@@ -331,14 +320,8 @@ def _derive_response_framing(method, version, status, response_headers):
     for key, val in response_headers:
 
         if key is _CONTENT_LENGTH:
-            try:
-                val = int(val, 10)
-            except (TypeError, ValueError):
-                val = -1
-
-            if val < 0:
-                length = -1
-            elif length is None:
+            val = int(val, 10) if val.isdigit() else -1
+            if length is None:
                 length = val
             elif length != val:
                 length = -1
@@ -357,29 +340,36 @@ def _derive_response_framing(method, version, status, response_headers):
                 len_val = len(val)
                 if http10:
                     reusable = (len_val == 10 and _equals_ci(val, b"keep-alive", 10))
-                elif len_val == 5 and _equals_ci(val, _CLOSE, 5):
-                    reusable = False
+                elif len_val == 5:
+                    reusable = not _equals_ci(val, _CLOSE, 5)
+                elif len_val > 5:
+                    reusable = not val.endswith(_CLOSE)
 
     if reusable is None:
         reusable = not http10
 
-    if method == b"HEAD" or status == 304:
-        return False, 0, reusable
+    if chunked and (http10 or length is not None):
+        reusable = False
 
-    if 100 <= status < 200 or status == 204:
-        if status == 101 or chunked is not None:
-            reusable = False
-        return False, 0, reusable
+    if status == 101:
+        return False, 0, False
 
-    if chunked is not None:
-        if (not chunked or length is not None or http10):
-            reusable = False
-        return chunked, None, reusable
-
-    if length is None or length < 0:
+    if method == b"CONNECT" and 200 <= status < 300:
         return False, None, False
 
-    return False, length, reusable
+    if status < 200 or status == 204 or status == 205:
+        return False, 0, (reusable and chunked is None and length is None)
+
+    if method == b"HEAD" or status == 304:
+        return False, 0, (reusable and length != -1)
+
+    if chunked:
+        return True, None, reusable
+
+    if length == -1:
+        return False, None, False
+
+    return False, length, (reusable and length is not None)
 
 class HTTPResponse:
 
@@ -512,7 +502,6 @@ class HTTPResponse:
                 while True:
                     line = self._iowrapper(self._sock.readline)
                     if (line == _CRLF or line == _LF):
-                        self._response_chunked = False
                         self._response_length = self._response_bytes
                         self.close()
                         return 0
@@ -644,6 +633,7 @@ class HTTPConnection:
         self._network = network
         self._sock = None
         self._resp = None
+        self._request_head = None
         self._reset_request()
 
     def _set_authority(self, host, port):
@@ -709,7 +699,7 @@ class HTTPConnection:
         self._reset_request()
         return sock
 
-    def request(self, method, url, body=None, headers=None, *, encode_chunked=None):
+    def request(self, method, url, body=_EMPTY, headers=None, *, encode_chunked=None):
         self.putrequest(method, url)
         try:
             if headers is not None:
@@ -778,7 +768,7 @@ class HTTPConnection:
             self._append_header(name, value)
         self._track_request_header(name, value)
 
-    def endheaders(self, body=None, *, encode_chunked=None):
+    def endheaders(self, body=_EMPTY, *, encode_chunked=None):
         if self._state != _CS_REQUEST_STARTED:
             raise CannotSendHeader()
 
@@ -793,7 +783,7 @@ class HTTPConnection:
                 self._open_socket()
             self._send_bytes(self._request_head, False)
             self._send_bytes(_CRLF, False)
-            if _RECYCLE_HEADER_BUFFER and self._request_head is not None:
+            if _RECYCLE_HEADER_BUFFER:
                 self._request_head[:] = _EMPTY
             else:
                 self._request_head = None
@@ -819,22 +809,24 @@ class HTTPConnection:
             raise
 
     def getresponse(self, *, all_headers=False, and_cookies=None):
-        if self._state != _CS_REQUEST_SENT:
+        state = self._state
+        if state != _CS_REQUEST_SENT and state != _CS_RECEIVING_RESPONSE:
             raise ResponseNotReady()
         if self._sock is None:
             raise NotConnected()
 
-        self._state = _CS_RECEIVING_RESPONSE
         resp = None
         try:
-            if self._request_chunked:
-                self._send_bytes(b"0\r\n\r\n", False)
-            elif (self._request_length is not None and
-                  self._request_bytes != self._request_length):
-                raise ImproperConnectionState(
-                    "request body length differs from Content-Length",
-                    self._request_bytes,
-                    self._request_length)
+            if state == _CS_REQUEST_SENT:
+                self._state = _CS_RECEIVING_RESPONSE
+                if self._request_chunked:
+                    self._send_bytes(b"0\r\n\r\n", False)
+                elif (self._request_length is not None and
+                      self._request_bytes != self._request_length):
+                    raise ImproperConnectionState(
+                        "request body length differs from Content-Length",
+                        self._request_bytes,
+                        self._request_length)
 
             try:
                 version, status, reason = _parse_status_line(self._sock)
@@ -849,6 +841,12 @@ class HTTPConnection:
                 self._sock, self.method, self.url,
                 version, status, reason, response_headers)
 
+            if status < 200 and status != 101:
+                resp._sock = None
+                if not resp._reusable:
+                    self._request_flags |= _RF_CONNECTION_CLOSE
+                return resp
+
             self._sock = None
             resp._reusable = resp._reusable and not (self._request_flags & _RF_CONNECTION_CLOSE)
 
@@ -859,7 +857,7 @@ class HTTPConnection:
             else:
                 self._reset_request()
 
-            if resp._response_length == 0 and resp.status != 101:
+            if resp._response_length == 0 and status != 101:
                 resp.close()
 
             return resp
@@ -884,18 +882,20 @@ class HTTPConnection:
         elif len_name == 10:
             if _equals_ci(name, _CONNECTION, 10):
                 flags |= _RF_CONNECTION
-                if value is not None and len(value) == 5 and _equals_ci(value, _CLOSE, 5):
-                    flags |= _RF_CONNECTION_CLOSE
+                if value is not None:
+                    len_value = len(value)
+                    if ((len_value == 5 and _equals_ci(value, _CLOSE, 5)) or
+                            (len_value > 5 and value.endswith(_CLOSE))):
+                        flags |= _RF_CONNECTION_CLOSE
         elif len_name == 14:
             if _equals_ci(name, _CONTENT_LENGTH, 14):
                 flags |= _RF_CONTENT_LENGTH
                 if value is not None:
-                    current = length
                     try:
                         value = int(value, 10)
                     except (TypeError, ValueError):
                         value = -1
-                    if value >= 0 and (current is None or current == value):
+                    if value >= 0 and (length is None or length == value):
                         length = value
                     else:
                         length = -1
@@ -919,57 +919,50 @@ class HTTPConnection:
     def _prep_request(self, body, encode_chunked):
         if isinstance(body, str):
             body = bytes(body)
-        body_is_bytes = isinstance(body, (bytes, bytearray, memoryview))
-        length = self._request_length
+
         flags = self._request_flags
+        length = self._request_length
 
         if encode_chunked is not None:
-            self._request_chunked = bool(encode_chunked)
+            chunked = bool(encode_chunked)
         elif flags & _RF_TRANSFER_ENCODING:
-            self._request_chunked = bool(flags & _RF_TRANSFER_CHUNKED)
-        elif length == -1:
-            self._request_chunked = body is not None
+            chunked = flags & _RF_TRANSFER_CHUNKED
         elif flags & _RF_CONTENT_LENGTH:
-            self._request_chunked = False
+            chunked = False
+        elif isinstance(body, (bytes, bytearray, memoryview)):
+            chunked = False
+            length = len(body)
         else:
-            self._request_chunked = body is not None and not body_is_bytes
+            chunked = body is not None
 
-        if (body is not None and not body_is_bytes and
-                not self._request_chunked and
-                not (flags & (_RF_CONTENT_LENGTH | _RF_TRANSFER_ENCODING))):
-            length = -1
+        self._request_chunked = chunked
 
-        if (((flags & _RF_CONTENT_LENGTH) and
-              ((flags & _RF_TRANSFER_ENCODING) or self._request_chunked))
-                or length == -1):
-            self._request_length = None
-            if not (flags & _RF_CONNECTION_CLOSE):
-                self._append_header(_CONNECTION, _CLOSE)
-            flags |= _RF_CONNECTION_CLOSE
-            self._request_flags = flags
+        if not (flags & _RF_TRANSFER_ENCODING):
+            if chunked:
+                self._append_header(_TRANSFER_ENCODING, _CHUNKED)
+            elif not (flags & _RF_CONTENT_LENGTH):
+                if (length is not None and length >= 0 and
+                        (length or self.method in _METHODS_EXPECTING_BODY)):
+                    self._append_header(_CONTENT_LENGTH, b"%d" % length)
 
         if not (flags & _RF_HOST):
-            hostport = _parse_hostport_from_url(self.url)
-            if hostport:
-                self._append_header(_HOST, hostport)
-            elif hostport is None:
-                self._append_header(_HOST, self._hostport)
+            if self.method == b"CONNECT":
+                self._append_header(_HOST, self.url)
+            else:
+                hostport = _parse_hostport_from_url(self.url)
+                if hostport:
+                    self._append_header(_HOST, hostport)
+                elif hostport is None:
+                    self._append_header(_HOST, self._hostport)
+                else:
+                    raise InvalidURL(self.url)
 
         if not (flags & _RF_ACCEPT_ENCODING):
             self._append_header(_ACCEPT_ENCODING, b"identity")
 
-        if self._request_chunked:
-            if not (flags & _RF_TRANSFER_CHUNKED):
-                self._append_header(_TRANSFER_ENCODING, _CHUNKED)
-
-        elif not (flags & (_RF_CONTENT_LENGTH | _RF_TRANSFER_ENCODING)):
-            if body is None:
-                if self.method in _METHODS_EXPECTING_BODY:
-                    self._request_length = 0
-                    self._append_header(_CONTENT_LENGTH, b"0")
-            elif body_is_bytes:
-                self._request_length = len(body)
-                self._append_header(_CONTENT_LENGTH, b"%d" % self._request_length)
+        if length == -1:
+            length = None
+        self._request_length = length
 
         return body
 
