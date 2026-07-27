@@ -1,4 +1,6 @@
 # http/clientish.py
+#
+# Serious HTTP for tiny devices.
 
 import micropython, socket, errno, gc
 try:
