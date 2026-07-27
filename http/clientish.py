@@ -490,23 +490,9 @@ class HTTPResponse:
         conn._reset_request()
         return reusable
 
-    def _iowrapper0(self, func):
+    def _iowrapper(self, func, *args):
         try:
-            return func()
-        except Exception as e:
-            self._release_socket(False)
-            _reraise_transport_error(e)
-
-    def _iowrapper1(self, func, arg1):
-        try:
-            return func(arg1)
-        except Exception as e:
-            self._release_socket(False)
-            _reraise_transport_error(e)
-
-    def _iowrapper2(self, func, arg1, arg2):
-        try:
-            return func(arg1, arg2)
+            return func(*args)
         except Exception as e:
             self._release_socket(False)
             _reraise_transport_error(e)
@@ -526,7 +512,7 @@ class HTTPResponse:
     def _get_chunk_bytes_left(self):
         while True:
             if self._chunk_bytes_left is None:
-                line = self._iowrapper0(self._sock.readline)
+                line = self._iowrapper(self._sock.readline)
                 if not line:
                     self._abort()
                 pos = line.find(b";")
@@ -542,7 +528,7 @@ class HTTPResponse:
                     self._chunk_bytes_left = size
                     return size
                 while True:
-                    line = self._iowrapper0(self._sock.readline)
+                    line = self._iowrapper(self._sock.readline)
                     if (line == b"\r\n" or line == b"\n"):
                         self._response_length = self._response_bytes
                         self.close()
@@ -550,7 +536,7 @@ class HTTPResponse:
                     if not line:
                         self._abort()
             elif self._chunk_bytes_left == 0:
-                line = self._iowrapper0(self._sock.readline)
+                line = self._iowrapper(self._sock.readline)
                 if not line:
                     self._abort()
                 if not (line == b"\r\n" or line == b"\n"):
@@ -597,7 +583,7 @@ class HTTPResponse:
                     want = min(self._get_chunk_bytes_left(), amt - total)
                     if want == 0:
                         break
-                    n = self._iowrapper2(sock.readinto, bmv[total:], want)
+                    n = self._iowrapper(sock.readinto, bmv[total:], want)
                     if not n:
                         self._abort()
                     self._response_bytes += n
@@ -605,7 +591,7 @@ class HTTPResponse:
                     total += n
                 return total
 
-            n = self._iowrapper2(sock.readinto, buf, amt)
+            n = self._iowrapper(sock.readinto, buf, amt)
             if not n:
                 if (self._response_length is None):
                     self._response_length = self._response_bytes
@@ -629,7 +615,7 @@ class HTTPResponse:
                     want = min(amt - len_out, avail, _READ_BLOCK_SIZE)
                 if want == 0:
                     break
-                chunk = self._iowrapper1(sock.read, want)
+                chunk = self._iowrapper(sock.read, want)
                 if not chunk:
                     self._abort()
                 len_chunk = len(chunk)
@@ -648,7 +634,7 @@ class HTTPResponse:
                 want = _READ_BLOCK_SIZE
             else:
                 want = min(amt - len_out, _READ_BLOCK_SIZE)
-            data = self._iowrapper1(sock.read, want)
+            data = self._iowrapper(sock.read, want)
             if not data:
                 if (self._response_length is None):
                     self._response_length = self._response_bytes
