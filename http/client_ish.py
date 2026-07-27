@@ -1,3 +1,5 @@
+# http/clientish.py
+
 import micropython, socket, errno, gc
 try:
     import ssl
@@ -9,12 +11,12 @@ HTTPS_PORT = const(443)
 OK = const(200)
 
 _DEFAULT_TIMEOUT = const(10)
-_METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
 _GC_FREE_THRESHOLD = const(32768)
 _REQUEST_HEAD_SIZE = const(1024)
 _READ_BLOCK_SIZE = const(2048)
 _READ_MUST_RETURN_BYTES = const(0)
 _RECYCLE_HEADER_BUFFER = const(0)
+_METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
 
 _RF_HOST = const(1)
 _RF_CONNECTION = const(2)
