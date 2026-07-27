@@ -366,6 +366,11 @@ def _derive_response_framing(method, version, status, response_headers):
     if chunked:
         return True, None, reusable
 
+    if chunked is not None:
+        if length is not None and length >= 0:
+            return False, length, False
+        return False, None, False
+
     if length == -1:
         return False, None, False
 
@@ -926,7 +931,7 @@ class HTTPConnection:
         if encode_chunked is not None:
             chunked = bool(encode_chunked)
         elif flags & _RF_TRANSFER_ENCODING:
-            chunked = flags & _RF_TRANSFER_CHUNKED
+            chunked = bool(flags & _RF_TRANSFER_CHUNKED)
         elif flags & _RF_CONTENT_LENGTH:
             chunked = False
         elif isinstance(body, (bytes, bytearray, memoryview)):
