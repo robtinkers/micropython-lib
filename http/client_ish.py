@@ -345,9 +345,10 @@ def _derive_response_framing(method, version, status, response_headers):
 
         elif key is _CONNECTION:
             if reusable is not False:
+                len_val = len(val)
                 if http10:
-                    reusable = (len(val) == 10 and _equals_ci(val, b"keep-alive", 10))
-                elif len(val) == 5 and _equals_ci(val, _CLOSE, 5):
+                    reusable = (len_val == 10 and _equals_ci(val, b"keep-alive", 10))
+                elif len_val == 5 and _equals_ci(val, _CLOSE, 5):
                     reusable = False
 
     if reusable is None:
