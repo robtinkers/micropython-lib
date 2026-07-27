@@ -445,7 +445,7 @@ class HTTPResponse:
             if result is None:
                 result = val
             else:
-                result += b",\r\n\t" + val
+                result += b", " + val
         return default if result is None else result
 
     def read(self, amt=None):
