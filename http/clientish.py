@@ -713,7 +713,7 @@ class HTTPConnection:
         self._reset_request()
         return sock
 
-    def request(self, method, url, body=_EMPTY, headers=None, *, encode_chunked=None):
+    def request(self, method, url, body=None, headers=None, *, encode_chunked=None):
         self.putrequest(method, url)
         try:
             if headers is not None:
@@ -782,7 +782,7 @@ class HTTPConnection:
             self._append_header(name, value)
         self._track_request_header(name, value)
 
-    def endheaders(self, body=_EMPTY, *, encode_chunked=None):
+    def endheaders(self, body=None, *, encode_chunked=None):
         if self._state != _CS_REQUEST_STARTED:
             raise CannotSendHeader()
 
