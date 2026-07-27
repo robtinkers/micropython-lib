@@ -334,12 +334,13 @@ def _derive_response_framing(method, version, status, response_headers):
                 length = -1
 
         elif key is _TRANSFER_ENCODING:
-            if chunked is not False:
-                len_val = len(val)
-                if len_val == 7:
-                    chunked = bool(_equals_ci(val, _CHUNKED, 7))
-                elif len_val > 7:
-                    chunked = val.endswith(_CHUNKED)
+            len_val = len(val)
+            if len_val == 7:
+                chunked = bool(_equals_ci(val, _CHUNKED, 7))
+            elif len_val > 7:
+                chunked = val.endswith(_CHUNKED)
+            else:
+                chunked = False
 
         elif key is _CONNECTION:
             if reusable is not False:
@@ -360,8 +361,7 @@ def _derive_response_framing(method, version, status, response_headers):
         return False, 0, reusable
 
     if chunked is not None:
-        if (not chunked or
-                length is not None or http10):
+        if (not chunked or length is not None or http10):
             reusable = False
         return chunked, None, reusable
 
