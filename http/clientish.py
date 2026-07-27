@@ -19,6 +19,7 @@ _READ_BLOCK_SIZE = const(2048)
 _READ_MUST_RETURN_BYTES = const(0)
 _RECYCLE_HEADER_BUFFER = const(0)
 _REQUEST_HEAD_SIZE = const(1024)
+_USE_VIPER = const(1)
 
 _RF_HOST = const(1)
 _RF_CONNECTION = const(2)
@@ -137,33 +138,62 @@ def _encode_and_validate(x):
         return None
     return x
 
-@micropython.viper
-def _equals_ci(a:ptr8, b:ptr8, length:int) -> int:
-    i = 0
-    while i < length:
-        x = a[i]
-        y = b[i]
-        if x != y:
-            if 65 <= x and x <= 90:
-                x += 32
-            if 65 <= y and y <= 90:
-                y += 32
+if _USE_VIPER:
+    @micropython.viper
+    def _equals_ci(a:ptr8, b:ptr8, length:int) -> int:
+        i = 0
+        while i < length:
+            x = a[i]
+            y = b[i]
             if x != y:
-                return 0
-        i += 1
-    return 1
+                if 65 <= x and x <= 90:
+                    x += 32
+                if 65 <= y and y <= 90:
+                    y += 32
+                if x != y:
+                    return 0
+            i += 1
+        return 1
 
-@micropython.viper
-def _looks_like_ip4(buf:ptr8, length:int) -> int:
-    if length <= 0:
-        return 0
-    i = 0
-    while i < length:
-        b = buf[i]
-        if not (b == 46 or (48 <= b and b <= 57)):
+    @micropython.viper
+    def _looks_like_ip4(buf:ptr8, length:int) -> int:
+        if length <= 0:
             return 0
-        i += 1
-    return 1
+        i = 0
+        while i < length:
+            b = buf[i]
+            if not (b == 46 or (48 <= b and b <= 57)):
+                return 0
+            i += 1
+        return 1
+
+else:
+
+    def _equals_ci(a:ptr8, b:ptr8, length:int) -> int:
+        i = 0
+        while i < length:
+            x = a[i]
+            y = b[i]
+            if x != y:
+                if 65 <= x and x <= 90:
+                    x += 32
+                if 65 <= y and y <= 90:
+                    y += 32
+                if x != y:
+                    return 0
+            i += 1
+        return 1
+
+    def _looks_like_ip4(buf:ptr8, length:int) -> int:
+        if length <= 0:
+            return 0
+        i = 0
+        while i < length:
+            b = buf[i]
+            if not (b == 46 or (48 <= b and b <= 57)):
+                return 0
+            i += 1
+        return 1
 
 def _close_quietly(sock):
     if sock is not None:
