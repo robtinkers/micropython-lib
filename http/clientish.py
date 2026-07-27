@@ -34,10 +34,6 @@ _CS_REQUEST_SENT = const(2)
 _CS_RECEIVING_RESPONSE = const(3)
 _CS_RESPONSE_ACTIVE = const(4)
 
-_EMPTY = b""
-_CHUNKED = b"chunked"
-_CLOSE = b"close"
-
 _ACCEPT_ENCODING = b"Accept-Encoding"
 _CONNECTION = b"Connection"
 _CONTENT_LENGTH = b"Content-Length"
@@ -46,6 +42,10 @@ _HOST = b"Host"
 _LOCATION = b"Location"
 _SET_COOKIE = b"Set-Cookie"
 _TRANSFER_ENCODING = b"Transfer-Encoding"
+
+_CHUNKED = b"chunked"
+_CLOSE = b"close"
+_EMPTY = b""
 
 _KEEP_RESPONSE_HEADERS = {
     8: (_LOCATION,),
