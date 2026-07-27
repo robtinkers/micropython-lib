@@ -838,6 +838,9 @@ class HTTPConnection:
             except OSError as e:
                 _reraise_transport_error(e)
 
+            if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
+                gc.collect()
+
             resp = HTTPResponse(
                 self._sock, self.method, self.url,
                 version, status, reason, response_headers)
@@ -859,9 +862,6 @@ class HTTPConnection:
         except Exception:
             self._abort_request(resp)
             raise
-        finally:
-            if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
-                gc.collect()
 
     def _append_header(self, name, value):
         self._request_head.extend(name)
