@@ -467,9 +467,13 @@ class HTTPResponse:
         conn._reset_request()
         return reusable
 
-    def _iowrapper(self, func, *args):
+    def _iowrapper(self, func, arg1=None, arg2=None):
         try:
-            return func(*args)
+            if arg1 is None:
+                return func()
+            if arg2 is None:
+                return func(arg1)
+            return func(arg1, arg2)
         except Exception as e:
             self._release_socket(False)
             _reraise_transport_error(e)
