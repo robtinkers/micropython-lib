@@ -396,7 +396,6 @@ class HTTPResponse:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
-        return False
 
     @property
     def closed(self):
@@ -627,12 +626,10 @@ class HTTPResponse:
 
 class HTTPConnection:
     default_port = HTTP_PORT
-    _timeout = _DEFAULT_TIMEOUT
 
-    def __init__(self, host, port=None, *, timeout=None, network=None):
+    def __init__(self, host, port=None, *, timeout=_DEFAULT_TIMEOUT, network=None):
         self._set_authority(host, port)
-        if timeout is not None:
-            self._timeout = timeout
+        self._timeout = timeout
         self._network = network
         self._sock = None
         self._resp = None
@@ -677,7 +674,6 @@ class HTTPConnection:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
-        return False
 
     def connect(self):
         if self._state != _CS_IDLE:
