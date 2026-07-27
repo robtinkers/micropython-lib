@@ -139,6 +139,7 @@ def _encode_and_validate(x):
     return x
 
 if _USE_VIPER:
+
     @micropython.viper
     def _equals_ci(a:ptr8, b:ptr8, length:int) -> int:
         i = 0
