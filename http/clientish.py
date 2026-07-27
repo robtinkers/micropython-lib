@@ -156,18 +156,6 @@ if _USE_VIPER:
             i += 1
         return 1
 
-    @micropython.viper
-    def _looks_like_ip4(buf:ptr8, length:int) -> int:
-        if length <= 0:
-            return 0
-        i = 0
-        while i < length:
-            b = buf[i]
-            if not (b == 46 or (48 <= b and b <= 57)):
-                return 0
-            i += 1
-        return 1
-
 else:
 
     def _equals_ci(a:ptr8, b:ptr8, length:int) -> int:
@@ -182,17 +170,6 @@ else:
                     y += 32
                 if x != y:
                     return 0
-            i += 1
-        return 1
-
-    def _looks_like_ip4(buf:ptr8, length:int) -> int:
-        if length <= 0:
-            return 0
-        i = 0
-        while i < length:
-            b = buf[i]
-            if not (b == 46 or (48 <= b and b <= 57)):
-                return 0
             i += 1
         return 1
 
@@ -668,6 +645,8 @@ class HTTPConnection:
         the_host = _encode_and_validate(host)
         if not the_host:
             raise InvalidURL(host)
+        if type(the_host) is not bytes:
+            the_host = bytes(the_host)
 
         hostaddr = the_host
         hostname = None
@@ -681,7 +660,7 @@ class HTTPConnection:
             raise InvalidURL(host)
         elif colons:
             the_host = b"[" + the_host + b"]"
-        elif not _looks_like_ip4(the_host, len(the_host)):
+        elif not all(b == 46 or (48 <= b and b <= 57) for b in the_host):
             hostname = the_host
 
         if port is None:
