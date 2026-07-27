@@ -662,7 +662,7 @@ class HTTPConnection:
             the_host = b"[" + the_host + b"]"
         else:
             for b in the_host:
-                if not (b == 46 or (48 <= b and b <= 57)):
+                if not (b == 46 or (48 <= b <= 57)):
                     hostname = the_host
                     break
 
