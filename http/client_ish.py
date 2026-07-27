@@ -14,6 +14,7 @@ _GC_FREE_THRESHOLD = const(32768)
 _REQUEST_HEAD_SIZE = const(1024)
 _READ_BLOCK_SIZE = const(2048)
 _READ_MUST_RETURN_BYTES = const(0)
+_RECYCLE_HEADER_BUFFER = const(0)
 
 _RF_HOST = const(1)
 _RF_CONNECTION = const(2)
@@ -788,7 +789,10 @@ class HTTPConnection:
                 self._open_socket()
             self._send_bytes(self._request_head, False)
             self._send_bytes(_CRLF, False)
-            self._request_head = None
+            if _RECYCLE_HEADER_BUFFER and self._request_head is not None:
+                self._request_head[:] = _EMPTY
+            else:
+                self._request_head = None
             self._state = _CS_REQUEST_SENT
         except Exception:
             self._abort_request()
@@ -1081,7 +1085,10 @@ class HTTPConnection:
         self._request_bytes = 0
         self._request_flags = 0
         self._request_chunked = False
-        self._request_head = None
+        if _RECYCLE_HEADER_BUFFER and self._request_head is not None:
+            self._request_head[:] = _EMPTY
+        else:
+            self._request_head = None
 
     def _abort_request(self, resp=None):
         try:
