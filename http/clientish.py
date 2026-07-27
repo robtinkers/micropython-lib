@@ -660,8 +660,11 @@ class HTTPConnection:
             raise InvalidURL(host)
         elif colons:
             the_host = b"[" + the_host + b"]"
-        elif not all(b == 46 or (48 <= b and b <= 57) for b in the_host):
-            hostname = the_host
+        else:
+            for b in the_host:
+                if not (b == 46 or (48 <= b and b <= 57)):
+                    hostname = the_host
+                    break
 
         if port is None:
             port = self.default_port
