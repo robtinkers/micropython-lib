@@ -129,9 +129,9 @@ def _reraise_body_error(exc):
 def _encode_and_validate(x):
     if x is None:
         return None
-    if isinstance(x, str):
+    if isinstance(x, (str, memoryview)):
         x = bytes(x)
-    elif not isinstance(x, (bytes, bytearray, memoryview)):
+    elif not isinstance(x, (bytes, bytearray)):
         x = str(x).encode()
     if b"\r" in x or b"\n" in x:
         return None
@@ -286,12 +286,10 @@ def _parse_headers(sock, all_headers=False, and_cookies=None):
             continue
 
         name = None
-        cands = _KEEP_RESPONSE_HEADERS.get(pos)
-        if cands:
-            for cand in cands:
-                if _equals_ci(line, cand, pos):
-                    name = cand
-                    break
+        for cand in _KEEP_RESPONSE_HEADERS.get(pos, ()):
+            if _equals_ci(line, cand, pos):
+                name = cand
+                break
 
         if name is None:
             if not all_headers:
@@ -371,10 +369,11 @@ def _derive_response_framing(method, version, status, response_headers):
     return False, length, (reusable and length is not None)
 
 class HTTPResponse:
+    _conn = None
+    _chunk_bytes_left = None
 
     def __init__(self, sock, method, url,
                  version, status, reason, response_headers):
-        self._conn = None
         self._sock = sock
         self.method = method
         self.url = url
@@ -388,7 +387,6 @@ class HTTPResponse:
                 method, version, status, response_headers)
         )
 
-        self._chunk_bytes_left = None
         self._response_bytes = 0
 
     def __enter__(self):
