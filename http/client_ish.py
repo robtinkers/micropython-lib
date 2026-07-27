@@ -627,11 +627,12 @@ class HTTPResponse:
 
 class HTTPConnection:
     default_port = HTTP_PORT
+    _timeout = _DEFAULT_TIMEOUT
 
-    def __init__(self, host, port=None, *,
-                 timeout=_DEFAULT_TIMEOUT, network=None):
+    def __init__(self, host, port=None, *, timeout=None, network=None):
         self._set_authority(host, port)
-        self._timeout = timeout
+        if timeout is not None:
+            self._timeout = timeout
         self._network = network
         self._sock = None
         self._resp = None
@@ -1123,4 +1124,3 @@ class HTTPSConnection(HTTPConnection):
             _reraise_transport_error(e)
         finally:
             gc.collect()
-
