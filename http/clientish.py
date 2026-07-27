@@ -34,13 +34,7 @@ _CS_REQUEST_SENT = const(2)
 _CS_RECEIVING_RESPONSE = const(3)
 _CS_RESPONSE_ACTIVE = const(4)
 
-_CR = b"\r"
-_LF = b"\n"
-_CRLF = b"\r\n"
 _EMPTY = b""
-_COLON = b":"
-_LBRACKET = b"["
-_RBRACKET = b"]"
 _CHUNKED = b"chunked"
 _CLOSE = b"close"
 
@@ -139,7 +133,7 @@ def _encode_and_validate(x):
         x = bytes(x)
     elif not isinstance(x, (bytes, bytearray, memoryview)):
         x = str(x).encode()
-    if _CR in x or _LF in x:
+    if b"\r" in x or b"\n" in x:
         return None
     return x
 
@@ -237,12 +231,12 @@ def _parse_status_line(sock):
         first = sock.read(1)
         if not first:
             raise RemoteDisconnected()
-        if first == _CR or first == _LF:
+        if first == b"\r" or first == b"\n":
             continue
         if first != b"H":
             raise BadStatusLine(first + b"...")
         line = sock.readline()
-        if not line.endswith(_LF):
+        if not line.endswith(b"\n"):
             break
         if not line.startswith(b"TTP/"):
             break
@@ -280,14 +274,14 @@ def _parse_headers(sock, all_headers=False, and_cookies=None):
         line = sock.readline()
         if not line:
             raise RemoteDisconnected()
-        if not line.endswith(_LF):
+        if not line.endswith(b"\n"):
             raise BadStatusLine(line)
-        if line == _CRLF or line == _LF:
+        if line == b"\r\n" or line == b"\n":
             return headers
         if line[0] <= 32:
             continue
 
-        pos = line.find(_COLON)
+        pos = line.find(b":")
         if pos == -1:
             continue
 
@@ -506,7 +500,7 @@ class HTTPResponse:
                     return size
                 while True:
                     line = self._iowrapper(self._sock.readline)
-                    if (line == _CRLF or line == _LF):
+                    if (line == b"\r\n" or line == b"\n"):
                         self._response_length = self._response_bytes
                         self.close()
                         return 0
@@ -516,7 +510,7 @@ class HTTPResponse:
                 line = self._iowrapper(self._sock.readline)
                 if not line:
                     self._abort()
-                if not (line == _CRLF or line == _LF):
+                if not (line == b"\r\n" or line == b"\n"):
                     self._abort("malformed terminator")
                 self._chunk_bytes_left = None
             else:
@@ -648,16 +642,16 @@ class HTTPConnection:
 
         hostaddr = the_host
         hostname = None
-        colons = the_host.count(_COLON)
+        colons = the_host.count(b":")
 
-        if the_host.startswith(_LBRACKET):
-            if colons < 2 or not the_host.endswith(_RBRACKET):
+        if the_host.startswith(b"["):
+            if colons < 2 or not the_host.endswith(b"]"):
                 raise InvalidURL(host)
             hostaddr = the_host[1:-1]
         elif colons == 1:
             raise InvalidURL(host)
         elif colons:
-            the_host = _LBRACKET + the_host + _RBRACKET
+            the_host = b"[" + the_host + b"]"
         elif not _looks_like_ip4(the_host, len(the_host)):
             hostname = the_host
 
@@ -787,7 +781,7 @@ class HTTPConnection:
             if self._sock is None:
                 self._open_socket()
             self._send_bytes(self._request_head, False)
-            self._send_bytes(_CRLF, False)
+            self._send_bytes(b"\r\n", False)
             if _RECYCLE_HEADER_BUFFER:
                 self._request_head[:] = _EMPTY
             else:
@@ -874,7 +868,7 @@ class HTTPConnection:
         self._request_head.extend(name)
         self._request_head.extend(b": ")
         self._request_head.extend(value)
-        self._request_head.extend(_CRLF)
+        self._request_head.extend(b"\r\n")
 
     def _track_request_header(self, name, value):
         len_name = len(name)
@@ -1058,7 +1052,7 @@ class HTTPConnection:
             return
         self._send_bytes(b"%X\r\n" % len(data), False)
         self._send_bytes(data, accounting)
-        self._send_bytes(_CRLF, False)
+        self._send_bytes(b"\r\n", False)
 
     def _open_socket(self):
         network = self._network
