@@ -33,7 +33,7 @@ _CS_IDLE = const(0)
 _CS_REQUEST_STARTED = const(1)
 _CS_REQUEST_SENT = const(2)
 _CS_RECEIVING_RESPONSE = const(3)
-_CS_RESPONSE_ACTIVE = const(4)
+_CS_RESPONSE_REUSABLE = const(4)
 
 _ACCEPT_ENCODING = b"Accept-Encoding"
 _CONNECTION = b"Connection"
@@ -379,7 +379,7 @@ def _derive_response_framing(method, version, status, response_headers):
     return False, length, (reusable and length is not None)
 
 class HTTPResponse:
-    _chunk_bytes_left = None
+    _chunk_remaining = None
 
     def __init__(self, owner, sock, method, url,
                  version, status, reason,
@@ -427,12 +427,12 @@ class HTTPResponse:
         return default if result is None else result
 
     def read(self, amt=None):
-        return self._read_impl(None, amt)
+        return self._read_body(None, amt)
 
     def readinto(self, buf):
         if buf is None:
             raise TypeError("buffer required")
-        return self._read_impl(buf, None)
+        return self._read_body(buf, None)
 
     def detach(self):
         sock = self._sock
@@ -482,9 +482,9 @@ class HTTPResponse:
             self._release_socket(False)
             raise
 
-    def _get_chunk_bytes_left(self):
+    def _chunk_available(self):
         while True:
-            if self._chunk_bytes_left is None:
+            if self._chunk_remaining is None:
                 line = self._iowrapper(self._sock.readline)
                 if not line:
                     self._abort()
@@ -498,7 +498,7 @@ class HTTPResponse:
                 except ValueError:
                     self._abort("malformed chunk-size")
                 if size > 0:
-                    self._chunk_bytes_left = size
+                    self._chunk_remaining = size
                     return size
                 while True:
                     line = self._iowrapper(self._sock.readline)
@@ -508,17 +508,17 @@ class HTTPResponse:
                         return 0
                     if not line:
                         self._abort()
-            elif self._chunk_bytes_left == 0:
+            elif self._chunk_remaining == 0:
                 line = self._iowrapper(self._sock.readline)
                 if not line:
                     self._abort()
                 if not (line == b"\r\n" or line == b"\n"):
                     self._abort("malformed terminator")
-                self._chunk_bytes_left = None
+                self._chunk_remaining = None
             else:
-                return self._chunk_bytes_left
+                return self._chunk_remaining
 
-    def _read_impl(self, buf, amt):
+    def _read_body(self, buf, amt):
         sock = self._sock
         into = buf is not None
         if sock is None:
@@ -553,14 +553,14 @@ class HTTPResponse:
                 bmv = buf if isinstance(buf, memoryview) else memoryview(buf)
                 total = 0
                 while total < amt:
-                    want = min(self._get_chunk_bytes_left(), amt - total)
+                    want = min(self._chunk_available(), amt - total)
                     if want == 0:
                         break
                     n = self._iowrapper(sock.readinto, bmv[total:], want)
                     if not n:
                         self._abort()
                     self._bytes += n
-                    self._chunk_bytes_left -= n
+                    self._chunk_remaining -= n
                     total += n
                 return total
 
@@ -581,7 +581,7 @@ class HTTPResponse:
             out = _EMPTY
             len_out = 0
             while unbounded or len_out < amt:
-                avail = self._get_chunk_bytes_left()
+                avail = self._chunk_available()
                 if unbounded:
                     want = min(avail, _READ_BLOCK_SIZE)
                 else:
@@ -593,7 +593,7 @@ class HTTPResponse:
                     self._abort()
                 len_chunk = len(chunk)
                 self._bytes += len_chunk
-                self._chunk_bytes_left -= len_chunk
+                self._chunk_remaining -= len_chunk
                 len_out += len_chunk
                 out = self._append_data(out, chunk)
             if _READ_MUST_RETURN_BYTES and type(out) is not bytes:
@@ -699,12 +699,14 @@ class HTTPConnection:
         return sock
 
     def release_response(self, response, sock, complete):
+        reusable = (
+            complete and
+            self._state == _CS_RESPONSE_REUSABLE and
+            self._resp is response)
         if self._resp is response:
-            if complete:
-                self._sock = sock
-                sock = None
+            self._sock = sock if reusable else None
             self._reset_request()
-        if complete is not None:
+        if complete is not None and not reusable:
             _close_quietly(sock)
 
     def request(self, method, url, body=None, headers=None, *, encode_chunked=None):
@@ -855,7 +857,9 @@ class HTTPConnection:
 
     def getresponse(self, *, all_headers=False, and_cookies=None):
         state = self._state
-        if state != _CS_REQUEST_SENT and state != _CS_RECEIVING_RESPONSE:
+        if (self._resp is not None or
+                (state != _CS_REQUEST_SENT and
+                 state != _CS_RECEIVING_RESPONSE)):
             raise ResponseNotReady()
         if self._sock is None:
             raise NotConnected()
@@ -906,11 +910,9 @@ class HTTPConnection:
                 return resp
 
             self._sock = None
+            self._resp = resp
             if reusable:
-                self._resp = resp
-                self._state = _CS_RESPONSE_ACTIVE
-            else:
-                self._reset_request()
+                self._state = _CS_RESPONSE_REUSABLE
 
             if response_length == 0 and status != 101:
                 resp.close()
