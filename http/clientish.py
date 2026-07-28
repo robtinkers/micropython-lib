@@ -127,7 +127,7 @@ def _reraise_body_error(exc):
         raise OSError(errno.EIO, str(exc))
     raise
 
-def _encode_and_validate(x, must_be_bytes=False):
+def _encode_and_validate(x, must_return_bytes=False):
     if x is None:
         return None
     if isinstance(x, (str, memoryview)):
@@ -136,7 +136,7 @@ def _encode_and_validate(x, must_be_bytes=False):
         x = str(x).encode()
     if b"\r" in x or b"\n" in x:
         return None
-    if not must_be_bytes or type(x) is bytes:
+    if not must_return_bytes or type(x) is bytes:
         return x
     return bytes(x)
 
