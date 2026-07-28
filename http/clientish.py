@@ -381,12 +381,12 @@ def _derive_response_framing(method, version, status, response_headers):
 class HTTPResponse:
     _chunk_bytes_left = None
 
-    def __init__(self, conn, sock, method, url,
+    def __init__(self, owner, sock, method, url,
                  version, status, reason,
                  headers, chunked, length):
-        if conn is None and sock is not None:
+        if owner is None and sock is not None:
             raise ValueError("socket owner required")
-        self._conn = conn
+        self._owner = owner
         self._sock = sock
         self.method = method
         self.url = url
@@ -434,6 +434,16 @@ class HTTPResponse:
             raise TypeError("buffer required")
         return self._read_impl(buf, None)
 
+    def detach(self):
+        sock = self._sock
+        if sock is None:
+            raise NotConnected()
+        owner = self._owner
+        if owner is not None:
+            owner.release_response(self, None, None)
+        self._sock = self._owner = None
+        return sock
+
     def close(self):
         self._release_socket(
             self._bytes == self._length)
@@ -442,23 +452,12 @@ class HTTPResponse:
         self._release_socket(False)
         raise IncompleteRead(value, self._bytes, self._length)
 
-    def detach(self):
-        if self._sock is None:
-            raise NotConnected()
-        return self._release_socket(None)
-
     def _release_socket(self, complete):
         sock = self._sock
-        conn = self._conn
-
-        if conn is not None:
-            conn.release_response(
-                self,
-                None if complete is None else sock,
-                complete)
-
-        self._sock = self._conn = None
-        return sock
+        owner = self._owner
+        if owner is not None:
+            owner.release_response(self, sock, complete)
+        self._sock = self._owner = None
 
     def _iowrapper(self, func, arg1=None, arg2=None):
         try:
@@ -630,14 +629,6 @@ class HTTPConnection:
     default_port = HTTP_PORT
 
     def __init__(self, host, port=None, *, timeout=_DEFAULT_TIMEOUT, network=None):
-        self._set_authority(host, port)
-        self._timeout = timeout
-        self._network = network
-        self._sock = None
-        self._request_head = None
-        self._reset_request()
-
-    def _set_authority(self, host, port):
         the_host = _encode_and_validate(host, True)
         if not the_host:
             raise InvalidURL(host)
@@ -673,6 +664,12 @@ class HTTPConnection:
         self._hostname = hostname
         self._hostport = hostport
         self.port = port
+
+        self._timeout = timeout
+        self._network = network
+        self._sock = None
+        self._request_head = None
+        self._reset_request()
 
     def __enter__(self):
         return self
@@ -773,7 +770,50 @@ class HTTPConnection:
             if value is None:
                 raise ValueError("invalid header value")
             self._append_header(name, value)
-        self._track_request_header(name, value)
+
+        len_name = len(name)
+        length = self._request_length
+        flags = self._request_flags
+
+        if len_name == 4:
+            if _equals_ci(name, _HOST, 4):
+                flags |= _RF_HOST
+        elif len_name == 10:
+            if _equals_ci(name, _CONNECTION, 10):
+                flags |= _RF_CONNECTION
+                if value is not None:
+                    len_value = len(value)
+                    if ((len_value == 5 and _equals_ci(value, _CLOSE, 5)) or
+                            (len_value > 5 and value.endswith(_CLOSE))):
+                        flags |= _RF_CONNECTION_CLOSE
+        elif len_name == 14:
+            if _equals_ci(name, _CONTENT_LENGTH, 14):
+                flags |= _RF_CONTENT_LENGTH
+                if value is not None:
+                    try:
+                        value = int(value, 10)
+                    except (TypeError, ValueError):
+                        value = -1
+                    if value >= 0 and (length is None or length == value):
+                        length = value
+                    else:
+                        length = -1
+        elif len_name == 15:
+            if _equals_ci(name, _ACCEPT_ENCODING, 15):
+                flags |= _RF_ACCEPT_ENCODING
+        elif len_name == 17:
+            if _equals_ci(name, _TRANSFER_ENCODING, 17):
+                flags |= _RF_TRANSFER_ENCODING
+                if value is not None:
+                    len_value = len(value)
+                    flags &= ~ _RF_TRANSFER_CHUNKED
+                    if len_value == 7 and _equals_ci(value, _CHUNKED, 7):
+                        flags |= _RF_TRANSFER_CHUNKED
+                    elif len_value > 7 and value.endswith(_CHUNKED):
+                        flags |= _RF_TRANSFER_CHUNKED
+
+        self._request_length = length
+        self._request_flags = flags
 
     def endheaders(self, body=None, *, encode_chunked=None):
         if self._state != _CS_REQUEST_STARTED:
@@ -846,7 +886,7 @@ class HTTPConnection:
                 self.method, version, status, response_headers)
 
             if status < 200 and status != 101:
-                sock = conn = None
+                sock = owner = None
                 if not reusable:
                     self._request_flags |= _RF_CONNECTION_CLOSE
             else:
@@ -855,10 +895,10 @@ class HTTPConnection:
                     reusable and
                     not (self._request_flags & _RF_CONNECTION_CLOSE)
                 )
-                conn = self
+                owner = self
 
             resp = HTTPResponse(
-                conn, sock, self.method, self.url,
+                owner, sock, self.method, self.url,
                 version, status, reason, response_headers,
                 chunked, length)
 
@@ -885,51 +925,6 @@ class HTTPConnection:
         self._request_head.extend(b": ")
         self._request_head.extend(value)
         self._request_head.extend(b"\r\n")
-
-    def _track_request_header(self, name, value):
-        len_name = len(name)
-        length = self._request_length
-        flags = self._request_flags
-
-        if len_name == 4:
-            if _equals_ci(name, _HOST, 4):
-                flags |= _RF_HOST
-        elif len_name == 10:
-            if _equals_ci(name, _CONNECTION, 10):
-                flags |= _RF_CONNECTION
-                if value is not None:
-                    len_value = len(value)
-                    if ((len_value == 5 and _equals_ci(value, _CLOSE, 5)) or
-                            (len_value > 5 and value.endswith(_CLOSE))):
-                        flags |= _RF_CONNECTION_CLOSE
-        elif len_name == 14:
-            if _equals_ci(name, _CONTENT_LENGTH, 14):
-                flags |= _RF_CONTENT_LENGTH
-                if value is not None:
-                    try:
-                        value = int(value, 10)
-                    except (TypeError, ValueError):
-                        value = -1
-                    if value >= 0 and (length is None or length == value):
-                        length = value
-                    else:
-                        length = -1
-        elif len_name == 15:
-            if _equals_ci(name, _ACCEPT_ENCODING, 15):
-                flags |= _RF_ACCEPT_ENCODING
-        elif len_name == 17:
-            if _equals_ci(name, _TRANSFER_ENCODING, 17):
-                flags |= _RF_TRANSFER_ENCODING
-                if value is not None:
-                    len_value = len(value)
-                    flags &= ~ _RF_TRANSFER_CHUNKED
-                    if len_value == 7 and _equals_ci(value, _CHUNKED, 7):
-                        flags |= _RF_TRANSFER_CHUNKED
-                    elif len_value > 7 and value.endswith(_CHUNKED):
-                        flags |= _RF_TRANSFER_CHUNKED
-
-        self._request_length = length
-        self._request_flags = flags
 
     def _prep_request(self, body, encode_chunked):
         if isinstance(body, str):
