@@ -127,7 +127,7 @@ def _reraise_body_error(exc):
         raise OSError(errno.EIO, str(exc))
     raise
 
-def _encode_and_validate(x):
+def _encode_and_validate(x, must_be_bytes=False):
     if x is None:
         return None
     if isinstance(x, (str, memoryview)):
@@ -136,7 +136,9 @@ def _encode_and_validate(x):
         x = str(x).encode()
     if b"\r" in x or b"\n" in x:
         return None
-    return x
+    if not must_be_bytes or type(x) is bytes:
+        return x
+    return bytes(x)
 
 if _USE_VIPER:
 
@@ -377,11 +379,12 @@ def _derive_response_framing(method, version, status, response_headers):
     return False, length, (reusable and length is not None)
 
 class HTTPResponse:
-    _conn = None
     _chunk_bytes_left = None
 
-    def __init__(self, sock, method, url,
-                 version, status, reason, response_headers):
+    def __init__(self, conn, sock, method, url,
+                 version, status, reason, response_headers,
+                 chunked, length):
+        self._conn = conn
         self._sock = sock
         self.method = method
         self.url = url
@@ -390,11 +393,8 @@ class HTTPResponse:
         self.reason = reason
         self._headers = response_headers
 
-        self._response_chunked, self._response_length, self._reusable = (
-            _derive_response_framing(
-                method, version, status, response_headers)
-        )
-
+        self._response_chunked = chunked
+        self._response_length = length
         self._response_bytes = 0
 
     def __enter__(self):
@@ -437,35 +437,28 @@ class HTTPResponse:
         sock = self._sock
         if sock is None:
             raise NotConnected()
-        self._sock = None
-        self._return_socket(sock, False)
+        conn = self._conn
+        if conn is not None:
+            conn.release_response(self, None)
+        self._sock = self._conn = None
         return sock
 
     def close(self):
-        self._release_socket(self._reusable and
-                             self._response_bytes == self._response_length)
+        self._release_socket(
+            self._response_bytes == self._response_length)
 
     def _abort(self, value="aborted"):
         self._release_socket(False)
         raise IncompleteRead(value, self._response_bytes, self._response_length)
 
-    def _release_socket(self, reusable):
-        sock, self._sock = self._sock, None
-        if sock is not None and not self._return_socket(sock, reusable):
+    def _release_socket(self, complete):
+        sock = self._sock
+        conn = self._conn
+        released = (conn is not None and
+                    conn.release_response(self, sock if complete else None))
+        self._sock = self._conn = None
+        if sock is not None and not (complete and released):
             _close_quietly(sock)
-
-    def _return_socket(self, sock, reusable):
-        conn, self._conn = self._conn, None
-
-        if (conn is None or
-                conn._state != _CS_RESPONSE_ACTIVE or
-                conn._resp is not self or conn._sock is not None):
-            return False
-
-        conn._resp = None
-        conn._sock = sock if reusable else None
-        conn._reset_request()
-        return reusable
 
     def _iowrapper(self, func, arg1=None, arg2=None):
         try:
@@ -641,16 +634,13 @@ class HTTPConnection:
         self._timeout = timeout
         self._network = network
         self._sock = None
-        self._resp = None
         self._request_head = None
         self._reset_request()
 
     def _set_authority(self, host, port):
-        the_host = _encode_and_validate(host)
+        the_host = _encode_and_validate(host, True)
         if not the_host:
             raise InvalidURL(host)
-        if type(the_host) is not bytes:
-            the_host = bytes(the_host)
 
         hostaddr = the_host
         hostname = None
@@ -706,12 +696,18 @@ class HTTPConnection:
     def detach(self):
         resp = self._resp
         if resp is not None:
-            sock = self._detach_response(resp)
-        else:
-            sock = self._sock
-        self._sock = None
+            return resp.detach()
+        sock, self._sock = self._sock, None
         self._reset_request()
         return sock
+
+    def release_response(self, response, sock):
+        if (self._state != _CS_RESPONSE_ACTIVE or
+                self._resp is not response):
+            return False
+        self._sock = sock
+        self._reset_request()
+        return True
 
     def request(self, method, url, body=None, headers=None, *, encode_chunked=None):
         self.putrequest(method, url)
@@ -732,22 +728,18 @@ class HTTPConnection:
             raise CannotSendRequest()
         self._state = _CS_REQUEST_STARTED
         try:
-            method = _encode_and_validate(method)
+            method = _encode_and_validate(method, True)
             if not method:
                 raise ValueError("bad method")
-            if type(method) is not bytes:
-                method = bytes(method)
             if not method.isupper():
                 method = method.upper()
 
             if url:
-                valid_url = _encode_and_validate(url)
+                valid_url = _encode_and_validate(url, True)
             else:
                 valid_url = b"/"
             if not valid_url:
                 raise InvalidURL(url)
-            if type(valid_url) is not bytes:
-                valid_url = bytes(valid_url)
 
             self.method = method
             self.url = valid_url
@@ -851,27 +843,36 @@ class HTTPConnection:
             if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
                 gc.collect()
 
-            resp = HTTPResponse(
-                self._sock, self.method, self.url,
-                version, status, reason, response_headers)
+            chunked, length, reusable = _derive_response_framing(
+                self.method, version, status, response_headers)
 
             if status < 200 and status != 101:
-                resp._sock = None
-                if not resp._reusable:
+                sock = conn = None
+                if not reusable:
                     self._request_flags |= _RF_CONNECTION_CLOSE
+            else:
+                sock = self._sock
+                conn = self if (
+                    reusable and
+                    not (self._request_flags & _RF_CONNECTION_CLOSE)
+                ) else None
+
+            resp = HTTPResponse(
+                conn, sock, self.method, self.url,
+                version, status, reason, response_headers,
+                chunked, length)
+
+            if sock is None:
                 return resp
 
             self._sock = None
-            resp._reusable = resp._reusable and not (self._request_flags & _RF_CONNECTION_CLOSE)
-
-            if resp._reusable:
+            if conn is not None:
                 self._resp = resp
-                resp._conn = self
                 self._state = _CS_RESPONSE_ACTIVE
             else:
                 self._reset_request()
 
-            if resp._response_length == 0 and status != 101:
+            if length == 0 and status != 101:
                 resp.close()
 
             return resp
@@ -1057,16 +1058,16 @@ class HTTPConnection:
 
         try:
             self._sock.sendall(data)
-            if accounting is True:
+            if accounting:
                 self._request_bytes += len(data)
         except OSError as e:
             _reraise_transport_error(e)
 
-    def _send_chunk(self, data, accounting=True):
+    def _send_chunk(self, data):
         if not data:
             return
         self._send_bytes(b"%X\r\n" % len(data), False)
-        self._send_bytes(data, accounting)
+        self._send_bytes(data)
         self._send_bytes(b"\r\n", False)
 
     def _open_socket(self):
@@ -1090,6 +1091,7 @@ class HTTPConnection:
 
     def _reset_request(self):
         self._state = _CS_IDLE
+        self._resp = None
         self.method = None
         self.url = None
         self._request_length = None
@@ -1106,18 +1108,12 @@ class HTTPConnection:
             if resp is None:
                 resp = self._resp
             if resp is not None:
-                _close_quietly(self._detach_response(resp))
+                resp.close()
 
             sock, self._sock = self._sock, None
             _close_quietly(sock)
         finally:
             self._reset_request()
-
-    def _detach_response(self, resp):
-        sock, resp._sock = resp._sock, None
-        self._resp = None
-        resp._conn = None
-        return sock
 
 if ssl is not None:
 
