@@ -668,7 +668,7 @@ class HTTPConnection:
         self._timeout = timeout
         self._network = network
         self._sock = None
-        self._request_head = None
+        self._head = None
         self._reset_request()
 
     def __enter__(self):
@@ -742,18 +742,18 @@ class HTTPConnection:
             self.method = method
             self.url = valid_url
 
-            if self._request_head is None:
-                self._request_head = bytearray(_REQUEST_HEAD_SIZE)
-                self._request_head[:] = _EMPTY
-            self._request_head.extend(method)
-            self._request_head.extend(b" ")
-            self._request_head.extend(valid_url)
-            self._request_head.extend(b" HTTP/1.1\r\n")
+            if self._head is None:
+                self._head = bytearray(_REQUEST_HEAD_SIZE)
+                self._head[:] = _EMPTY
+            self._head.extend(method)
+            self._head.extend(b" ")
+            self._head.extend(valid_url)
+            self._head.extend(b" HTTP/1.1\r\n")
 
             if skip_host:
-                self._request_flags |= _RF_HOST
+                self._flags |= _RF_HOST
             if skip_accept_encoding:
-                self._request_flags |= _RF_ACCEPT_ENCODING
+                self._flags |= _RF_ACCEPT_ENCODING
         except Exception:
             self._reset_request()
             raise
@@ -772,8 +772,8 @@ class HTTPConnection:
             self._append_header(name, value)
 
         len_name = len(name)
-        length = self._request_length
-        flags = self._request_flags
+        length = self._length
+        flags = self._flags
 
         if len_name == 4:
             if _equals_ci(name, _HOST, 4):
@@ -812,8 +812,8 @@ class HTTPConnection:
                     elif len_value > 7 and value.endswith(_CHUNKED):
                         flags |= _RF_TRANSFER_CHUNKED
 
-        self._request_length = length
-        self._request_flags = flags
+        self._length = length
+        self._flags = flags
 
     def endheaders(self, body=None, *, encode_chunked=None):
         if self._state != _CS_REQUEST_STARTED:
@@ -828,12 +828,12 @@ class HTTPConnection:
         try:
             if self._sock is None:
                 self._open_socket()
-            self._send_bytes(self._request_head, False)
+            self._send_bytes(self._head, False)
             self._send_bytes(b"\r\n", False)
             if _RECYCLE_HEADER_BUFFER:
-                self._request_head[:] = _EMPTY
+                self._head[:] = _EMPTY
             else:
-                self._request_head = None
+                self._head = None
             self._state = _CS_REQUEST_SENT
         except Exception:
             self._abort_request()
@@ -864,14 +864,14 @@ class HTTPConnection:
         try:
             if state == _CS_REQUEST_SENT:
                 self._state = _CS_RECEIVING_RESPONSE
-                if self._request_chunked:
+                if self._chunked:
                     self._send_bytes(b"0\r\n\r\n", False)
-                elif (self._request_length is not None and
-                      self._request_bytes != self._request_length):
+                elif (self._length is not None and
+                      self._bytes != self._length):
                     raise ImproperConnectionState(
                         "request body length differs from Content-Length",
-                        self._request_bytes,
-                        self._request_length)
+                        self._bytes,
+                        self._length)
 
             try:
                 version, status, reason = _parse_status_line(self._sock)
@@ -882,25 +882,25 @@ class HTTPConnection:
             if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
                 gc.collect()
 
-            chunked, length, reusable = _derive_response_framing(
+            response_chunked, response_length, reusable = _derive_response_framing(
                 self.method, version, status, response_headers)
 
             if status < 200 and status != 101:
                 sock = owner = None
                 if not reusable:
-                    self._request_flags |= _RF_CONNECTION_CLOSE
+                    self._flags |= _RF_CONNECTION_CLOSE
             else:
                 sock = self._sock
                 reusable = (
                     reusable and
-                    not (self._request_flags & _RF_CONNECTION_CLOSE)
+                    not (self._flags & _RF_CONNECTION_CLOSE)
                 )
                 owner = self
 
             resp = HTTPResponse(
                 owner, sock, self.method, self.url,
                 version, status, reason, response_headers,
-                chunked, length)
+                response_chunked, response_length)
 
             if sock is None:
                 return resp
@@ -912,7 +912,7 @@ class HTTPConnection:
             else:
                 self._reset_request()
 
-            if length == 0 and status != 101:
+            if response_length == 0 and status != 101:
                 resp.close()
 
             return resp
@@ -921,17 +921,17 @@ class HTTPConnection:
             raise
 
     def _append_header(self, name, value):
-        self._request_head.extend(name)
-        self._request_head.extend(b": ")
-        self._request_head.extend(value)
-        self._request_head.extend(b"\r\n")
+        self._head.extend(name)
+        self._head.extend(b": ")
+        self._head.extend(value)
+        self._head.extend(b"\r\n")
 
     def _prep_request(self, body, encode_chunked):
         if isinstance(body, str):
             body = bytes(body)
 
-        flags = self._request_flags
-        length = self._request_length
+        flags = self._flags
+        length = self._length
 
         if encode_chunked is not None:
             chunked = bool(encode_chunked)
@@ -945,7 +945,7 @@ class HTTPConnection:
         else:
             chunked = body is not None
 
-        self._request_chunked = chunked
+        self._chunked = chunked
 
         if not (flags & _RF_TRANSFER_ENCODING):
             if chunked:
@@ -972,12 +972,12 @@ class HTTPConnection:
 
         if length == -1:
             length = None
-        self._request_length = length
+        self._length = length
 
         return body
 
     def _send_body(self, body):
-        send = self._send_chunk if self._request_chunked else self._send_bytes
+        send = self._send_chunk if self._chunked else self._send_bytes
 
         try:
             if callable(body):
@@ -1057,7 +1057,7 @@ class HTTPConnection:
         try:
             self._sock.sendall(data)
             if accounting:
-                self._request_bytes += len(data)
+                self._bytes += len(data)
         except OSError as e:
             _reraise_transport_error(e)
 
@@ -1092,14 +1092,14 @@ class HTTPConnection:
         self._resp = None
         self.method = None
         self.url = None
-        self._request_length = None
-        self._request_bytes = 0
-        self._request_flags = 0
-        self._request_chunked = False
-        if _RECYCLE_HEADER_BUFFER and self._request_head is not None:
-            self._request_head[:] = _EMPTY
+        self._length = None
+        self._bytes = 0
+        self._flags = 0
+        self._chunked = False
+        if _RECYCLE_HEADER_BUFFER and self._head is not None:
+            self._head[:] = _EMPTY
         else:
-            self._request_head = None
+            self._head = None
 
     def _abort_request(self, resp=None):
         if resp is None:
