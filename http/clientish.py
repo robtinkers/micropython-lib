@@ -392,7 +392,7 @@ class HTTPResponse:
         self.url = url
         self.version = version
         self.status = status
-        self.reason = reason
+        self.reason = reason.rstrip()
         self._headers = headers
         self._chunked = chunked
         self._length = length
