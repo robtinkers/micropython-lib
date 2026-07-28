@@ -382,8 +382,10 @@ class HTTPResponse:
     _chunk_bytes_left = None
 
     def __init__(self, conn, sock, method, url,
-                 version, status, reason, response_headers,
-                 response_chunked, response_length):
+                 version, status, reason,
+                 headers, chunked, length):
+        if conn is None and sock is not None:
+            raise ValueError("socket owner required")
         self._conn = conn
         self._sock = sock
         self.method = method
@@ -391,10 +393,10 @@ class HTTPResponse:
         self.version = version
         self.status = status
         self.reason = reason
-        self._response_headers = response_headers
-        self._response_chunked = response_chunked
-        self._response_length = response_length
-        self._response_bytes = 0
+        self._headers = headers
+        self._chunked = chunked
+        self._length = length
+        self._bytes = 0
 
     def __enter__(self):
         return self
@@ -407,7 +409,7 @@ class HTTPResponse:
         return self._sock is None
 
     def getheaders(self):
-        return iter(self._response_headers)
+        return iter(self._headers)
 
     def getheader(self, name, default=None):
         name = _encode_and_validate(name)
@@ -415,7 +417,7 @@ class HTTPResponse:
             return default
         len_name = len(name)
         result = None
-        for key, val in self._response_headers:
+        for key, val in self._headers:
             if len(key) != len_name or not _equals_ci(key, name, len_name):
                 continue
             if result is None:
@@ -432,32 +434,31 @@ class HTTPResponse:
             raise TypeError("buffer required")
         return self._read_impl(buf, None)
 
-    def detach(self):
-        sock = self._sock
-        if sock is None:
-            raise NotConnected()
-        conn = self._conn
-        if conn is not None:
-            conn.release_response(self, None)
-        self._sock = self._conn = None
-        return sock
-
     def close(self):
         self._release_socket(
-            self._response_bytes == self._response_length)
+            self._bytes == self._length)
 
     def _abort(self, value="aborted"):
         self._release_socket(False)
-        raise IncompleteRead(value, self._response_bytes, self._response_length)
+        raise IncompleteRead(value, self._bytes, self._length)
+
+    def detach(self):
+        if self._sock is None:
+            raise NotConnected()
+        return self._release_socket(None)
 
     def _release_socket(self, complete):
         sock = self._sock
         conn = self._conn
-        released = (conn is not None and
-                    conn.release_response(self, sock if complete else None))
+
+        if conn is not None:
+            conn.release_response(
+                self,
+                None if complete is None else sock,
+                complete)
+
         self._sock = self._conn = None
-        if sock is not None and not (complete and released):
-            _close_quietly(sock)
+        return sock
 
     def _iowrapper(self, func, arg1=None, arg2=None):
         try:
@@ -503,7 +504,7 @@ class HTTPResponse:
                 while True:
                     line = self._iowrapper(self._sock.readline)
                     if (line == b"\r\n" or line == b"\n"):
-                        self._response_length = self._response_bytes
+                        self._length = self._bytes
                         self.close()
                         return 0
                     if not line:
@@ -522,8 +523,8 @@ class HTTPResponse:
         sock = self._sock
         into = buf is not None
         if sock is None:
-            if (self._response_length is not None and
-                    self._response_bytes >= self._response_length):
+            if (self._length is not None and
+                    self._bytes >= self._length):
                 return 0 if into else _EMPTY
             raise NotConnected()
 
@@ -537,8 +538,8 @@ class HTTPResponse:
         if not unbounded and amt == 0:
             return 0 if into else _EMPTY
 
-        if (self._response_length is not None):
-            remaining = self._response_length - self._response_bytes
+        if (self._length is not None):
+            remaining = self._length - self._bytes
             if remaining == 0:
                 self.close()
                 return 0 if into else _EMPTY
@@ -549,7 +550,7 @@ class HTTPResponse:
                 amt = min(amt, remaining)
 
         if into:
-            if self._response_chunked:
+            if self._chunked:
                 bmv = buf if isinstance(buf, memoryview) else memoryview(buf)
                 total = 0
                 while total < amt:
@@ -559,25 +560,25 @@ class HTTPResponse:
                     n = self._iowrapper(sock.readinto, bmv[total:], want)
                     if not n:
                         self._abort()
-                    self._response_bytes += n
+                    self._bytes += n
                     self._chunk_bytes_left -= n
                     total += n
                 return total
 
             n = self._iowrapper(sock.readinto, buf, amt)
             if not n:
-                if (self._response_length is None):
-                    self._response_length = self._response_bytes
+                if (self._length is None):
+                    self._length = self._bytes
                     self.close()
                     return 0
                 self._abort()
 
-            self._response_bytes += n
-            if (self._response_length is not None) and (self._response_bytes >= self._response_length):
+            self._bytes += n
+            if (self._length is not None) and (self._bytes >= self._length):
                 self.close()
             return n
 
-        if self._response_chunked:
+        if self._chunked:
             out = _EMPTY
             len_out = 0
             while unbounded or len_out < amt:
@@ -592,7 +593,7 @@ class HTTPResponse:
                 if not chunk:
                     self._abort()
                 len_chunk = len(chunk)
-                self._response_bytes += len_chunk
+                self._bytes += len_chunk
                 self._chunk_bytes_left -= len_chunk
                 len_out += len_chunk
                 out = self._append_data(out, chunk)
@@ -609,16 +610,16 @@ class HTTPResponse:
                 want = min(amt - len_out, _READ_BLOCK_SIZE)
             data = self._iowrapper(sock.read, want)
             if not data:
-                if (self._response_length is None):
-                    self._response_length = self._response_bytes
+                if (self._length is None):
+                    self._length = self._bytes
                     self.close()
                     break
                 self._abort()
             len_data = len(data)
-            self._response_bytes += len_data
+            self._bytes += len_data
             len_out += len_data
             out = self._append_data(out, data)
-            if (self._response_length is not None) and (self._response_bytes >= self._response_length):
+            if (self._length is not None) and (self._bytes >= self._length):
                 self.close()
                 break
         if _READ_MUST_RETURN_BYTES and type(out) is not bytes:
@@ -700,13 +701,14 @@ class HTTPConnection:
         self._reset_request()
         return sock
 
-    def release_response(self, response, sock):
-        if (self._state != _CS_RESPONSE_ACTIVE or
-                self._resp is not response):
-            return False
-        self._sock = sock
-        self._reset_request()
-        return True
+    def release_response(self, response, sock, complete):
+        if self._resp is response:
+            if complete:
+                self._sock = sock
+                sock = None
+            self._reset_request()
+        if complete is not None:
+            _close_quietly(sock)
 
     def request(self, method, url, body=None, headers=None, *, encode_chunked=None):
         self.putrequest(method, url)
@@ -806,8 +808,6 @@ class HTTPConnection:
             raise NotConnected()
 
         try:
-            if isinstance(body, str):
-                body = bytes(body)
             self._send_body(body)
         except Exception:
             self._abort_request()
@@ -851,10 +851,11 @@ class HTTPConnection:
                     self._request_flags |= _RF_CONNECTION_CLOSE
             else:
                 sock = self._sock
-                conn = self if (
+                reusable = (
                     reusable and
                     not (self._request_flags & _RF_CONNECTION_CLOSE)
-                ) else None
+                )
+                conn = self
 
             resp = HTTPResponse(
                 conn, sock, self.method, self.url,
@@ -865,7 +866,7 @@ class HTTPConnection:
                 return resp
 
             self._sock = None
-            if conn is not None:
+            if reusable:
                 self._resp = resp
                 self._state = _CS_RESPONSE_ACTIVE
             else:
@@ -991,6 +992,9 @@ class HTTPConnection:
 
         if body is None:
             return
+
+        if isinstance(body, str):
+            body = bytes(body)
 
         if isinstance(body, (bytes, bytearray, memoryview)):
             send(body)
