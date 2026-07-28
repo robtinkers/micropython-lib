@@ -1102,15 +1102,18 @@ class HTTPConnection:
             self._request_head = None
 
     def _abort_request(self, resp=None):
-        try:
-            if resp is None:
-                resp = self._resp
-            if resp is not None:
-                resp.close()
+        if resp is None:
+            resp = self._resp
 
-            sock, self._sock = self._sock, None
-            _close_quietly(sock)
+        sock, self._sock = self._sock, None
+        resp_sock = None
+        try:
+            if resp is not None and not resp.closed:
+                resp_sock = resp.detach()
         finally:
+            if resp_sock is not sock:
+                _close_quietly(resp_sock)
+            _close_quietly(sock)
             self._reset_request()
 
 if ssl is not None:
