@@ -556,7 +556,7 @@ class HTTPResponse:
                     want = min(self._chunk_available(), amt - total)
                     if want == 0:
                         break
-                    n = self._iowrapper(sock.readinto, bmv[total:], want)
+                    n = self._iowrapper(sock.readinto, bmv[total:] if total else bmv, want)
                     if not n:
                         self._abort()
                     self._bytes += n
