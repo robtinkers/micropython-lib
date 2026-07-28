@@ -383,7 +383,7 @@ class HTTPResponse:
 
     def __init__(self, conn, sock, method, url,
                  version, status, reason, response_headers,
-                 chunked, length):
+                 response_chunked, response_length):
         self._conn = conn
         self._sock = sock
         self.method = method
@@ -391,10 +391,9 @@ class HTTPResponse:
         self.version = version
         self.status = status
         self.reason = reason
-        self._headers = response_headers
-
-        self._response_chunked = chunked
-        self._response_length = length
+        self._response_headers = response_headers
+        self._response_chunked = response_chunked
+        self._response_length = response_length
         self._response_bytes = 0
 
     def __enter__(self):
@@ -408,7 +407,7 @@ class HTTPResponse:
         return self._sock is None
 
     def getheaders(self):
-        return iter(self._headers)
+        return iter(self._response_headers)
 
     def getheader(self, name, default=None):
         name = _encode_and_validate(name)
@@ -416,7 +415,7 @@ class HTTPResponse:
             return default
         len_name = len(name)
         result = None
-        for key, val in self._headers:
+        for key, val in self._response_headers:
             if len(key) != len_name or not _equals_ci(key, name, len_name):
                 continue
             if result is None:
