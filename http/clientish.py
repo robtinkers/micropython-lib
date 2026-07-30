@@ -56,27 +56,13 @@ _KEEP_RESPONSE_HEADERS = {
     17:(_TRANSFER_ENCODING,),
 }
 
-_CONNECTION_ERRNOS = (
-    getattr(errno, "EPIPE", 32),
-    getattr(errno, "ENETRESET", 102),
-    errno.ECONNABORTED,
-    errno.ECONNRESET,
-    errno.ENOTCONN,
-    getattr(errno, "ESHUTDOWN", 108),
-    errno.ECONNREFUSED,
-)
-
-_NETWORK_ERRNOS = (
-    getattr(errno, "ENONET", 64),
-    getattr(errno, "ENETDOWN", 100),
-    getattr(errno, "ENETUNREACH", 101),
-    getattr(errno, "EHOSTDOWN", 112),
-    errno.EHOSTUNREACH,
-)
+_ENONET = getattr(errno, "ENONET", 64)
+_ENETDOWN = getattr(errno, "ENETDOWN", 100)
+_ENETUNREACH = getattr(errno, "ENETUNREACH", 101)
+_EHOSTDOWN = getattr(errno, "EHOSTDOWN", 112)
+_EHOSTUNREACH = getattr(errno, "EHOSTUNREACH", 113)
 
 class HTTPException(Exception): pass
-
-class InvalidURL(HTTPException): pass
 
 class BadStatusLine(HTTPException): pass
 
@@ -84,8 +70,8 @@ class RemoteDisconnected(BadStatusLine): pass
 
 class UnknownProtocol(BadStatusLine): pass
 
-class IncompleteRead(HTTPException):
-    def __init__(self, value, response_bytes, response_length):
+class IncompleteWrite(HTTPException):
+    def __init__(self, value, response_bytes, response_length, error):
         super().__init__(value)
         self.count = response_bytes
         self.length = response_length
@@ -93,6 +79,19 @@ class IncompleteRead(HTTPException):
             self.expected = response_length - response_bytes
         else:
             self.expected = None
+        self.error = error
+
+class IncompleteRead(HTTPException):
+    def __init__(self, value, response_bytes, response_length, error, status):
+        super().__init__(value)
+        self.count = response_bytes
+        self.length = response_length
+        if type(response_bytes) is int and type(response_length) is int:
+            self.expected = response_length - response_bytes
+        else:
+            self.expected = None
+        self.error = error
+        self.status = status
 
 class ImproperConnectionState(HTTPException): pass
 
@@ -104,28 +103,7 @@ class ResponseNotReady(ImproperConnectionState): pass
 
 class NotConnected(ImproperConnectionState): pass
 
-class ConnectionError(OSError): pass
-
-class NetworkError(OSError): pass
-
-class TimeoutError(OSError): pass
-
-def _reraise_transport_error(exc):
-    if isinstance(exc, (ConnectionError, NetworkError, TimeoutError)):
-        raise
-    err = exc.errno
-    if err in _CONNECTION_ERRNOS:
-        raise ConnectionError(*exc.args)
-    if err in _NETWORK_ERRNOS:
-        raise NetworkError(*exc.args)
-    if err == errno.ETIMEDOUT:
-        raise TimeoutError(*exc.args)
-    raise
-
-def _reraise_body_error(exc):
-    if exc.errno in _CONNECTION_ERRNOS:
-        raise OSError(errno.EIO, str(exc))
-    raise
+class InvalidURL(ValueError): pass
 
 def _encode_and_validate(x, must_return_bytes=False):
     if x is None:
@@ -189,7 +167,7 @@ def create_connection(address, timeout=None, *, resolver=None):
     try:
         infos = resolver(host, port, 0, socket.SOCK_STREAM)
     except OSError as e:
-        raise OSError(errno.EHOSTUNREACH, str(e))
+        raise OSError(_EHOSTDOWN, str(e))
 
     exc = None
     for info in infos:
@@ -213,7 +191,7 @@ def create_connection(address, timeout=None, *, resolver=None):
             _close_quietly(sock)
             raise
     if exc is None:
-        raise OSError(getattr(errno, "EHOSTDOWN", 112), "Host is down")
+        raise OSError(_EHOSTUNREACH, "host unreachable")
     raise exc
 
 def _parse_hostport_from_url(url):
@@ -268,14 +246,13 @@ def _parse_status_line(sock):
 
         if version == b"TTP/1.0":
             return 10, status, reason
-        elif version.startswith(b"TTP/1."):
+        if version.startswith(b"TTP/1."):
             return 11, status, reason
-        else:
-            raise UnknownProtocol(first + version)
+        raise UnknownProtocol(first + version)
 
     raise BadStatusLine(first + line)
 
-def _parse_headers(sock, all_headers=False, and_cookies=None):
+def _parse_headers(sock, status, all_headers, and_cookies):
     if and_cookies is None:
         and_cookies = all_headers
 
@@ -283,9 +260,9 @@ def _parse_headers(sock, all_headers=False, and_cookies=None):
     while True:
         line = sock.readline()
         if not line:
-            raise RemoteDisconnected()
+            raise IncompleteRead("connection closed while reading response headers", None, None, None, status)
         if not line.endswith(b"\n"):
-            raise BadStatusLine(line)
+            raise IncompleteRead("incomplete response header line", None, None, None, status)
         if line == b"\r\n" or line == b"\n":
             return headers
         if line[0] <= 32:
@@ -448,9 +425,9 @@ class HTTPResponse:
         self._release_socket(
             self._bytes == self._length)
 
-    def _abort(self, value="aborted"):
+    def _abort(self, value):
         self._release_socket(False)
-        raise IncompleteRead(value, self._bytes, self._length)
+        raise IncompleteRead(value, self._bytes, self._length, None, self.status)
 
     def _release_socket(self, complete):
         sock = self._sock
@@ -459,171 +436,168 @@ class HTTPResponse:
             owner.release_response(self, sock, complete)
         self._sock = self._owner = None
 
-    def _iowrapper(self, func, arg1=None, arg2=None):
-        try:
-            if arg1 is None:
-                return func()
-            if arg2 is None:
-                return func(arg1)
-            return func(arg1, arg2)
-        except Exception as e:
-            self._release_socket(False)
-            _reraise_transport_error(e)
-
     def _append_data(self, out, data):
-        try:
-            if not out:
-                return data
-            if type(out) is bytes:
-                out = bytearray(out)
-            out.extend(data)
-            return out
-        except MemoryError:
-            self._release_socket(False)
-            raise
+        if not out:
+            return data
+        if type(out) is bytes:
+            out = bytearray(out)
+        out.extend(data)
+        return out
 
     def _chunk_available(self):
         while True:
             if self._chunk_remaining is None:
-                line = self._iowrapper(self._sock.readline)
+                line = self._sock.readline()
                 if not line:
-                    self._abort()
+                    self._abort("chunking error")
                 pos = line.find(b";")
                 try:
                     if pos >= 0:
                         line = line[:pos]
                     size = int(line, 16)
                     if size < 0:
-                        self._abort("negative chunk-size")
+                        self._abort("negative chunk size")
                 except ValueError:
-                    self._abort("malformed chunk-size")
+                    self._abort("invalid chunk size")
                 if size > 0:
                     self._chunk_remaining = size
                     return size
                 while True:
-                    line = self._iowrapper(self._sock.readline)
+                    line = self._sock.readline()
                     if (line == b"\r\n" or line == b"\n"):
                         self._length = self._bytes
                         self.close()
                         return 0
                     if not line:
-                        self._abort()
+                        self._abort("chunking error")
             elif self._chunk_remaining == 0:
-                line = self._iowrapper(self._sock.readline)
+                line = self._sock.readline()
                 if not line:
-                    self._abort()
+                    self._abort("chunking error")
                 if not (line == b"\r\n" or line == b"\n"):
-                    self._abort("malformed terminator")
+                    self._abort("invalid chunk terminator")
                 self._chunk_remaining = None
             else:
                 return self._chunk_remaining
 
     def _read_body(self, buf, amt):
-        sock = self._sock
-        into = buf is not None
-        if sock is None:
-            if (self._length is not None and
-                    self._bytes >= self._length):
-                return 0 if into else _EMPTY
-            raise NotConnected()
+        try:
+            sock = self._sock
+            into = buf is not None
+            if sock is None:
+                if (self._length is not None and
+                        self._bytes >= self._length):
+                    return 0 if into else _EMPTY
+                raise NotConnected()
 
-        if into:
-            if not buf:
-                return 0
-            amt = len(buf)
-            unbounded = False
-        else:
-            unbounded = amt is None or amt < 0
-        if not unbounded and amt == 0:
-            return 0 if into else _EMPTY
-
-        if (self._length is not None):
-            remaining = self._length - self._bytes
-            if remaining == 0:
-                self.close()
-                return 0 if into else _EMPTY
-            if unbounded:
-                amt = remaining
+            if into:
+                if not buf:
+                    return 0
+                amt = len(buf)
                 unbounded = False
             else:
-                amt = min(amt, remaining)
+                unbounded = amt is None or amt < 0
+            if not unbounded and amt == 0:
+                return 0 if into else _EMPTY
 
-        if into:
+            if (self._length is not None):
+                remaining = self._length - self._bytes
+                if remaining == 0:
+                    self.close()
+                    return 0 if into else _EMPTY
+                if unbounded:
+                    amt = remaining
+                    unbounded = False
+                else:
+                    amt = min(amt, remaining)
+
+            if into:
+                if self._chunked:
+                    bmv = buf if isinstance(buf, memoryview) else memoryview(buf)
+                    total = 0
+                    while total < amt:
+                        want = min(self._chunk_available(), amt - total)
+                        if want == 0:
+                            break
+                        n = sock.readinto(bmv[total:] if total else bmv, want)
+                        if not n:
+                            self._abort("readinto() empty")
+                        self._bytes += n
+                        self._chunk_remaining -= n
+                        total += n
+                    return total
+
+                n = sock.readinto(buf, amt)
+                if not n:
+                    if (self._length is None):
+                        self._length = self._bytes
+                        self.close()
+                        return 0
+                    self._abort("readinto() empty")
+
+                self._bytes += n
+                if (self._length is not None) and (self._bytes >= self._length):
+                    self.close()
+                return n
+
             if self._chunked:
-                bmv = buf if isinstance(buf, memoryview) else memoryview(buf)
-                total = 0
-                while total < amt:
-                    want = min(self._chunk_available(), amt - total)
+                out = _EMPTY
+                len_out = 0
+                while unbounded or len_out < amt:
+                    avail = self._chunk_available()
+                    if unbounded:
+                        want = min(avail, _READ_BLOCK_SIZE)
+                    else:
+                        want = min(amt - len_out, avail, _READ_BLOCK_SIZE)
                     if want == 0:
                         break
-                    n = self._iowrapper(sock.readinto, bmv[total:] if total else bmv, want)
-                    if not n:
-                        self._abort()
-                    self._bytes += n
-                    self._chunk_remaining -= n
-                    total += n
-                return total
+                    chunk = sock.read(want)
+                    if not chunk:
+                        self._abort("read() empty")
+                    len_chunk = len(chunk)
+                    self._bytes += len_chunk
+                    self._chunk_remaining -= len_chunk
+                    len_out += len_chunk
+                    out = self._append_data(out, chunk)
+                if _READ_MUST_RETURN_BYTES and type(out) is not bytes:
+                    out = bytes(out)
+                return out
 
-            n = self._iowrapper(sock.readinto, buf, amt)
-            if not n:
-                if (self._length is None):
-                    self._length = self._bytes
-                    self.close()
-                    return 0
-                self._abort()
-
-            self._bytes += n
-            if (self._length is not None) and (self._bytes >= self._length):
-                self.close()
-            return n
-
-        if self._chunked:
             out = _EMPTY
             len_out = 0
             while unbounded or len_out < amt:
-                avail = self._chunk_available()
                 if unbounded:
-                    want = min(avail, _READ_BLOCK_SIZE)
+                    want = _READ_BLOCK_SIZE
                 else:
-                    want = min(amt - len_out, avail, _READ_BLOCK_SIZE)
-                if want == 0:
+                    want = min(amt - len_out, _READ_BLOCK_SIZE)
+                data = sock.read(want)
+                if not data:
+                    if (self._length is None):
+                        self._length = self._bytes
+                        self.close()
+                        break
+                    self._abort("read() failed")
+                len_data = len(data)
+                self._bytes += len_data
+                len_out += len_data
+                out = self._append_data(out, data)
+                if (self._length is not None) and (self._bytes >= self._length):
+                    self.close()
                     break
-                chunk = self._iowrapper(sock.read, want)
-                if not chunk:
-                    self._abort()
-                len_chunk = len(chunk)
-                self._bytes += len_chunk
-                self._chunk_remaining -= len_chunk
-                len_out += len_chunk
-                out = self._append_data(out, chunk)
             if _READ_MUST_RETURN_BYTES and type(out) is not bytes:
                 out = bytes(out)
             return out
 
-        out = _EMPTY
-        len_out = 0
-        while unbounded or len_out < amt:
-            if unbounded:
-                want = _READ_BLOCK_SIZE
-            else:
-                want = min(amt - len_out, _READ_BLOCK_SIZE)
-            data = self._iowrapper(sock.read, want)
-            if not data:
-                if (self._length is None):
-                    self._length = self._bytes
-                    self.close()
-                    break
-                self._abort()
-            len_data = len(data)
-            self._bytes += len_data
-            len_out += len_data
-            out = self._append_data(out, data)
-            if (self._length is not None) and (self._bytes >= self._length):
-                self.close()
-                break
-        if _READ_MUST_RETURN_BYTES and type(out) is not bytes:
-            out = bytes(out)
-        return out
+        except MemoryError:
+            self._release_socket(False)
+            raise
+        except OSError as e:
+            count = self._bytes
+            length = self._length
+            error = e.errno or 0
+            status = self.status
+            self._release_socket(False)
+            raise IncompleteRead(str(e), count, length, error, status)
 
 class HTTPConnection:
     default_port = HTTP_PORT
@@ -653,6 +627,8 @@ class HTTPConnection:
 
         if port is None:
             port = self.default_port
+        if not isinstance(port, int):
+            raise TypeError("port must be an int")
 
         if port == self.default_port:
             hostport = the_host
@@ -681,11 +657,7 @@ class HTTPConnection:
         if self._state != _CS_IDLE:
             raise CannotSendRequest()
         self.close()
-        try:
-            self._open_socket()
-        except Exception:
-            self._abort_request()
-            raise
+        self._open_socket()
 
     def close(self):
         _close_quietly(self.detach())
@@ -727,10 +699,11 @@ class HTTPConnection:
         if self._state != _CS_IDLE:
             raise CannotSendRequest()
         self._state = _CS_REQUEST_STARTED
+
         try:
             method = _encode_and_validate(method, True)
             if not method:
-                raise ValueError("bad method")
+                raise ValueError("invalid method")
             if not method.isupper():
                 method = method.upper()
 
@@ -827,21 +800,30 @@ class HTTPConnection:
             self._reset_request()
             raise
 
+        opening = self._sock is None
         try:
-            if self._sock is None:
+            if opening:
                 self._open_socket()
+                opening = False
             self._send_bytes(self._head, False)
+            self._bytes = 0
             self._send_bytes(b"\r\n", False)
+            self._state = _CS_REQUEST_SENT
+            self._send_body(body)
+        except Exception as e:
+            if opening:
+                self._abort_request()
+                raise
+            count = self._bytes
+            length = self._length
+            error = e.errno or 0 if isinstance(e, OSError) else e.__class__.__name__
+            self._abort_request()
+            raise IncompleteWrite(str(e), count, length, error)
+        finally:
             if _RECYCLE_HEADER_BUFFER:
                 self._head[:] = _EMPTY
             else:
                 self._head = None
-            self._state = _CS_REQUEST_SENT
-        except Exception:
-            self._abort_request()
-            raise
-
-        self.send(body)
 
     def send(self, body):
         if self._state != _CS_REQUEST_SENT:
@@ -849,11 +831,16 @@ class HTTPConnection:
         if self._sock is None:
             raise NotConnected()
 
+        old_bytes = self._bytes
         try:
             self._send_body(body)
-        except Exception:
+        except Exception as e:
+            count = self._bytes
+            length = self._length
+            error = e.errno or 0 if isinstance(e, OSError) else e.__class__.__name__
             self._abort_request()
-            raise
+            raise IncompleteWrite(str(e), count, length, error)
+        return self._bytes - old_bytes
 
     def getresponse(self, *, all_headers=False, and_cookies=None):
         state = self._state
@@ -869,19 +856,24 @@ class HTTPConnection:
             if state == _CS_REQUEST_SENT:
                 self._state = _CS_RECEIVING_RESPONSE
                 if self._chunked:
-                    self._send_bytes(b"0\r\n\r\n", False)
+                    try:
+                        self._send_bytes(b"0\r\n\r\n", False)
+                    except Exception as e:
+                        error = e.errno or 0 if isinstance(e, OSError) else e.__class__.__name__
+                        raise IncompleteWrite(str(e), self._bytes, self._length, error)
                 elif (self._length is not None and
                       self._bytes != self._length):
                     raise ImproperConnectionState(
-                        "request body length differs from Content-Length",
+                        "request body length does not match Content-Length",
                         self._bytes,
                         self._length)
 
+            status = None
             try:
                 version, status, reason = _parse_status_line(self._sock)
-                response_headers = _parse_headers(self._sock, all_headers, and_cookies)
+                response_headers = _parse_headers(self._sock, status, all_headers, and_cookies)
             except OSError as e:
-                _reraise_transport_error(e)
+                raise IncompleteRead(str(e), None, None, e.errno or 0, status)
 
             if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
                 gc.collect()
@@ -981,11 +973,8 @@ class HTTPConnection:
     def _send_body(self, body):
         send = self._send_chunk if self._chunked else self._send_bytes
 
-        try:
-            if callable(body):
-                body = body()
-        except OSError as e:
-            _reraise_body_error(e)
+        if callable(body):
+            body = body()
 
         if body is None:
             return
@@ -1002,10 +991,7 @@ class HTTPConnection:
             buf = bytearray(_READ_BLOCK_SIZE)
             bmv = memoryview(buf)
             while True:
-                try:
-                    n = reader(buf)
-                except OSError as e:
-                    _reraise_body_error(e)
+                n = reader(buf)
                 if n is None:
                     continue
                 if type(n) is not int or n < 0 or n > _READ_BLOCK_SIZE:
@@ -1017,10 +1003,7 @@ class HTTPConnection:
         reader = getattr(body, "read", None)
         if callable(reader):
             while True:
-                try:
-                    buf = reader(_READ_BLOCK_SIZE)
-                except OSError as e:
-                    _reraise_body_error(e)
+                buf = reader(_READ_BLOCK_SIZE)
                 if buf is None:
                     continue
                 if isinstance(buf, str):
@@ -1031,19 +1014,7 @@ class HTTPConnection:
                     return
                 send(buf)
 
-        try:
-            parts = iter(body)
-        except OSError as e:
-            _reraise_body_error(e)
-
-        while True:
-            try:
-                part = next(parts)
-            except StopIteration:
-                return
-            except OSError as e:
-                _reraise_body_error(e)
-
+        for part in body:
             if isinstance(part, str):
                 part = bytes(part)
             if not isinstance(part, (bytes, bytearray, memoryview)):
@@ -1056,12 +1027,9 @@ class HTTPConnection:
         if not data:
             return
 
-        try:
-            self._sock.sendall(data)
-            if accounting:
-                self._bytes += len(data)
-        except OSError as e:
-            _reraise_transport_error(e)
+        self._sock.sendall(data)
+        if accounting:
+            self._bytes += len(data)
 
     def _send_chunk(self, data):
         if not data:
@@ -1075,19 +1043,15 @@ class HTTPConnection:
         if network is not None:
             try:
                 ready = network()
-            except OSError as e:
-                raise NetworkError(*e.args)
+            except OSError:
+                raise
             except Exception as e:
-                raise NetworkError(getattr(errno, "ENONET", 64), str(e))
+                raise OSError(_ENONETDOWN, str(e))
             if not ready:
-                raise NetworkError(getattr(errno, "ENETDOWN", 100), "Network is down")
+                raise OSError(_ENETUNREACH, "network unreachable")
         if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
             gc.collect()
-        try:
-            self._sock = create_connection(
-                (self._hostaddr, self.port), self._timeout)
-        except OSError as e:
-            _reraise_transport_error(e)
+        self._sock = create_connection((self._hostaddr, self.port), self._timeout)
 
     def _reset_request(self):
         self._state = _CS_IDLE
@@ -1095,7 +1059,7 @@ class HTTPConnection:
         self.method = None
         self.url = None
         self._length = None
-        self._bytes = 0
+        self._bytes = None
         self._flags = 0
         self._chunked = False
         if _RECYCLE_HEADER_BUFFER and self._head is not None:
@@ -1139,9 +1103,9 @@ if ssl is not None:
                     self._sock = self._context.wrap_socket(raw, server_hostname=self._hostname)
                 else:
                     self._sock = self._context.wrap_socket(raw)
-            except Exception as e:
+            except Exception:
                 self._sock = None
                 _close_quietly(raw)
-                _reraise_transport_error(e)
+                raise
             finally:
                 gc.collect()
