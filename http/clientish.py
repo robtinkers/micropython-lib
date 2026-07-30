@@ -3,23 +3,20 @@
 # Serious HTTP for tiny devices.
 
 import micropython, socket, errno, gc
-try:
-    import ssl
-except ImportError:
-    ssl = None
 
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
 OK = const(200)
 
-_DEFAULT_TIMEOUT = const(10)
-_GC_FREE_THRESHOLD = const(32768)
-_METHODS_EXPECTING_BODY = (b"PATCH", b"POST", b"PUT")
-_READ_BLOCK_SIZE = const(2048)
 _READ_MUST_RETURN_BYTES = const(0)
 _RECYCLE_HEADER_BUFFER = const(0)
+_SUPPORT_SSL = const(1)
+_SUPPORT_VIPER = const(1)
+
+_DEFAULT_TIMEOUT = const(10)
+_GC_FREE_THRESHOLD = const(32768)
+_READ_BLOCK_SIZE = const(2048)
 _REQUEST_HEAD_SIZE = const(1024)
-_USE_VIPER = const(1)
 
 _RF_HOST = const(1)
 _RF_CONNECTION_CLOSE = const(4)
@@ -129,7 +126,7 @@ def _append_data(out, data):
     out.extend(data)
     return out
 
-if _USE_VIPER:
+if _SUPPORT_VIPER:
     @micropython.viper
     def _equals_ci(a:ptr8, b:ptr8, length:int) -> int:
         i = 0
@@ -913,7 +910,7 @@ class HTTPConnection:
                 self._append_header(_TRANSFER_ENCODING, _CHUNKED)
             elif not (flags & _RF_CONTENT_LENGTH):
                 if (length is not None and length >= 0 and
-                        (length or self.method in _METHODS_EXPECTING_BODY)):
+                        (length or self.method in (b"PATCH", b"POST", b"PUT"))):
                     self._append_header(_CONTENT_LENGTH, b"%d" % length)
 
         if not (flags & _RF_HOST):
@@ -1061,7 +1058,9 @@ class HTTPConnection:
             _close_quietly(sock)
             self._reset_request()
 
-if ssl is not None:
+if _SUPPORT_SSL:
+
+    import ssl
 
     class HTTPSConnection(HTTPConnection):
         default_port = HTTPS_PORT
