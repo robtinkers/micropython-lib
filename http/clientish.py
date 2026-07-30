@@ -71,6 +71,9 @@ class CannotSendHeader(ImproperConnectionState): pass
 class ResponseNotReady(ImproperConnectionState): pass
 class NotConnected(ImproperConnectionState): pass
 
+class BadStatusLine(HTTPException): pass
+class UnknownProtocol(BadStatusLine): pass
+
 class RequestLengthMismatch(HTTPException):
     def __init__(self, count, length):
         super().__init__()
@@ -79,42 +82,25 @@ class RequestLengthMismatch(HTTPException):
         self.length = length
         self.expected = length - count
 
-class TransportError(HTTPException): pass
-
-class ConnectError(TransportError):
-    def __init__(self, error, value):
+class TransportError(HTTPException):
+    def __init__(self, error, value, _count=None, _length=None, _status=None):
         super().__init__(error, value)
         self.value = value
-
-class IncompleteWrite(TransportError):
-    def __init__(self, error, value, count, length):
-        super().__init__(error, value)
-        self.value = value
-        self.count = count
-        self.length = length
-        if type(count) is int and type(length) is int:
-            self.expected = length - count
+        self.count = _count
+        self.length = _length
+        if type(_count) is int and type(_length) is int:
+            self.expected = _length - _count
         else:
             self.expected = None
+        self.status = _status
 
-class IncompleteRead(TransportError):
-    def __init__(self, error, value, count, length, status):
-        super().__init__(error, value)
-        self.value = value
-        self.count = count
-        self.length = length
-        if type(count) is int and type(length) is int:
-            self.expected = length - count
-        else:
-            self.expected = None
-        self.status = status
+class ConnectError(TransportError): pass
+class IncompleteWrite(TransportError): pass
+class IncompleteRead(TransportError): pass
 
-class BadStatusLine(IncompleteRead):
-    def __init__(self, value=None):
-        super().__init__(None, value, None, None, None)
-
-class RemoteDisconnected(BadStatusLine): pass
-class UnknownProtocol(BadStatusLine): pass
+class RemoteDisconnected(IncompleteRead):
+    def __init__(self):
+        super().__init__(None, None)
 
 class InvalidURL(ValueError): pass
 
