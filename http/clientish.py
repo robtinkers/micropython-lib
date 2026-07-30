@@ -71,11 +71,13 @@ class CannotSendHeader(ImproperConnectionState): pass
 class ResponseNotReady(ImproperConnectionState): pass
 class NotConnected(ImproperConnectionState): pass
 
-class BadStatusLine(HTTPException): pass
-class RemoteDisconnected(BadStatusLine): pass
-class UnknownProtocol(BadStatusLine): pass
-
-class RequestLengthMismatch(HTTPException): pass
+class RequestLengthMismatch(HTTPException):
+    def __init__(self, count, length):
+        super().__init__()
+        self.value = None
+        self.count = count
+        self.length = length
+        self.expected = length - count
 
 class TransportError(HTTPException): pass
 
@@ -106,6 +108,13 @@ class IncompleteRead(TransportError):
         else:
             self.expected = None
         self.status = status
+
+class BadStatusLine(IncompleteRead):
+    def __init__(self, value=None):
+        super().__init__(None, value, None, None, None)
+
+class RemoteDisconnected(BadStatusLine): pass
+class UnknownProtocol(BadStatusLine): pass
 
 class InvalidURL(ValueError): pass
 
@@ -841,7 +850,7 @@ class HTTPConnection:
                 if self._chunked:
                     self._send_bytes(b"0\r\n\r\n", False)
                 if self._length is not None and self._bytes != self._length:
-                    raise RequestLengthMismatch()
+                    raise RequestLengthMismatch(self._bytes, self._length)
 
             status = None
             if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
