@@ -483,98 +483,88 @@ class HTTPResponse:
                 if not buf:
                     return 0
                 amt = len(buf)
-                unbounded = False
-            else:
-                unbounded = amt is None or amt < 0
-            if not unbounded and amt == 0:
+            elif amt is not None and amt < 0:
+                amt = None
+
+            if amt == 0:
                 return 0 if into else _EMPTY
 
-            if (self._length is not None):
+            if self._length is not None:
                 remaining = self._length - self._bytes
                 if remaining == 0:
                     self.close()
                     return 0 if into else _EMPTY
-                if unbounded:
+                if amt is None:
                     amt = remaining
-                    unbounded = False
                 else:
                     amt = min(amt, remaining)
 
-            if into:
-                if self._chunked:
-                    bmv = buf if isinstance(buf, memoryview) else memoryview(buf)
-                    total = 0
-                    while total < amt:
-                        want = min(self._chunk_bytes_available(), amt - total)
-                        if want == 0:
-                            break
-                        n = sock.readinto(bmv[total:] if total else bmv, want)
-                        if not n:
-                            self._abort_read("unexpected EOF in chunk data")
-                        self._bytes += n
-                        self._chunk_remaining -= n
-                        total += n
-                    return total
-
+            if into and not self._chunked:
                 n = sock.readinto(buf, amt)
                 if not n:
-                    if (self._length is None):
+                    if self._length is None:
                         self._length = self._bytes
                         self.close()
                         return 0
                     self._abort_read("unexpected EOF in response body")
 
                 self._bytes += n
-                if (self._length is not None) and (self._bytes >= self._length):
+                if self._length is not None and self._bytes >= self._length:
                     self.close()
                 return n
 
-            if self._chunked:
-                out = _EMPTY
-                len_out = 0
-                while unbounded or len_out < amt:
-                    avail = self._chunk_bytes_available()
-                    if unbounded:
-                        want = min(avail, _READ_BLOCK_SIZE)
-                    else:
-                        want = min(amt - len_out, avail, _READ_BLOCK_SIZE)
+            out = buf if into else (_EMPTY if amt is None else bytearray(amt))
+            total = 0
+            if amt is not None:
+                bmv = out if isinstance(out, memoryview) else memoryview(out)
+
+            while amt is None or total < amt:
+                if into:
+                    want = amt - total
+                elif amt is None:
+                    want = _READ_BLOCK_SIZE
+                else:
+                    want = min(amt - total, _READ_BLOCK_SIZE)
+
+                if self._chunked:
+                    want = min(want, self._chunk_bytes_available())
                     if want == 0:
                         break
-                    chunk = sock.read(want)
-                    if not chunk:
-                        self._abort_read("unexpected EOF in chunk data")
-                    len_chunk = len(chunk)
-                    self._bytes += len_chunk
-                    self._chunk_remaining -= len_chunk
-                    len_out += len_chunk
-                    out = _append_data(out, chunk)
-            else:
-                out = _EMPTY
-                len_out = 0
-                while unbounded or len_out < amt:
-                    if unbounded:
-                        want = _READ_BLOCK_SIZE
-                    else:
-                        want = min(amt - len_out, _READ_BLOCK_SIZE)
-                    data = sock.read(want)
-                    if not data:
-                        if (self._length is None):
-                            self._length = self._bytes
-                            self.close()
-                            break
-                        self._abort_read("unexpected EOF in response body")
-                    len_data = len(data)
-                    self._bytes += len_data
-                    len_out += len_data
-                    out = _append_data(out, data)
-                    if (self._length is not None) and (self._bytes >= self._length):
-                        self.close()
-                        break
 
+                if amt is None:
+                    data = sock.read(want)
+                    n = len(data)
+                else:
+                    n = sock.readinto(bmv if not total else bmv[total:], want)
+
+                if not n:
+                    if self._chunked:
+                        self._abort_read("unexpected EOF in chunk data")
+                    if self._length is not None:
+                        self._abort_read("unexpected EOF in response body")
+                    self._length = self._bytes
+                    self.close()
+                    break
+
+                self._bytes += n
+                total += n
+                if self._chunked:
+                    self._chunk_remaining -= n
+                elif self._length is not None and self._bytes >= self._length:
+                    self.close()
+                if amt is None:
+                    out = _append_data(out, data)
+
+            if into:
+                return total
+
+            if amt is not None and total < amt:
+                out = out[:total]
             if _READ_MUST_RETURN_BYTES and type(out) is not bytes:
                 out = bytes(out)
             return out
         except MemoryError:
+            out = bmv = data = None
             gc.collect()
             self._abort_read("MemoryError")
         except OSError as e:
@@ -717,6 +707,7 @@ class HTTPConnection:
             if skip_accept_encoding:
                 self._flags |= _RF_ACCEPT_ENCODING
         except MemoryError:
+            gc.collect()
             self._reset_request()
             raise
 
@@ -858,14 +849,14 @@ class HTTPConnection:
                     raise RequestLengthMismatch()
 
             status = None
+            if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
+                gc.collect()
+
             try:
                 version, status, reason = _parse_status_line(self._sock)
                 response_headers = _parse_headers(self._sock, status, all_headers, and_cookies)
             except OSError as e:
                 raise IncompleteRead("socket read failed", None, None, e.errno or 0, status)
-
-            if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
-                gc.collect()
 
             response_chunked, response_length, reusable = _derive_response_framing(
                 self.method, version, status, response_headers)
