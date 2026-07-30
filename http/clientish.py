@@ -1046,7 +1046,7 @@ class HTTPConnection:
             except OSError:
                 raise
             except Exception as e:
-                raise OSError(_ENONETDOWN, str(e))
+                raise OSError(_ENETDOWN, str(e))
             if not ready:
                 raise OSError(_ENETUNREACH, "network unreachable")
         if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
