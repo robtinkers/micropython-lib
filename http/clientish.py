@@ -1023,7 +1023,7 @@ class HTTPConnection:
             if network is not None:
                 try:
                     ready = network()
-                except OSError:
+                except (MemoryError, OSError):
                     raise
                 except Exception as e:
                     raise OSError(_ENETDOWN, str(e))
