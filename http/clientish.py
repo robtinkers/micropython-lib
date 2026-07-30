@@ -40,6 +40,7 @@ _CONTENT_LENGTH = b"Content-Length"
 _CONTENT_TYPE = b"Content-Type"
 _HOST = b"Host"
 _LOCATION = b"Location"
+_RETRY_AFTER = b"Retry-After"
 _SET_COOKIE = b"Set-Cookie"
 _TRANSFER_ENCODING = b"Transfer-Encoding"
 
@@ -50,51 +51,61 @@ _EMPTY = b""
 _KEEP_RESPONSE_HEADERS = {
     8: (_LOCATION,),
     10:(_SET_COOKIE, _CONNECTION),
+    11:(_RETRY_AFTER,),
     12:(_CONTENT_TYPE,),
     14:(_CONTENT_LENGTH,),
     17:(_TRANSFER_ENCODING,),
 }
 
+_ENONET = getattr(errno, "ENONET", 64)
 _ENETDOWN = getattr(errno, "ENETDOWN", 100)
 _ENETUNREACH = getattr(errno, "ENETUNREACH", 101)
 _EHOSTDOWN = getattr(errno, "EHOSTDOWN", 112)
 _EHOSTUNREACH = getattr(errno, "EHOSTUNREACH", 113)
 
 class HTTPException(Exception): pass
-class BadStatusLine(HTTPException): pass
-class RemoteDisconnected(BadStatusLine): pass
-class UnknownProtocol(BadStatusLine): pass
-
-class IncompleteWrite(HTTPException):
-    def __init__(self, value, response_bytes, response_length, error):
-        super().__init__(value)
-        self.count = response_bytes
-        self.length = response_length
-        if type(response_bytes) is int and type(response_length) is int:
-            self.expected = response_length - response_bytes
-        else:
-            self.expected = None
-        self.error = error
-
-class IncompleteRead(HTTPException):
-    def __init__(self, value, response_bytes, response_length, error, status):
-        super().__init__(value)
-        self.count = response_bytes
-        self.length = response_length
-        if type(response_bytes) is int and type(response_length) is int:
-            self.expected = response_length - response_bytes
-        else:
-            self.expected = None
-        self.error = error
-        self.status = status
-
-class RequestLengthMismatch(HTTPException): pass
 
 class ImproperConnectionState(HTTPException): pass
 class CannotSendRequest(ImproperConnectionState): pass
 class CannotSendHeader(ImproperConnectionState): pass
 class ResponseNotReady(ImproperConnectionState): pass
 class NotConnected(ImproperConnectionState): pass
+
+class BadStatusLine(HTTPException): pass
+class RemoteDisconnected(BadStatusLine): pass
+class UnknownProtocol(BadStatusLine): pass
+
+class RequestLengthMismatch(HTTPException): pass
+
+class TransportError(HTTPException): pass
+
+class ConnectError(TransportError):
+    def __init__(self, error, value):
+        super().__init__(error, value)
+        self.value = value
+
+class IncompleteWrite(TransportError):
+    def __init__(self, error, value, count, length):
+        super().__init__(error, value)
+        self.value = value
+        self.count = count
+        self.length = length
+        if type(count) is int and type(length) is int:
+            self.expected = length - count
+        else:
+            self.expected = None
+
+class IncompleteRead(TransportError):
+    def __init__(self, error, value, count, length, status):
+        super().__init__(error, value)
+        self.value = value
+        self.count = count
+        self.length = length
+        if type(count) is int and type(length) is int:
+            self.expected = length - count
+        else:
+            self.expected = None
+        self.status = status
 
 class InvalidURL(ValueError): pass
 
@@ -260,9 +271,9 @@ def _parse_headers(sock, status, all_headers, and_cookies):
     while True:
         line = sock.readline()
         if not line:
-            raise IncompleteRead("connection closed while reading response headers", None, None, None, status)
+            raise IncompleteRead(None, "connection closed while reading response headers", None, None, status)
         if not line.endswith(b"\n"):
-            raise IncompleteRead("incomplete response header line", None, None, None, status)
+            raise IncompleteRead(None, "incomplete response header line", None, None, status)
         if line == b"\r\n" or line == b"\n":
             return headers
         if line[0] <= 32:
@@ -425,7 +436,7 @@ class HTTPResponse:
 
     def _abort_read(self, message):
         self._release_socket(False)
-        raise IncompleteRead(message, self._bytes, self._length, None, self.status)
+        raise IncompleteRead(None, message, self._bytes, self._length, self.status)
 
     def _release_socket(self, complete):
         sock = self._sock
@@ -566,14 +577,20 @@ class HTTPResponse:
         except MemoryError:
             out = bmv = data = None
             gc.collect()
-            self._abort_read("MemoryError")
+            self._release_socket(False)
+            raise IncompleteRead(
+                errno.ENOMEM,
+                "MemoryError",
+                self._bytes,
+                self._length,
+                self.status)
         except OSError as e:
             self._release_socket(False)
             raise IncompleteRead(
+                e.errno or 0,
                 "socket read failed",
                 self._bytes,
                 self._length,
-                e.errno or 0,
                 self.status)
 
 class HTTPConnection:
@@ -777,24 +794,14 @@ class HTTPConnection:
             self._reset_request()
             raise
 
-        opening = self._sock is None
         try:
-            if opening:
+            if self._sock is None:
                 self._open_socket()
-                opening = False
             self._send_bytes(self._head, False)
             self._bytes = 0
             self._send_bytes(b"\r\n", False)
             self._state = _CS_REQUEST_SENT
             self._send_body(body)
-        except OSError as e:
-            if opening:
-                self._abort_request()
-                raise
-            count = self._bytes
-            length = self._length
-            self._abort_request()
-            raise IncompleteWrite("socket write failed", count, length, e.errno or 0)
         except Exception:
             self._abort_request()
             raise
@@ -813,11 +820,6 @@ class HTTPConnection:
         old_bytes = self._bytes
         try:
             self._send_body(body)
-        except OSError as e:
-            count = self._bytes
-            length = self._length
-            self._abort_request()
-            raise IncompleteWrite("socket write failed", count, length, e.errno or 0)
         except Exception:
             self._abort_request()
             raise
@@ -837,14 +839,7 @@ class HTTPConnection:
             if state == _CS_REQUEST_SENT:
                 self._state = _CS_RECEIVING_RESPONSE
                 if self._chunked:
-                    try:
-                        self._send_bytes(b"0\r\n\r\n", False)
-                    except OSError as e:
-                        raise IncompleteWrite(
-                            "socket write failed",
-                            self._bytes,
-                            self._length,
-                            e.errno or 0)
+                    self._send_bytes(b"0\r\n\r\n", False)
                 if self._length is not None and self._bytes != self._length:
                     raise RequestLengthMismatch()
 
@@ -856,7 +851,7 @@ class HTTPConnection:
                 version, status, reason = _parse_status_line(self._sock)
                 response_headers = _parse_headers(self._sock, status, all_headers, and_cookies)
             except OSError as e:
-                raise IncompleteRead("socket read failed", None, None, e.errno or 0, status)
+                raise IncompleteRead(e.errno or 0, "socket read failed", None, None, status)
 
             response_chunked, response_length, reusable = _derive_response_framing(
                 self.method, version, status, response_headers)
@@ -1003,7 +998,15 @@ class HTTPConnection:
         if not data:
             return
 
-        self._sock.sendall(data)
+        try:
+            self._sock.sendall(data)
+        except OSError as e:
+            raise IncompleteWrite(
+                e.errno or 0,
+                "socket write failed",
+                self._bytes,
+                self._length)
+
         if accounting:
             self._bytes += len(data)
 
@@ -1015,20 +1018,23 @@ class HTTPConnection:
         self._send_bytes(b"\r\n", False)
 
     def _open_socket(self):
-        network = self._network
-        if network is not None:
-            try:
-                ready = network()
-            except OSError:
-                raise
-            except Exception as e:
-                raise OSError(_ENETDOWN, str(e))
-            if not ready:
-                raise OSError(_ENETUNREACH, "network unreachable")
+        try:
+            network = self._network
+            if network is not None:
+                try:
+                    ready = network()
+                except OSError:
+                    raise
+                except Exception as e:
+                    raise OSError(_ENETDOWN, str(e))
+                if not ready:
+                    raise OSError(_ENETUNREACH, "network unreachable")
 
-        if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
-            gc.collect()
-        self._sock = create_connection((self._hostaddr, self.port), self._timeout)
+            if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
+                gc.collect()
+            self._sock = create_connection((self._hostaddr, self.port), self._timeout)
+        except OSError as e:
+            raise ConnectError(e.errno or 0, str(e))
 
     def _reset_request(self):
         self._state = _CS_IDLE
@@ -1081,9 +1087,13 @@ if ssl is not None:
                     self._sock = self._context.wrap_socket(raw, server_hostname=self._hostname)
                 else:
                     self._sock = self._context.wrap_socket(raw)
-            except Exception:
+            except Exception as e:
                 self._sock = None
                 _close_quietly(raw)
-                raise
+                if isinstance(e, MemoryError):
+                    raise
+                if isinstance(e, OSError):
+                    raise ConnectError(e.errno or 0, str(e))
+                raise ConnectError(_ENONET, str(e))
             finally:
                 gc.collect()
