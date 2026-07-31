@@ -60,6 +60,11 @@ _ENETUNREACH = getattr(errno, "ENETUNREACH", 101)
 _EHOSTDOWN = getattr(errno, "EHOSTDOWN", 112)
 _EHOSTUNREACH = getattr(errno, "EHOSTUNREACH", 113)
 
+def _errno_map(err):
+    if type(err) is not int:
+        return 0
+    return err
+
 class HTTPException(Exception): pass
 
 class ImproperConnectionState(HTTPException): pass
@@ -573,7 +578,7 @@ class HTTPResponse:
             self._release_socket(False)
             raise
         except OSError as e:
-            self._abort_read("socket read failed", e.errno or 0)
+            self._abort_read("socket read failed", _errno_map(e.errno))
 
 class HTTPConnection:
     default_port = HTTP_PORT
@@ -828,7 +833,7 @@ class HTTPConnection:
                 version, status, reason = _parse_status_line(self._sock)
                 response_headers = _parse_headers(self._sock, status, all_headers, and_cookies)
             except OSError as e:
-                raise IncompleteRead(e.errno or 0, "socket read failed", None, None, status)
+                raise IncompleteRead(_errno_map(e.errno), "socket read failed", None, None, status)
 
             response_chunked, response_length, reusable = _derive_response_framing(
                 self.method, version, status, response_headers)
@@ -975,7 +980,7 @@ class HTTPConnection:
             self._sock.sendall(data)
         except OSError as e:
             raise IncompleteWrite(
-                e.errno or 0,
+                _errno_map(e.errno),
                 "socket write failed",
                 self._bytes,
                 self._length)
@@ -1007,7 +1012,7 @@ class HTTPConnection:
                 gc.collect()
             self._sock = create_connection((self._hostaddr, self.port), self._timeout)
         except OSError as e:
-            raise ConnectError(e.errno or 0, str(e))
+            raise ConnectError(_errno_map(e.errno), str(e))
 
     def _reset_request(self):
         self._state = _CS_IDLE
@@ -1069,7 +1074,7 @@ if _SUPPORT_SSL:
                 if isinstance(e, MemoryError):
                     raise
                 if isinstance(e, OSError):
-                    raise ConnectError(e.errno or 0, str(e))
+                    raise ConnectError(_errno_map(e.errno), str(e))
                 raise ConnectError(_ENONET, str(e))
             finally:
                 gc.collect()
