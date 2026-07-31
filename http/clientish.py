@@ -9,14 +9,14 @@ HTTPS_PORT = const(443)
 OK = const(200)
 
 _READ_MUST_RETURN_BYTES = const(0)
-_RECYCLE_HEADER_BUFFER = const(0)
+_RECYCLE_HEADER_BUFFER = const(1)
 _SUPPORT_SSL = const(1)
 _SUPPORT_VIPER = const(1)
 
 _DEFAULT_TIMEOUT = const(10)
 _GC_FREE_THRESHOLD = const(32768)
 _READ_BLOCK_SIZE = const(2048)
-_REQUEST_HEAD_SIZE = const(1024)
+_REQUEST_HEAD_SIZE = const(512)
 
 _RF_HOST = const(1)
 _RF_CONNECTION_CLOSE = const(4)
@@ -121,14 +121,6 @@ def _encode_and_validate(x, strict=False):
     if not strict or type(x) is bytes:
         return x
     return bytes(x)
-
-def _append_data(out, data):
-    if not out:
-        return data
-    if type(out) is bytes:
-        out = bytearray(out)
-    out.extend(data)
-    return out
 
 if _SUPPORT_VIPER:
     @micropython.viper
@@ -430,9 +422,9 @@ class HTTPResponse:
     def close(self):
         self._release_socket(self._bytes == self._length)
 
-    def _abort_read(self, message):
+    def _abort_read(self, message, error=None):
         self._release_socket(False)
-        raise IncompleteRead(None, message, self._bytes, self._length, self.status)
+        raise IncompleteRead(error, message, self._bytes, self._length, self.status)
 
     def _release_socket(self, complete):
         sock = self._sock
@@ -560,7 +552,12 @@ class HTTPResponse:
                 elif self._length is not None and self._bytes >= self._length:
                     self.close()
                 if amt is None:
-                    out = _append_data(out, data)
+                    if not out:
+                        out = data
+                    else:
+                        if type(out) is bytes:
+                            out = bytearray(out)
+                        out.extend(data)
 
             if into:
                 return total
@@ -576,13 +573,7 @@ class HTTPResponse:
             self._release_socket(False)
             raise
         except OSError as e:
-            self._release_socket(False)
-            raise IncompleteRead(
-                e.errno or 0,
-                "socket read failed",
-                self._bytes,
-                self._length,
-                self.status)
+            self._abort_read("socket read failed", e.errno or 0)
 
 class HTTPConnection:
     default_port = HTTP_PORT
@@ -603,7 +594,7 @@ class HTTPConnection:
         elif colons == 1:
             raise InvalidURL(host)
         elif colons:
-            the_host = b"[" + the_host + b"]"
+            the_host = b"[%s]" % the_host
         else:
             for b in the_host:
                 if not (b == 46 or (48 <= b <= 57)):
@@ -736,41 +727,36 @@ class HTTPConnection:
         length = self._length
         flags = self._flags
 
-        if len_name == 4:
-            if _equals_ci(name, _HOST, 4):
-                flags |= _RF_HOST
-        elif len_name == 10:
-            if _equals_ci(name, _CONNECTION, 10):
-                if value is not None:
-                    len_value = len(value)
-                    if ((len_value == 5 and _equals_ci(value, _CLOSE, 5)) or
-                            (len_value > 5 and value.endswith(_CLOSE))):
-                        flags |= _RF_CONNECTION_CLOSE
-        elif len_name == 14:
-            if _equals_ci(name, _CONTENT_LENGTH, 14):
-                flags |= _RF_CONTENT_LENGTH
-                if value is not None:
-                    try:
-                        value = int(value, 10)
-                    except (TypeError, ValueError):
-                        value = -1
-                    if value >= 0 and (length is None or length == value):
-                        length = value
-                    else:
-                        length = -1
-        elif len_name == 15:
-            if _equals_ci(name, _ACCEPT_ENCODING, 15):
-                flags |= _RF_ACCEPT_ENCODING
-        elif len_name == 17:
-            if _equals_ci(name, _TRANSFER_ENCODING, 17):
-                flags |= _RF_TRANSFER_ENCODING
-                if value is not None:
-                    len_value = len(value)
-                    flags &= ~ _RF_TRANSFER_CHUNKED
-                    if len_value == 7 and _equals_ci(value, _CHUNKED, 7):
-                        flags |= _RF_TRANSFER_CHUNKED
-                    elif len_value > 7 and value.endswith(_CHUNKED):
-                        flags |= _RF_TRANSFER_CHUNKED
+        if len_name == 4 and _equals_ci(name, _HOST, 4):
+            flags |= _RF_HOST
+        elif len_name == 10 and _equals_ci(name, _CONNECTION, 10):
+            if value is not None:
+                len_value = len(value)
+                if ((len_value == 5 and _equals_ci(value, _CLOSE, 5)) or
+                        (len_value > 5 and value.endswith(_CLOSE))):
+                    flags |= _RF_CONNECTION_CLOSE
+        elif len_name == 14 and _equals_ci(name, _CONTENT_LENGTH, 14):
+            flags |= _RF_CONTENT_LENGTH
+            if value is not None:
+                try:
+                    value = int(value, 10)
+                except (TypeError, ValueError):
+                    value = -1
+                if value >= 0 and (length is None or length == value):
+                    length = value
+                else:
+                    length = -1
+        elif len_name == 15 and _equals_ci(name, _ACCEPT_ENCODING, 15):
+            flags |= _RF_ACCEPT_ENCODING
+        elif len_name == 17 and _equals_ci(name, _TRANSFER_ENCODING, 17):
+            flags |= _RF_TRANSFER_ENCODING
+            if value is not None:
+                len_value = len(value)
+                flags &= ~ _RF_TRANSFER_CHUNKED
+                if len_value == 7 and _equals_ci(value, _CHUNKED, 7):
+                    flags |= _RF_TRANSFER_CHUNKED
+                elif len_value > 7 and value.endswith(_CHUNKED):
+                    flags |= _RF_TRANSFER_CHUNKED
 
         self._length = length
         self._flags = flags
@@ -954,8 +940,6 @@ class HTTPConnection:
             bmv = memoryview(buf)
             while True:
                 n = reader(buf)
-                if n is None:
-                    continue
                 if type(n) is not int or n < 0 or n > _READ_BLOCK_SIZE:
                     raise TypeError("invalid body part")
                 if not n:
@@ -966,8 +950,6 @@ class HTTPConnection:
         if callable(reader):
             while True:
                 buf = reader(_READ_BLOCK_SIZE)
-                if buf is None:
-                    continue
                 if isinstance(buf, str):
                     buf = bytes(buf)
                 if not isinstance(buf, (bytes, bytearray, memoryview)):
@@ -1064,8 +1046,9 @@ if _SUPPORT_SSL:
     class HTTPSConnection(HTTPConnection):
         default_port = HTTPS_PORT
 
-        def __init__(self, *args, context=None, **kwargs):
-            super().__init__(*args, **kwargs)
+        def __init__(self, host, port=None, *,
+                     timeout=_DEFAULT_TIMEOUT, network=None, context=None):
+            super().__init__(host, port, timeout=timeout, network=network)
             if context is None:
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                 context.verify_mode = ssl.CERT_NONE
