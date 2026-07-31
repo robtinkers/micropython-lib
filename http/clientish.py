@@ -68,7 +68,11 @@ class CannotSendHeader(ImproperConnectionState): pass
 class ResponseNotReady(ImproperConnectionState): pass
 class NotConnected(ImproperConnectionState): pass
 
-class BadStatusLine(HTTPException): pass
+class BadStatusLine(HTTPException):
+    def __init__(self, value):
+        super().__init__(value)
+        self.errno = None
+
 class UnknownProtocol(BadStatusLine): pass
 
 class RequestLengthMismatch(HTTPException):
@@ -251,7 +255,7 @@ def _parse_status_line(sock):
             return 10, status, reason
         if version.startswith(b"TTP/1."):
             return 11, status, reason
-        raise UnknownProtocol(first + version)
+        raise UnknownProtocol(first + line)
 
     raise BadStatusLine(first + line)
 
@@ -570,12 +574,7 @@ class HTTPResponse:
             out = bmv = data = None
             gc.collect()
             self._release_socket(False)
-            raise IncompleteRead(
-                errno.ENOMEM,
-                "MemoryError",
-                self._bytes,
-                self._length,
-                self.status)
+            raise
         except OSError as e:
             self._release_socket(False)
             raise IncompleteRead(
