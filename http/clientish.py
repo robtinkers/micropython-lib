@@ -8,10 +8,10 @@ HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
 OK = const(200)
 
+_ENABLE_SSL = const(1)
+_ENABLE_VIPER = const(1)
 _READ_MUST_RETURN_BYTES = const(0)
 _RECYCLE_HEADER_BUFFER = const(1)
-_SUPPORT_SSL = const(1)
-_SUPPORT_VIPER = const(1)
 
 _DEFAULT_TIMEOUT = const(10)
 _GC_FREE_THRESHOLD = const(32768)
@@ -124,7 +124,7 @@ def _encode_and_validate(x, strict=False):
         return x
     return bytes(x)
 
-if _SUPPORT_VIPER:
+if _ENABLE_VIPER:
     @micropython.viper
     def _equals_ci(a:ptr8, b:ptr8, length:int) -> int:
         i = 0
@@ -1041,7 +1041,7 @@ class HTTPConnection:
             _close_quietly(sock)
             self._reset_request()
 
-if _SUPPORT_SSL:
+if _ENABLE_SSL:
 
     import ssl
 
