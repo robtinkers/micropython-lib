@@ -60,10 +60,7 @@ _ENETUNREACH = getattr(errno, "ENETUNREACH", 101)
 _EHOSTDOWN = getattr(errno, "EHOSTDOWN", 112)
 _EHOSTUNREACH = getattr(errno, "EHOSTUNREACH", 113)
 
-def _errno_map(err):
-    if type(err) is not int:
-        return 0
-    return err
+_errno_map = {}
 
 class HTTPException(Exception): pass
 
@@ -359,7 +356,7 @@ def _derive_response_framing(method, version, status, response_headers):
     return False, length, (reusable and length is not None)
 
 class HTTPResponse:
-    _chunk_remaining = None
+    _chunk_left = None
 
     def __init__(self, owner, sock, method, url,
                  version, status, reason,
@@ -438,9 +435,9 @@ class HTTPResponse:
             owner._release_response(self, sock, complete)
         self._sock = self._owner = None
 
-    def _chunk_bytes_available(self):
+    def _get_chunk_left(self):
         while True:
-            if self._chunk_remaining is None:
+            if self._chunk_left is None:
                 line = self._sock.readline()
                 if not line:
                     self._abort_read("unexpected EOF before chunk size")
@@ -454,7 +451,7 @@ class HTTPResponse:
                 except ValueError:
                     self._abort_read("invalid chunk size")
                 if size > 0:
-                    self._chunk_remaining = size
+                    self._chunk_left = size
                     return size
                 while True:
                     line = self._sock.readline()
@@ -464,15 +461,15 @@ class HTTPResponse:
                         return 0
                     if not line:
                         self._abort_read("unexpected EOF in chunk trailers")
-            elif self._chunk_remaining == 0:
+            elif self._chunk_left == 0:
                 line = self._sock.readline()
                 if not line:
                     self._abort_read("unexpected EOF before chunk terminator")
                 if not (line == b"\r\n" or line == b"\n"):
                     self._abort_read("invalid chunk terminator")
-                self._chunk_remaining = None
+                self._chunk_left = None
             else:
-                return self._chunk_remaining
+                return self._chunk_left
 
     def _read_body(self, buf, amt):
         try:
@@ -531,7 +528,7 @@ class HTTPResponse:
                     want = min(amt - total, _READ_BLOCK_SIZE)
 
                 if self._chunked:
-                    want = min(want, self._chunk_bytes_available())
+                    want = min(want, self._get_chunk_left())
                     if want == 0:
                         break
 
@@ -553,7 +550,7 @@ class HTTPResponse:
                 self._bytes += n
                 total += n
                 if self._chunked:
-                    self._chunk_remaining -= n
+                    self._chunk_left -= n
                 elif self._length is not None and self._bytes >= self._length:
                     self.close()
                 if amt is None:
@@ -578,7 +575,7 @@ class HTTPResponse:
             self._release_socket(False)
             raise
         except OSError as e:
-            self._abort_read("socket read failed", _errno_map(e.errno))
+            self._abort_read("socket read failed", _errno_map.get(e.errno, 0))
 
 class HTTPConnection:
     default_port = HTTP_PORT
@@ -833,7 +830,7 @@ class HTTPConnection:
                 version, status, reason = _parse_status_line(self._sock)
                 response_headers = _parse_headers(self._sock, status, all_headers, and_cookies)
             except OSError as e:
-                raise IncompleteRead(_errno_map(e.errno), "socket read failed", None, None, status)
+                raise IncompleteRead(_errno_map.get(e.errno, 0), "socket read failed", None, None, status)
 
             response_chunked, response_length, reusable = _derive_response_framing(
                 self.method, version, status, response_headers)
@@ -980,7 +977,7 @@ class HTTPConnection:
             self._sock.sendall(data)
         except OSError as e:
             raise IncompleteWrite(
-                _errno_map(e.errno),
+                _errno_map.get(e.errno, 0),
                 "socket write failed",
                 self._bytes,
                 self._length)
@@ -1012,7 +1009,7 @@ class HTTPConnection:
                 gc.collect()
             self._sock = create_connection((self._hostaddr, self.port), self._timeout)
         except OSError as e:
-            raise ConnectError(_errno_map(e.errno), str(e))
+            raise ConnectError(_errno_map.get(e.errno, 0), str(e))
 
     def _reset_request(self):
         self._state = _CS_IDLE
@@ -1074,7 +1071,7 @@ if _SUPPORT_SSL:
                 if isinstance(e, MemoryError):
                     raise
                 if isinstance(e, OSError):
-                    raise ConnectError(_errno_map(e.errno), str(e))
+                    raise ConnectError(_errno_map.get(e.errno, 0), str(e))
                 raise ConnectError(_ENONET, str(e))
             finally:
                 gc.collect()
