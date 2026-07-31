@@ -336,7 +336,7 @@ def _derive_response_framing(method, version, status, response_headers):
     if method == b"CONNECT" and 200 <= status < 300:
         return False, None, False
 
-    if status < 200 or status == 204 or status == 205:
+    if status < 200 or status == 204:
         return False, 0, (reusable and chunked is None and length is None)
 
     if method == b"HEAD" or status == 304:
@@ -569,7 +569,7 @@ class HTTPResponse:
             if _READ_MUST_RETURN_BYTES and type(out) is not bytes:
                 out = bytes(out)
             return out
-        except MemoryError:
+        except (MemoryError, OverflowError):
             out = bmv = data = None
             gc.collect()
             self._release_socket(False)
@@ -723,7 +723,13 @@ class HTTPConnection:
             value = _encode_and_validate(value)
             if value is None:
                 raise ValueError("invalid header value")
-            self._append_header(name, value)
+            try:
+                self._append_header(name, value)
+            except MemoryError:
+                self._head = None
+                self._reset_request()
+                gc.collect()
+                raise
 
         len_name = len(name)
         length = self._length
