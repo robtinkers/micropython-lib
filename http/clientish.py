@@ -322,7 +322,7 @@ def _derive_response_framing(method, version, status, response_headers):
                 elif len_val == 5:
                     reusable = not _equals_ci(val, _CLOSE, 5)
                 elif len_val > 5:
-                    reusable = not (_CLOSE in (val if val.islower() else val.lower()))
+                    reusable = _CLOSE not in (val if val.islower() else val.lower())
 
     if reusable is None:
         reusable = not http10
