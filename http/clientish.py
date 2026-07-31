@@ -310,7 +310,7 @@ def _derive_response_framing(method, version, status, response_headers):
             if len_val == 7:
                 chunked = bool(_equals_ci(val, _CHUNKED, 7))
             elif len_val > 7:
-                chunked = val.endswith(_CHUNKED)
+                chunked = (val if val.islower() else val.lower()).endswith(_CHUNKED)
             else:
                 chunked = False
 
@@ -322,7 +322,7 @@ def _derive_response_framing(method, version, status, response_headers):
                 elif len_val == 5:
                     reusable = not _equals_ci(val, _CLOSE, 5)
                 elif len_val > 5:
-                    reusable = not val.endswith(_CLOSE)
+                    reusable = not (_CLOSE in (val if val.islower() else val.lower()))
 
     if reusable is None:
         reusable = not http10
