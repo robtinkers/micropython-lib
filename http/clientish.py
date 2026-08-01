@@ -8,10 +8,11 @@ _COMPATISH_EXCEPTIONS = const(0)
 _DEFAULT_TIMEOUT = const(10)
 _ENABLE_SSL = const(1)
 _GC_FREE_THRESHOLD = const(32768)
-_READ_BLOCK_SIZE = const(2048)
+_READ_BLOCK_SIZE = const(1024)
+_READ_BLOCK_SIZE_HEXCRLF = b"400\r\n"
 _READ_MUST_RETURN_BYTES = const(0)
 _RECYCLE_HEADER_BUFFER = const(1)
-_REQUEST_HEAD_SIZE = const(512)
+_REQUEST_HEAD_SIZE = const(256)
 
 import socket, errno, gc
 if _ENABLE_SSL:
@@ -45,8 +46,6 @@ _TRANSFER_ENCODING = b"Transfer-Encoding"
 
 _CHUNKED = b"chunked"
 _CLOSE = b"close"
-
-_READ_BLOCK_SIZE_HEXCRLF = b"%X\r\n" % _READ_BLOCK_SIZE
 
 _BUFFER_TYPES = (bytes, bytearray, memoryview)
 
@@ -215,6 +214,8 @@ def _encode_and_validate(x, strict=0):
         return None
     if isinstance(x, str):
         x = x.encode()
+    elif type(x) is int:
+        x = b"%d" % x
     elif not isinstance(x, _BUFFER_TYPES):
         x = str(x).encode()
     if not _validate(x, len(x), strict):
@@ -240,17 +241,17 @@ def create_connection(address, timeout=None, *, resolver=None):
         raise OSError(_EHOSTDOWN, str(e))
 
     exc = None
-    for f, t, p, _, a in infos:
+    for info in infos:
         sock = None
         try:
-            sock = socket.socket(f, t, p)
+            sock = socket.socket(info[0], info[1], info[2])
             if timeout != 0:
                 sock.settimeout(timeout)
             try:
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             except (AttributeError, OSError):
                 pass
-            sock.connect(a)
+            sock.connect(info[4])
             return sock
         except OSError as e:
             exc = e
@@ -339,14 +340,13 @@ def _parse_headers(sock, status, all_headers, and_cookies):
             raise IncompleteRead(None, "incomplete response header line", None, None, status)
         if line == b"\r\n" or line == b"\n":
             return headers
+        if headers is None:
+            continue
         if line[0] <= 32:
             continue
 
         pos = line.find(b":")
         if pos == -1:
-            continue
-
-        if headers is None:
             continue
 
         name = None
@@ -667,8 +667,10 @@ class HTTPResponse:
 class HTTPConnection:
     response_class = HTTPResponse
     default_port = HTTP_PORT
+    _timeout = _DEFAULT_TIMEOUT
+    _network = None
 
-    def __init__(self, host, port=None, *, timeout=_DEFAULT_TIMEOUT, network=None):
+    def __init__(self, host, port=None, *, timeout=None, network=None):
         the_host = _encode_and_validate(host, 1)
         if not the_host:
             raise InvalidURL(host)
@@ -707,8 +709,10 @@ class HTTPConnection:
         self._hostport = hostport
         self.port = port
 
-        self._timeout = timeout
-        self._network = network
+        if timeout is not None:
+            self._timeout = timeout
+        if network is not None:
+            self._network = network
         self._sock = None
         self._head = None
         self._reset_request()
@@ -1071,13 +1075,13 @@ class HTTPConnection:
                 send(buf)
                 buf = None
 
-        for part in body:
-            if isinstance(part, str):
-                part = part.encode()
-            if not isinstance(part, _BUFFER_TYPES):
+        for buf in body:
+            if isinstance(buf, str):
+                buf = buf.encode()
+            if not isinstance(buf, _BUFFER_TYPES):
                 raise TypeError("invalid body part")
-            send(part)
-            part = None
+            send(buf)
+            buf = None
 
     def _send_bytes(self, data, accounting=True):
         if self._sock is None:
@@ -1101,11 +1105,7 @@ class HTTPConnection:
         if not data:
             return
         len_data = len(data)
-        if len_data == _READ_BLOCK_SIZE:
-            head = _READ_BLOCK_SIZE_HEXCRLF
-        else:
-            head = b"%X\r\n" % len_data
-        self._send_bytes(head, False)
+        self._send_bytes(_READ_BLOCK_SIZE_HEXCRLF if len_data == _READ_BLOCK_SIZE else b"%X\r\n" % len_data, False)
         self._send_bytes(data)
         self._send_bytes(b"\r\n", False)
 
