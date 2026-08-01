@@ -76,6 +76,7 @@ class NotConnected(ImproperConnectionState): pass
 class BadStatusLine(HTTPException):
     def __init__(self, value):
         super().__init__(value)
+        self.line = value
         self.errno = None
 
 class UnknownProtocol(BadStatusLine): pass
@@ -241,17 +242,20 @@ def _parse_status_line(sock):
         else:
             break
 
+        if version == b"TTP/1.0":
+            version = 10
+        elif version.startswith(b"TTP/1."):
+            version = 11
+        else:
+            raise UnknownProtocol(first + line)
+
         if len(status) != 3 or not status.isdigit():
             break
         status = int(status, 10)
         if status < 100:
             break
 
-        if version == b"TTP/1.0":
-            return 10, status, reason
-        if version.startswith(b"TTP/1."):
-            return 11, status, reason
-        raise UnknownProtocol(first + line)
+        return version, status, reason
 
     raise BadStatusLine(first + line)
 
@@ -858,8 +862,11 @@ class HTTPConnection:
                 gc.collect()
 
             try:
-                version, status, reason = _parse_status_line(self._sock)
-                response_headers = _parse_headers(self._sock, status, all_headers, and_cookies)
+                while True:
+                    version, status, reason = _parse_status_line(self._sock)
+                    response_headers = _parse_headers(self._sock, status, all_headers, and_cookies)
+                    if status != 100:
+                        break
             except OSError as e:
                 raise IncompleteRead(_errno(e.errno), "socket read failed", None, None, status)
 
