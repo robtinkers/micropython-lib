@@ -46,14 +46,17 @@ _CHUNKED = b"chunked"
 _CLOSE = b"close"
 _EMPTY = b""
 
-_KEEP_RESPONSE_HEADERS = {
-    8: (_LOCATION,),
-    10:(_SET_COOKIE, _CONNECTION),
-    11:(_RETRY_AFTER,),
-    12:(_CONTENT_TYPE,),
-    14:(_CONTENT_LENGTH,),
-    17:(_TRANSFER_ENCODING,),
-}
+_BUFFER_TYPE = (bytes, bytearray, memoryview)
+
+_KEEP_RESPONSE_HEADERS = (
+    _LOCATION,
+    _SET_COOKIE,
+    _CONNECTION,
+    _RETRY_AFTER,
+    _CONTENT_TYPE,
+    _CONTENT_LENGTH,
+    _TRANSFER_ENCODING,
+)
 
 _ENONET = getattr(errno, "ENONET", 64)
 _ENETDOWN = getattr(errno, "ENETDOWN", 100)
@@ -61,7 +64,8 @@ _ENETUNREACH = getattr(errno, "ENETUNREACH", 101)
 _EHOSTDOWN = getattr(errno, "EHOSTDOWN", 112)
 _EHOSTUNREACH = getattr(errno, "EHOSTUNREACH", 113)
 
-_errno_map = {}
+def _errno_map(err):
+    return err or 0
 
 class HTTPException(Exception): pass
 
@@ -274,8 +278,13 @@ def _parse_headers(sock, status, all_headers, and_cookies):
             continue
 
         name = None
-        for cand in _KEEP_RESPONSE_HEADERS.get(pos, ()):
-            if _equals_ci(line, cand, pos):
+        for cand in _KEEP_RESPONSE_HEADERS:
+            len_cand = len(cand)
+            if len_cand < pos:
+                continue
+            elif len_cand > pos:
+                break
+            elif _equals_ci(line, cand, pos):
                 name = cand
                 break
 
@@ -412,7 +421,7 @@ class HTTPResponse:
         return self._read_body(buf, None)
 
     def drain(self, buf=None):
-        if buf is None:
+        if not buf:
             buf = bytearray(_READ_BLOCK_SIZE)
         elif not buf:
             raise ValueError("non-empty buffer required")
@@ -483,6 +492,7 @@ class HTTPResponse:
         try:
             sock = self._sock
             into = buf is not None
+
             if sock is None:
                 if self._length is not None and self._count >= self._length:
                     return 0 if into else _EMPTY
@@ -583,7 +593,7 @@ class HTTPResponse:
             self._release_socket(False)
             raise
         except OSError as e:
-            self._abort_read("socket read failed", _errno_map.get(e.errno, e.errno or 0))
+            self._abort_read("socket read failed", _errno_map(e.errno))
 
 class HTTPConnection:
     default_port = HTTP_PORT
@@ -858,7 +868,7 @@ class HTTPConnection:
                 version, status, reason = _parse_status_line(self._sock)
                 response_headers = _parse_headers(self._sock, status, all_headers, and_cookies)
             except OSError as e:
-                raise IncompleteRead(_errno_map.get(e.errno, e.errno or 0), "socket read failed", None, None, status)
+                raise IncompleteRead(_errno_map(e.errno), "socket read failed", None, None, status)
 
             response_chunked, response_length, reusable = _derive_response_framing(
                 self.method, version, status, response_headers)
@@ -912,7 +922,7 @@ class HTTPConnection:
             chunked = bool(flags & _RF_TRANSFER_CHUNKED)
         elif flags & _RF_CONTENT_LENGTH:
             chunked = False
-        elif isinstance(body, (bytes, bytearray, memoryview)):
+        elif isinstance(body, _BUFFER_TYPE):
             chunked = False
             length = len(body)
         else:
@@ -923,11 +933,11 @@ class HTTPConnection:
         if not (flags & _RF_TRANSFER_ENCODING):
             if chunked:
                 self._append_header(_TRANSFER_ENCODING, _CHUNKED)
-                self._flags |= _RF_TRANSFER_ENCODING | _RF_TRANSFER_CHUNKED
+                flags |= _RF_TRANSFER_ENCODING | _RF_TRANSFER_CHUNKED
             elif not (flags & _RF_CONTENT_LENGTH):
                 if length is not None and length >= 0:
                     self._append_header(_CONTENT_LENGTH, b"%d" % length)
-                    self._flags |= _RF_CONTENT_LENGTH
+                    flags |= _RF_CONTENT_LENGTH
 
         if not (flags & _RF_HOST):
             if self.method == b"CONNECT":
@@ -947,6 +957,7 @@ class HTTPConnection:
         if length == -1:
             length = None
         self._length = length
+        self._flags = flags
         return body
 
     def _send_body(self, body):
@@ -965,7 +976,7 @@ class HTTPConnection:
         if isinstance(body, str):
             body = bytes(body)
 
-        if isinstance(body, (bytes, bytearray, memoryview)):
+        if isinstance(body, _BUFFER_TYPE):
             send(body)
             return
 
@@ -987,7 +998,7 @@ class HTTPConnection:
                 buf = reader(_READ_BLOCK_SIZE)
                 if isinstance(buf, str):
                     buf = bytes(buf)
-                if not isinstance(buf, (bytes, bytearray, memoryview)):
+                if not isinstance(buf, _BUFFER_TYPE):
                     raise TypeError("invalid body part")
                 if not buf:
                     return
@@ -996,7 +1007,7 @@ class HTTPConnection:
         for part in body:
             if isinstance(part, str):
                 part = bytes(part)
-            if not isinstance(part, (bytes, bytearray, memoryview)):
+            if not isinstance(part, _BUFFER_TYPE):
                 raise TypeError("invalid body part")
             send(part)
 
@@ -1010,7 +1021,7 @@ class HTTPConnection:
             self._sock.sendall(data)
         except OSError as e:
             raise IncompleteWrite(
-                _errno_map.get(e.errno, e.errno or 0),
+                _errno_map(e.errno),
                 "socket write failed",
                 self._count,
                 self._length)
@@ -1042,7 +1053,7 @@ class HTTPConnection:
                 gc.collect()
             self._sock = create_connection((self._hostaddr, self.port), self._timeout)
         except OSError as e:
-            raise ConnectError(_errno_map.get(e.errno, e.errno or 0), str(e))
+            raise ConnectError(_errno_map(e.errno), str(e))
 
     def _reset_request(self):
         self._state = _CS_IDLE
@@ -1104,7 +1115,7 @@ if _ENABLE_SSL:
                 if isinstance(e, MemoryError):
                     raise
                 if isinstance(e, OSError):
-                    raise ConnectError(_errno_map.get(e.errno, e.errno or 0), str(e))
+                    raise ConnectError(_errno_map(e.errno), str(e))
                 raise ConnectError(_ENONET, str(e))
             finally:
                 gc.collect()
