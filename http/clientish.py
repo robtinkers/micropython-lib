@@ -139,29 +139,6 @@ else:
     class InvalidURL(ValueError): pass
 
 @micropython.viper
-def _validate(haystack:ptr8, haystack_len:int, strict:int) -> int:
-    i = 0
-    while i < haystack_len:
-        x = haystack[i]
-        if x <= 32 and (strict or x == 10 or x == 13):
-            return 0
-        i += 1
-    return 1
-
-def _encode_and_validate(x, strict=False):
-    if x is None:
-        return None
-    if isinstance(x, str):
-        x = x.encode()
-    elif not isinstance(x, _BUFFER_TYPE):
-        x = str(x).encode()
-    if not _validate(x, len(x), 1 if strict else 0):
-        return None
-    if not strict or type(x) is bytes:
-        return x
-    return bytes(x)
-
-@micropython.viper
 def _equals_ci(a:ptr8, b:ptr8, length:int) -> int:
     i = 0
     while i < length:
@@ -211,6 +188,29 @@ def _endswith_lc(haystack:ptr8, haystack_len:int, needle:ptr8, needle_len:int) -
             return 0
         j += 1
     return 1
+
+@micropython.viper
+def _validate(haystack:ptr8, haystack_len:int, strict:int) -> int:
+    i = 0
+    while i < haystack_len:
+        x = haystack[i]
+        if x <= 32 and (strict or x == 10 or x == 13):
+            return 0
+        i += 1
+    return 1
+
+def _encode_and_validate(x, strict=0):
+    if x is None:
+        return None
+    if isinstance(x, str):
+        x = x.encode()
+    elif not isinstance(x, _BUFFER_TYPE):
+        x = str(x).encode()
+    if not _validate(x, len(x), strict):
+        return None
+    if not strict or type(x) is bytes:
+        return x
+    return bytes(x)
 
 def _close_quietly(sock):
     if sock is not None:
@@ -650,7 +650,7 @@ class HTTPConnection:
     default_port = HTTP_PORT
 
     def __init__(self, host, port=None, *, timeout=_DEFAULT_TIMEOUT, network=None):
-        the_host = _encode_and_validate(host, True)
+        the_host = _encode_and_validate(host, 1)
         if not the_host:
             raise InvalidURL(host)
 
@@ -746,14 +746,14 @@ class HTTPConnection:
         if self._state != _CS_IDLE:
             raise CannotSendRequest()
 
-        method = _encode_and_validate(method, True)
+        method = _encode_and_validate(method, 1)
         if not method:
             raise ValueError("invalid method")
         if not method.isupper():
             method = method.upper()
 
         if url:
-            valid_url = _encode_and_validate(url, True)
+            valid_url = _encode_and_validate(url, 1)
         else:
             valid_url = b"/"
         if not valid_url:
