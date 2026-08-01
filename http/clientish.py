@@ -232,11 +232,10 @@ def _close_quietly(sock):
             pass
 
 def create_connection(address, timeout=None, *, resolver=None):
-    host, port = address
     if resolver is None:
         resolver = socket.getaddrinfo
     try:
-        infos = resolver(host, port, 0, socket.SOCK_STREAM)
+        infos = resolver(address[0], addres[1], 0, socket.SOCK_STREAM)
     except OSError as e:
         raise OSError(_EHOSTDOWN, str(e))
 
@@ -333,6 +332,7 @@ def _parse_headers(sock, status, all_headers, and_cookies):
     headers = None if all_headers is None else []
 
     while True:
+        line = None
         line = sock.readline()
         if not line:
             raise IncompleteRead(None, "connection closed while reading response headers", None, None, status)
@@ -349,11 +349,11 @@ def _parse_headers(sock, status, all_headers, and_cookies):
         if pos == -1:
             continue
 
-        name = None
-        for cand in _KEEP_RESPONSE_HEADERS:
-            if len(cand) == pos and _equals_ci(line, cand, pos):
-                name = cand
+        for name in _KEEP_RESPONSE_HEADERS:
+            if len(name) == pos and _equals_ci(line, name, pos):
                 break
+        else:
+            name = None
 
         if name is None:
             if not all_headers:
@@ -362,10 +362,11 @@ def _parse_headers(sock, status, all_headers, and_cookies):
         elif name is _SET_COOKIE and not and_cookies:
             continue
 
-        start, end = pos + 1, len(line)
-        while start < end and line[start] <= 32: start += 1
-        while end > start and line[end - 1] <= 32: end -= 1
-        headers.append((name, line[start:end]))
+        pos += 1
+        end = len(line)
+        while pos < end and line[pos] <= 32: pos += 1
+        while end > pos and line[end - 1] <= 32: end -= 1
+        headers.append((name, line[pos:end]))
 
 def _derive_response_framing(method, version, status, response_headers):
     http10 = (version == 10)
