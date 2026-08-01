@@ -37,8 +37,6 @@ _CONNECTION = b"Connection"
 _CONTENT_LENGTH = b"Content-Length"
 _CONTENT_TYPE = b"Content-Type"
 _HOST = b"Host"
-_LOCATION = b"Location"
-_RETRY_AFTER = b"Retry-After"
 _SET_COOKIE = b"Set-Cookie"
 _TRANSFER_ENCODING = b"Transfer-Encoding"
 
@@ -48,10 +46,11 @@ _CLOSE = b"close"
 _BUFFER_TYPE = (bytes, bytearray, memoryview)
 
 _KEEP_RESPONSE_HEADERS = (
-    _LOCATION,
+    b"ETag",
+    b"Location",
     _SET_COOKIE,
     _CONNECTION,
-    _RETRY_AFTER,
+    b"Retry-After",
     _CONTENT_TYPE,
     _CONTENT_LENGTH,
     _TRANSFER_ENCODING,
@@ -278,7 +277,7 @@ def _parse_headers(sock, status, all_headers, and_cookies):
 
         name = None
         for cand in _KEEP_RESPONSE_HEADERS:
-            if len(cand) = pos and _equals_ci(line, cand, pos):
+            if len(cand) == pos and _equals_ci(line, cand, pos):
                 name = cand
                 break
 
@@ -384,12 +383,8 @@ class HTTPResponse:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    @property
-    def closed(self):
-        return self._sock is None
-
     def getheaders(self):
-        return iter(self._headers)
+        return self._headers
 
     def getheader(self, name, default=None):
         name = _encode_and_validate(name)
@@ -405,6 +400,10 @@ class HTTPResponse:
             else:
                 result += b", " + val
         return default if result is None else result
+
+    @property
+    def closed(self):
+        return self._sock is None
 
     def read(self, amt=None):
         return self._read_body(None, amt)
@@ -876,7 +875,7 @@ class HTTPConnection:
                 reusable = reusable and not (self._flags & _RF_CONNECTION_CLOSE)
                 owner = self
 
-            resp = HTTPResponse(
+            resp = self.response_class(
                 owner, sock, self.method, self.url,
                 version, status, reason, response_headers,
                 response_chunked, response_length)
@@ -1084,6 +1083,7 @@ if _ENABLE_SSL:
     import ssl
 
     class HTTPSConnection(HTTPConnection):
+        response_class = HTTPResponse
         default_port = HTTPS_PORT
 
         def __init__(self, host, port=None, *,
