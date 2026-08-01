@@ -369,7 +369,10 @@ def _derive_response_framing(method, version, status, response_headers):
 
     for key, val in response_headers:
         if key is _CONTENT_LENGTH:
-            val = int(val, 10) if val.isdigit() else -1
+            try:
+                val = int(val, 10)
+            except (TypeError, ValueError, OverflowError):
+                val = -1
             if length is None:
                 length = val
             elif length != val:
@@ -642,7 +645,7 @@ class HTTPResponse:
                 return total
 
             if amt is not None and total < amt:
-                out = out[:total]
+                del out[total:]
             if _READ_MUST_RETURN_BYTES and type(out) is not bytes:
                 out = bytes(out)
             return out
@@ -824,7 +827,7 @@ class HTTPConnection:
             if value is not None:
                 try:
                     value = int(value, 10)
-                except (TypeError, ValueError):
+                except (TypeError, ValueError, OverflowError):
                     value = -1
                 if value >= 0 and (length is None or length == value):
                     length = value
