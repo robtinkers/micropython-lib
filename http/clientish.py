@@ -150,10 +150,12 @@ def _encode_and_validate(x, strict=False):
         for b in x:
             if b <= 32:
                 return None
-    else:
+    elif isinstance(x, memoryview):
         for b in x:
             if b == 10 or b == 13:
                 return None
+    elif b"\r" in x or b"\n" in x:
+        return None
     if not strict or type(x) is bytes:
         return x
     return bytes(x)
