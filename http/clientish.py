@@ -138,6 +138,16 @@ else:
             super().__init__(None, None)
     class InvalidURL(ValueError): pass
 
+@micropython.viper
+def _validate(haystack:ptr8, haystack_len:int, strict:int) -> int:
+    i = 0
+    while i < haystack_len:
+        x = haystack[i]
+        if x <= 32 and (strict or x == 10 or x == 13):
+            return 0
+        i += 1
+    return 1
+
 def _encode_and_validate(x, strict=False):
     if x is None:
         return None
@@ -145,15 +155,7 @@ def _encode_and_validate(x, strict=False):
         x = x.encode()
     elif not isinstance(x, _BUFFER_TYPE):
         x = str(x).encode()
-    if strict:
-        for b in x:
-            if b <= 32:
-                return None
-    elif isinstance(x, memoryview):
-        for b in x:
-            if b == 10 or b == 13:
-                return None
-    elif b"\r" in x or b"\n" in x:
+    if not _validate(x, len(x), 1 if strict else 0):
         return None
     if not strict or type(x) is bytes:
         return x
