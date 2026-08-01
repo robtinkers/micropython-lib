@@ -114,7 +114,7 @@ def _encode_and_validate(x, strict=False):
     if x is None:
         return None
     if isinstance(x, (str, memoryview)):
-        x = bytes(x)
+        x = bytes(x, "iso-8859-1")
     elif not isinstance(x, (bytes, bytearray)):
         x = str(x).encode()
     if strict:
@@ -912,7 +912,7 @@ class HTTPConnection:
 
     def _prep_request(self, body, encode_chunked):
         if isinstance(body, str):
-            body = bytes(body)
+            body = bytes(body, "utf-8")
 
         flags = self._flags
         length = self._length
@@ -975,7 +975,7 @@ class HTTPConnection:
             self._state = _CS_REQUEST_BODY_OPEN
 
         if isinstance(body, str):
-            body = bytes(body)
+            body = bytes(body, "utf-8")
 
         if isinstance(body, _BUFFER_TYPE):
             send(body)
@@ -998,7 +998,7 @@ class HTTPConnection:
             while True:
                 buf = reader(_READ_BLOCK_SIZE)
                 if isinstance(buf, str):
-                    buf = bytes(buf)
+                    buf = bytes(buf, "utf-8")
                 if not isinstance(buf, _BUFFER_TYPE):
                     raise TypeError("invalid body part")
                 if not buf:
@@ -1007,7 +1007,7 @@ class HTTPConnection:
 
         for part in body:
             if isinstance(part, str):
-                part = bytes(part)
+                part = bytes(part, "utf-8")
             if not isinstance(part, _BUFFER_TYPE):
                 raise TypeError("invalid body part")
             send(part)
