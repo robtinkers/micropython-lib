@@ -44,7 +44,6 @@ _TRANSFER_ENCODING = b"Transfer-Encoding"
 
 _CHUNKED = b"chunked"
 _CLOSE = b"close"
-b"" = b""
 
 _BUFFER_TYPE = (bytes, bytearray, memoryview)
 
