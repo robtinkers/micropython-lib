@@ -44,7 +44,7 @@ _TRANSFER_ENCODING = b"Transfer-Encoding"
 
 _CHUNKED = b"chunked"
 _CLOSE = b"close"
-_EMPTY = b""
+b"" = b""
 
 _BUFFER_TYPE = (bytes, bytearray, memoryview)
 
@@ -239,7 +239,7 @@ def _parse_status_line(sock):
             version, status, reason = parts
         elif len(parts) == 2:
             version, status = parts
-            reason = _EMPTY
+            reason = b""
         else:
             break
 
@@ -421,7 +421,7 @@ class HTTPResponse:
         return self._read_body(buf, None)
 
     def drain(self, buf=None):
-        if not buf:
+        if buf is None:
             buf = bytearray(_READ_BLOCK_SIZE)
         elif not buf:
             raise ValueError("non-empty buffer required")
@@ -495,7 +495,7 @@ class HTTPResponse:
 
             if sock is None:
                 if self._length is not None and self._count >= self._length:
-                    return 0 if into else _EMPTY
+                    return 0 if into else b""
                 raise NotConnected()
 
             if into:
@@ -506,13 +506,13 @@ class HTTPResponse:
                 amt = None
 
             if amt == 0:
-                return 0 if into else _EMPTY
+                return 0 if into else b""
 
             if self._length is not None:
                 remaining = self._length - self._count
                 if remaining == 0:
                     self.close()
-                    return 0 if into else _EMPTY
+                    return 0 if into else b""
                 if amt is None:
                     amt = remaining
                 else:
@@ -532,7 +532,7 @@ class HTTPResponse:
                     self.close()
                 return n
 
-            out = buf if into else (_EMPTY if amt is None else bytearray(amt))
+            out = buf if into else (b"" if amt is None else bytearray(amt))
             total = 0
             if amt is not None:
                 bmv = out if isinstance(out, memoryview) else memoryview(out)
@@ -715,7 +715,7 @@ class HTTPConnection:
 
             if self._head is None:
                 self._head = bytearray(_REQUEST_HEAD_SIZE)
-                self._head[:] = _EMPTY
+                self._head[:] = b""
             self._head.extend(method)
             self._head.extend(b" ")
             self._head.extend(valid_url)
@@ -814,7 +814,7 @@ class HTTPConnection:
             raise
         finally:
             if _RECYCLE_HEADER_BUFFER:
-                self._head[:] = _EMPTY
+                self._head[:] = b""
             else:
                 self._head = None
 
@@ -1066,7 +1066,7 @@ class HTTPConnection:
         self._chunked = False
 
         if _RECYCLE_HEADER_BUFFER and self._head is not None:
-            self._head[:] = _EMPTY
+            self._head[:] = b""
         else:
             self._head = None
 
