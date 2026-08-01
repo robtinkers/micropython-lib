@@ -142,9 +142,9 @@ else:
 def _encode_and_validate(x, strict=False):
     if x is None:
         return None
-    if isinstance(x, (str, memoryview)):
-        x = bytes(x, "iso-8859-1")
-    elif not isinstance(x, (bytes, bytearray)):
+    if isinstance(x, str):
+        x = x.encode()
+    elif not isinstance(x, _BUFFER_TYPE):
         x = str(x).encode()
     if strict:
         for b in x:
@@ -155,6 +155,11 @@ def _encode_and_validate(x, strict=False):
     if not strict or type(x) is bytes:
         return x
     return bytes(x)
+
+def _lower(x):
+    if isinstance(x, memoryview):
+        x = bytes(x)
+    return (x if x.islower() else x.lower())
 
 if _ENABLE_VIPER:
     @micropython.viper
@@ -342,15 +347,6 @@ def _derive_response_framing(method, version, status, response_headers):
             elif length != val:
                 length = -1
 
-        elif key is _TRANSFER_ENCODING:
-            len_val = len(val)
-            if len_val == 7:
-                chunked = bool(_equals_ci(val, _CHUNKED, 7))
-            elif len_val > 7:
-                chunked = (val if val.islower() else val.lower()).endswith(_CHUNKED)
-            else:
-                chunked = False
-
         elif key is _CONNECTION:
             if reusable is not False:
                 len_val = len(val)
@@ -359,7 +355,16 @@ def _derive_response_framing(method, version, status, response_headers):
                 elif len_val == 5:
                     reusable = not _equals_ci(val, _CLOSE, 5)
                 elif len_val > 5:
-                    reusable = _CLOSE not in (val if val.islower() else val.lower())
+                    reusable = _CLOSE not in _lower(val)
+
+        elif key is _TRANSFER_ENCODING:
+            len_val = len(val)
+            if len_val == 7:
+                chunked = bool(_equals_ci(val, _CHUNKED, 7))
+            elif len_val > 7:
+                chunked = _lower(val).endswith(_CHUNKED)
+            else:
+                chunked = False
 
     if reusable is None:
         reusable = not http10
@@ -791,7 +796,7 @@ class HTTPConnection:
                     if _equals_ci(value, _CLOSE, 5):
                         flags |= _RF_CONNECTION_CLOSE
                 elif len_value > 5:
-                    if _CLOSE in (value if value.islower() else value.lower()):
+                    if _CLOSE in _lower(value):
                         flags |= _RF_CONNECTION_CLOSE
         elif len_name == 14 and _equals_ci(name, _CONTENT_LENGTH, 14):
             flags |= _RF_CONTENT_LENGTH
@@ -815,7 +820,7 @@ class HTTPConnection:
                     if _equals_ci(value, _CHUNKED, 7):
                         flags |= _RF_TRANSFER_CHUNKED
                 elif len_value > 7:
-                    if (value if value.islower() else value.lower()).endswith(_CHUNKED):
+                    if _lower(value).endswith(_CHUNKED):
                         flags |= _RF_TRANSFER_CHUNKED
 
         self._length = length
@@ -896,7 +901,7 @@ class HTTPConnection:
             try:
                 while True:
                     version, status, reason = _parse_status_line(self._sock)
-                    response_headers = _parse_headers(self._sock, status, all_headers, and_cookies)
+                    response_headers = _parse_headers(self._sock, status, False if status == 100 else all_headers, and_cookies)
                     if status != 100:
                         break
             except OSError as e:
@@ -943,7 +948,7 @@ class HTTPConnection:
 
     def _prep_request(self, body, encode_chunked):
         if isinstance(body, str):
-            body = bytes(body, "utf-8")
+            body = body.encode()
 
         flags = self._flags
         length = self._length
@@ -1006,7 +1011,7 @@ class HTTPConnection:
             self._state = _CS_REQUEST_BODY_OPEN
 
         if isinstance(body, str):
-            body = bytes(body, "utf-8")
+            body = body.encode()
 
         if isinstance(body, _BUFFER_TYPE):
             send(body)
@@ -1029,7 +1034,7 @@ class HTTPConnection:
             while True:
                 buf = reader(_READ_BLOCK_SIZE)
                 if isinstance(buf, str):
-                    buf = bytes(buf, "utf-8")
+                    buf = buf.encode()
                 if not isinstance(buf, _BUFFER_TYPE):
                     raise TypeError("invalid body part")
                 if not buf:
@@ -1038,7 +1043,7 @@ class HTTPConnection:
 
         for part in body:
             if isinstance(part, str):
-                part = bytes(part, "utf-8")
+                part = part.encode()
             if not isinstance(part, _BUFFER_TYPE):
                 raise TypeError("invalid body part")
             send(part)
@@ -1148,4 +1153,4 @@ if _ENABLE_SSL:
                     raise ConnectError(_errno(e.errno), str(e))
                 raise ConnectError(_ENONET, str(e))
             finally:
-                gc.collect()            
+                gc.collect()
