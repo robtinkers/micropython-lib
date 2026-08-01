@@ -842,7 +842,7 @@ class HTTPConnection:
             self._abort_request()
             raise
         finally:
-            if _RECYCLE_HEADER_BUFFER:
+            if _RECYCLE_HEADER_BUFFER and len(self._head) <= _REQUEST_HEAD_SIZE:
                 self._head[:] = b""
             else:
                 self._head = None
@@ -1148,4 +1148,4 @@ if _ENABLE_SSL:
                     raise ConnectError(_errno(e.errno), str(e))
                 raise ConnectError(_ENONET, str(e))
             finally:
-                gc.collect()
+                gc.collect()            
