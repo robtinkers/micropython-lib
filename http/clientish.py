@@ -7,7 +7,6 @@ import micropython
 _COMPATISH_EXCEPTIONS = const(0)
 _DEFAULT_TIMEOUT = const(10)
 _ENABLE_SSL = const(1)
-_ENABLE_VIPER = const(1)
 _GC_FREE_THRESHOLD = const(32768)
 _READ_BLOCK_SIZE = const(2048)
 _READ_MUST_RETURN_BYTES = const(0)
@@ -160,42 +159,56 @@ def _encode_and_validate(x, strict=False):
         return x
     return bytes(x)
 
-def _lower(x):
-    if isinstance(x, memoryview):
-        x = bytes(x)
-    return (x if x.islower() else x.lower())
+@micropython.viper
+def _equals_ci(a:ptr8, b:ptr8, length:int) -> int:
+    i = 0
+    while i < length:
+        x = a[i]
+        y = b[i]
+        if x != y:
+            if 65 <= x and x <= 90:
+                x += 32
+            if 65 <= y and y <= 90:
+                y += 32
+            if x != y:
+                return 0
+        i += 1
+    return 1
 
-if _ENABLE_VIPER:
-    @micropython.viper
-    def _equals_ci(a:ptr8, b:ptr8, length:int) -> int:
-        i = 0
-        while i < length:
-            x = a[i]
-            y = b[i]
-            if x != y:
-                if 65 <= x and x <= 90:
-                    x += 32
-                if 65 <= y and y <= 90:
-                    y += 32
-                if x != y:
-                    return 0
-            i += 1
-        return 1
-else:
-    def _equals_ci(a:ptr8, b:ptr8, length:int) -> int:
-        i = 0
-        while i < length:
-            x = a[i]
-            y = b[i]
-            if x != y:
-                if 65 <= x and x <= 90:
-                    x += 32
-                if 65 <= y and y <= 90:
-                    y += 32
-                if x != y:
-                    return 0
-            i += 1
-        return 1
+@micropython.viper
+def _contains_lc(haystack:ptr8, haystack_len:int, needle:ptr8, needle_len:int) -> int:
+    if haystack_len < needle_len:
+        return 0
+    last = haystack_len - needle_len
+    i = 0
+    while i <= last:
+        j = 0
+        while j < needle_len:
+            x = haystack[i + j]
+            if 65 <= x and x <= 90:
+                x += 32
+            if x != needle[j]:
+                break
+            j += 1
+        if j == needle_len:
+            return 1
+        i += 1
+    return 0
+
+@micropython.viper
+def _endswith_lc(haystack:ptr8, haystack_len:int, needle:ptr8, needle_len:int) -> int:
+    if haystack_len < needle_len:
+        return 0
+    i = haystack_len - needle_len
+    j = 0
+    while j < needle_len:
+        x = haystack[i + j]
+        if 65 <= x and x <= 90:
+            x += 32
+        if x != needle[j]:
+            return 0
+        j += 1
+    return 1
 
 def _close_quietly(sock):
     if sock is not None:
@@ -359,16 +372,14 @@ def _derive_response_framing(method, version, status, response_headers):
                 elif len_val == 5:
                     reusable = not _equals_ci(val, _CLOSE, 5)
                 elif len_val > 5:
-                    reusable = _CLOSE not in _lower(val)
+                    reusable = not _contains_lc(val, len_val, _CLOSE, 5)
 
         elif key is _TRANSFER_ENCODING:
             len_val = len(val)
             if len_val == 7:
                 chunked = bool(_equals_ci(val, _CHUNKED, 7))
-            elif len_val > 7:
-                chunked = _lower(val).endswith(_CHUNKED)
             else:
-                chunked = False
+                chunked = bool(_endswith_lc(val, len_val, _CHUNKED, 7))
 
     if reusable is None:
         reusable = not http10
@@ -800,7 +811,7 @@ class HTTPConnection:
                     if _equals_ci(value, _CLOSE, 5):
                         flags |= _RF_CONNECTION_CLOSE
                 elif len_value > 5:
-                    if _CLOSE in _lower(value):
+                    if _contains_lc(value, len_value, _CLOSE, 5):
                         flags |= _RF_CONNECTION_CLOSE
         elif len_name == 14 and _equals_ci(name, _CONTENT_LENGTH, 14):
             flags |= _RF_CONTENT_LENGTH
@@ -824,7 +835,7 @@ class HTTPConnection:
                     if _equals_ci(value, _CHUNKED, 7):
                         flags |= _RF_TRANSFER_CHUNKED
                 elif len_value > 7:
-                    if _lower(value).endswith(_CHUNKED):
+                    if _endswith_lc(value, len_value, _CHUNKED, 7):
                         flags |= _RF_TRANSFER_CHUNKED
 
         self._length = length
