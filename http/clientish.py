@@ -740,9 +740,12 @@ class HTTPConnection:
         elif len_name == 10 and _equals_ci(name, _CONNECTION, 10):
             if value is not None:
                 len_value = len(value)
-                if ((len_value == 5 and _equals_ci(value, _CLOSE, 5)) or
-                        (len_value > 5 and value.endswith(_CLOSE))):
-                    flags |= _RF_CONNECTION_CLOSE
+                if len_value == 5:
+                    if _equals_ci(value, _CLOSE, 5):
+                        flags |= _RF_CONNECTION_CLOSE
+                elif len_value > 5:
+                    if _CLOSE in (value if value.islower() else value.lower()):
+                        flags |= _RF_CONNECTION_CLOSE
         elif len_name == 14 and _equals_ci(name, _CONTENT_LENGTH, 14):
             flags |= _RF_CONTENT_LENGTH
             if value is not None:
@@ -761,10 +764,12 @@ class HTTPConnection:
             if value is not None:
                 len_value = len(value)
                 flags &= ~ _RF_TRANSFER_CHUNKED
-                if len_value == 7 and _equals_ci(value, _CHUNKED, 7):
-                    flags |= _RF_TRANSFER_CHUNKED
-                elif len_value > 7 and value.endswith(_CHUNKED):
-                    flags |= _RF_TRANSFER_CHUNKED
+                if len_value == 7:
+                    if _equals_ci(value, _CHUNKED, 7):
+                        flags |= _RF_TRANSFER_CHUNKED
+                elif len_value > 7:
+                    if (value if value.islower() else value.lower()).endswith(_CHUNKED):
+                        flags |= _RF_TRANSFER_CHUNKED
 
         self._length = length
         self._flags = flags
