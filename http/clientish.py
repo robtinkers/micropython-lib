@@ -63,7 +63,7 @@ _ENETUNREACH = getattr(errno, "ENETUNREACH", 101)
 _EHOSTDOWN = getattr(errno, "EHOSTDOWN", 112)
 _EHOSTUNREACH = getattr(errno, "EHOSTUNREACH", 113)
 
-def _errno_map(err):
+def _errno(err):
     return err or 0
 
 class HTTPException(Exception): pass
@@ -278,12 +278,7 @@ def _parse_headers(sock, status, all_headers, and_cookies):
 
         name = None
         for cand in _KEEP_RESPONSE_HEADERS:
-            len_cand = len(cand)
-            if len_cand < pos:
-                continue
-            elif len_cand > pos:
-                break
-            elif _equals_ci(line, cand, pos):
+            if len(cand) = pos and _equals_ci(line, cand, pos):
                 name = cand
                 break
 
@@ -592,7 +587,7 @@ class HTTPResponse:
             self._release_socket(False)
             raise
         except OSError as e:
-            self._abort_read("socket read failed", _errno_map(e.errno))
+            self._abort_read("socket read failed", _errno(e.errno))
 
 class HTTPConnection:
     default_port = HTTP_PORT
@@ -867,7 +862,7 @@ class HTTPConnection:
                 version, status, reason = _parse_status_line(self._sock)
                 response_headers = _parse_headers(self._sock, status, all_headers, and_cookies)
             except OSError as e:
-                raise IncompleteRead(_errno_map(e.errno), "socket read failed", None, None, status)
+                raise IncompleteRead(_errno(e.errno), "socket read failed", None, None, status)
 
             response_chunked, response_length, reusable = _derive_response_framing(
                 self.method, version, status, response_headers)
@@ -1020,7 +1015,7 @@ class HTTPConnection:
             self._sock.sendall(data)
         except OSError as e:
             raise IncompleteWrite(
-                _errno_map(e.errno),
+                _errno(e.errno),
                 "socket write failed",
                 self._count,
                 self._length)
@@ -1052,7 +1047,7 @@ class HTTPConnection:
                 gc.collect()
             self._sock = create_connection((self._hostaddr, self.port), self._timeout)
         except OSError as e:
-            raise ConnectError(_errno_map(e.errno), str(e))
+            raise ConnectError(_errno(e.errno), str(e))
 
     def _reset_request(self):
         self._state = _CS_IDLE
@@ -1114,7 +1109,7 @@ if _ENABLE_SSL:
                 if isinstance(e, MemoryError):
                     raise
                 if isinstance(e, OSError):
-                    raise ConnectError(_errno_map(e.errno), str(e))
+                    raise ConnectError(_errno(e.errno), str(e))
                 raise ConnectError(_ENONET, str(e))
             finally:
                 gc.collect()
