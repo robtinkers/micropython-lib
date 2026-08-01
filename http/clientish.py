@@ -2,6 +2,8 @@
 #
 # Serious HTTP for tiny devices.
 
+import micropython
+
 _COMPATISH_EXCEPTIONS = const(0)
 _DEFAULT_TIMEOUT = const(10)
 _ENABLE_SSL = const(1)
@@ -12,7 +14,7 @@ _READ_MUST_RETURN_BYTES = const(0)
 _RECYCLE_HEADER_BUFFER = const(1)
 _REQUEST_HEAD_SIZE = const(512)
 
-import micropython, socket, errno, gc
+import socket, errno, gc
 if _ENABLE_SSL:
     import ssl
 
