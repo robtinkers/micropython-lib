@@ -1034,9 +1034,10 @@ class HTTPConnection:
 
         reader = getattr(body, "readinto", None)
         if callable(reader):
-            size = _READ_BLOCK_SIZE
-            if self._length is not None:
-                size = min(size, max(1, self._length - self._count))
+            if self._length is None:
+                size = _READ_BLOCK_SIZE
+            else:
+                size = max(_READ_BLOCK_SIZE >> 3, min(_READ_BLOCK_SIZE, self._length - self._count))
             buf = bytearray(size)
             bmv = memoryview(buf)
             while True:
