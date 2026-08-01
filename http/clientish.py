@@ -46,17 +46,19 @@ _TRANSFER_ENCODING = b"Transfer-Encoding"
 _CHUNKED = b"chunked"
 _CLOSE = b"close"
 
-_BUFFER_TYPE = (bytes, bytearray, memoryview)
+_READ_BLOCK_SIZE_HEXCRLF = b"%X\r\n" % _READ_BLOCK_SIZE
+
+_BUFFER_TYPES = (bytes, bytearray, memoryview)
 
 _KEEP_RESPONSE_HEADERS = (
-    b"ETag",
-    b"Location",
-    _SET_COOKIE,
-    _CONNECTION,
-    b"Retry-After",
-    _CONTENT_TYPE,
     _CONTENT_LENGTH,
     _TRANSFER_ENCODING,
+    _CONNECTION,
+    _CONTENT_TYPE,
+    _SET_COOKIE,
+    b"Location",
+    b"ETag",
+    b"Retry-After",
 )
 
 _ENONET = getattr(errno, "ENONET", 64)
@@ -213,7 +215,7 @@ def _encode_and_validate(x, strict=0):
         return None
     if isinstance(x, str):
         x = x.encode()
-    elif not isinstance(x, _BUFFER_TYPE):
+    elif not isinstance(x, _BUFFER_TYPES):
         x = str(x).encode()
     if not _validate(x, len(x), strict):
         return None
@@ -327,7 +329,8 @@ def _parse_headers(sock, status, all_headers, and_cookies):
     if and_cookies is None:
         and_cookies = all_headers
 
-    headers = []
+    headers = None if all_headers is None else []
+
     while True:
         line = sock.readline()
         if not line:
@@ -341,6 +344,9 @@ def _parse_headers(sock, status, all_headers, and_cookies):
 
         pos = line.find(b":")
         if pos == -1:
+            continue
+
+        if headers is None:
             continue
 
         name = None
@@ -645,6 +651,7 @@ class HTTPResponse:
                 return total
 
             if amt is not None and total < amt:
+                bmv = None
                 del out[total:]
             if _READ_MUST_RETURN_BYTES and type(out) is not bytes:
                 out = bytes(out)
@@ -912,14 +919,14 @@ class HTTPConnection:
                 if self._length is not None and self._count != self._length:
                     raise RequestLengthMismatch(self._count, self._length)
 
-            status = None
             if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
                 gc.collect()
 
+            status = None
             try:
                 while True:
                     version, status, reason = _parse_status_line(self._sock)
-                    response_headers = _parse_headers(self._sock, status, False if status == 100 else all_headers, and_cookies)
+                    response_headers = _parse_headers(self._sock, status, None if status == 100 else all_headers, and_cookies)
                     if status != 100:
                         break
             except OSError as e:
@@ -977,7 +984,7 @@ class HTTPConnection:
             chunked = bool(flags & _RF_TRANSFER_CHUNKED)
         elif flags & _RF_CONTENT_LENGTH:
             chunked = False
-        elif isinstance(body, _BUFFER_TYPE):
+        elif isinstance(body, _BUFFER_TYPES):
             chunked = False
             length = len(body)
         else:
@@ -1031,7 +1038,7 @@ class HTTPConnection:
         if isinstance(body, str):
             body = body.encode()
 
-        if isinstance(body, _BUFFER_TYPE):
+        if isinstance(body, _BUFFER_TYPES):
             send(body)
             return
 
@@ -1057,7 +1064,7 @@ class HTTPConnection:
                 buf = reader(_READ_BLOCK_SIZE)
                 if isinstance(buf, str):
                     buf = buf.encode()
-                if not isinstance(buf, _BUFFER_TYPE):
+                if not isinstance(buf, _BUFFER_TYPES):
                     raise TypeError("invalid body part")
                 if not buf:
                     return
@@ -1067,7 +1074,7 @@ class HTTPConnection:
         for part in body:
             if isinstance(part, str):
                 part = part.encode()
-            if not isinstance(part, _BUFFER_TYPE):
+            if not isinstance(part, _BUFFER_TYPES):
                 raise TypeError("invalid body part")
             send(part)
             part = None
@@ -1093,7 +1100,12 @@ class HTTPConnection:
     def _send_chunk(self, data):
         if not data:
             return
-        self._send_bytes(b"%X\r\n" % len(data), False)
+        len_data = len(data)
+        if len_data == _READ_BLOCK_SIZE:
+            head = _READ_BLOCK_SIZE_HEXCRLF
+        else:
+            head = b"%X\r\n" % len_data
+        self._send_bytes(head, False)
         self._send_bytes(data)
         self._send_bytes(b"\r\n", False)
 
