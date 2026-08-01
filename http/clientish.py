@@ -377,20 +377,13 @@ def _derive_response_framing(method, version, status, response_headers):
 
         elif key is _CONNECTION:
             if reusable is not False:
-                len_val = len(val)
                 if http10:
-                    reusable = (len_val == 10 and _equals_ci(val, b"keep-alive", 10))
-                elif len_val == 5:
-                    reusable = not _equals_ci(val, _CLOSE, 5)
-                elif len_val > 5:
-                    reusable = not _contains_lc(val, len_val, _CLOSE, 5)
+                    reusable = (len(val) == 10 and _equals_ci(val, b"keep-alive", 10))
+                else:
+                    reusable = not _contains_lc(val, len(val), _CLOSE, 5)
 
         elif key is _TRANSFER_ENCODING:
-            len_val = len(val)
-            if len_val == 7:
-                chunked = bool(_equals_ci(val, _CHUNKED, 7))
-            else:
-                chunked = bool(_endswith_lc(val, len_val, _CHUNKED, 7))
+            chunked = bool(_endswith_lc(val, len(val), _CHUNKED, 7))
 
     if reusable is None:
         reusable = not http10
@@ -481,7 +474,13 @@ class HTTPResponse:
 
     def drain(self, buf=None):
         if buf is None:
-            buf = bytearray(_READ_BLOCK_SIZE)
+            size = _READ_BLOCK_SIZE
+            if self._length is not None:
+                size = min(size, self._length - self._count)
+                if size <= 0:
+                    self.close()
+                    return
+            buf = bytearray(size)
         elif not buf:
             raise ValueError("non-empty buffer required")
         while self.readinto(buf):
@@ -637,6 +636,7 @@ class HTTPResponse:
                         if type(out) is bytes:
                             out = bytearray(out)
                         out.extend(data)
+                    data = None
 
             if into:
                 return total
@@ -648,8 +648,8 @@ class HTTPResponse:
             return out
         except (MemoryError, OverflowError):
             out = bmv = data = None
-            gc.collect()
             self._release_socket(False)
+            gc.collect()
             raise
         except OSError as e:
             self._abort_read("socket read failed", _errno(e.errno))
@@ -786,8 +786,9 @@ class HTTPConnection:
             if skip_accept_encoding:
                 self._flags |= _RF_ACCEPT_ENCODING
         except MemoryError:
-            gc.collect()
+            self._head = None
             self._reset_request()
+            gc.collect()
             raise
 
     def putheader(self, name, value):
@@ -816,14 +817,8 @@ class HTTPConnection:
         if len_name == 4 and _equals_ci(name, _HOST, 4):
             flags |= _RF_HOST
         elif len_name == 10 and _equals_ci(name, _CONNECTION, 10):
-            if value is not None:
-                len_value = len(value)
-                if len_value == 5:
-                    if _equals_ci(value, _CLOSE, 5):
-                        flags |= _RF_CONNECTION_CLOSE
-                elif len_value > 5:
-                    if _contains_lc(value, len_value, _CLOSE, 5):
-                        flags |= _RF_CONNECTION_CLOSE
+            if value is not None and _contains_lc(value, len(value), _CLOSE, 5):
+                flags |= _RF_CONNECTION_CLOSE
         elif len_name == 14 and _equals_ci(name, _CONTENT_LENGTH, 14):
             flags |= _RF_CONTENT_LENGTH
             if value is not None:
@@ -840,14 +835,9 @@ class HTTPConnection:
         elif len_name == 17 and _equals_ci(name, _TRANSFER_ENCODING, 17):
             flags |= _RF_TRANSFER_ENCODING
             if value is not None:
-                len_value = len(value)
-                flags &= ~ _RF_TRANSFER_CHUNKED
-                if len_value == 7:
-                    if _equals_ci(value, _CHUNKED, 7):
-                        flags |= _RF_TRANSFER_CHUNKED
-                elif len_value > 7:
-                    if _endswith_lc(value, len_value, _CHUNKED, 7):
-                        flags |= _RF_TRANSFER_CHUNKED
+                flags &= ~_RF_TRANSFER_CHUNKED
+                if _endswith_lc(value, len(value), _CHUNKED, 7):
+                    flags |= _RF_TRANSFER_CHUNKED
 
         self._length = length
         self._flags = flags
@@ -866,17 +856,16 @@ class HTTPConnection:
             if self._sock is None:
                 self._open_socket()
             self._send_bytes(self._head, False)
+            if _RECYCLE_HEADER_BUFFER and len(self._head) <= _REQUEST_HEAD_SIZE:
+                self._head[:] = b""
+            else:
+                self._head = None
             self._count = 0
             self._state = _CS_REQUEST_HEAD_OPEN
             self._send_body(body)
         except Exception:
             self._abort_request()
             raise
-        finally:
-            if _RECYCLE_HEADER_BUFFER and self._head is not None and len(self._head) <= _REQUEST_HEAD_SIZE:
-                self._head[:] = b""
-            else:
-                self._head = None
 
     def send(self, body):
         if self._state != _CS_REQUEST_HEAD_OPEN and self._state != _CS_REQUEST_BODY_OPEN:
@@ -1045,15 +1034,18 @@ class HTTPConnection:
 
         reader = getattr(body, "readinto", None)
         if callable(reader):
-            buf = bytearray(_READ_BLOCK_SIZE)
+            size = _READ_BLOCK_SIZE
+            if self._length is not None:
+                size = min(size, max(1, self._length - self._count))
+            buf = bytearray(size)
             bmv = memoryview(buf)
             while True:
                 n = reader(buf)
-                if type(n) is not int or n < 0 or n > _READ_BLOCK_SIZE:
+                if type(n) is not int or n < 0 or n > size:
                     raise TypeError("invalid body part")
                 if not n:
                     return
-                send(bmv if n == _READ_BLOCK_SIZE else bmv[:n])
+                send(bmv if n == size else bmv[:n])
 
         reader = getattr(body, "read", None)
         if callable(reader):
@@ -1066,6 +1058,7 @@ class HTTPConnection:
                 if not buf:
                     return
                 send(buf)
+                buf = None
 
         for part in body:
             if isinstance(part, str):
@@ -1073,6 +1066,7 @@ class HTTPConnection:
             if not isinstance(part, _BUFFER_TYPE):
                 raise TypeError("invalid body part")
             send(part)
+            part = None
 
     def _send_bytes(self, data, accounting=True):
         if self._sock is None:
