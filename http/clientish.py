@@ -150,8 +150,10 @@ def _encode_and_validate(x, strict=False):
         for b in x:
             if b <= 32:
                 return None
-    elif b"\r" in x or b"\n" in x:
-        return None
+    else:
+        for b in x:
+            if b == 10 or b == 13:
+                return None
     if not strict or type(x) is bytes:
         return x
     return bytes(x)
@@ -847,7 +849,7 @@ class HTTPConnection:
             self._abort_request()
             raise
         finally:
-            if _RECYCLE_HEADER_BUFFER and len(self._head) <= _REQUEST_HEAD_SIZE:
+            if _RECYCLE_HEADER_BUFFER and self._head is not None and len(self._head) <= _REQUEST_HEAD_SIZE:
                 self._head[:] = b""
             else:
                 self._head = None
@@ -1102,7 +1104,7 @@ class HTTPConnection:
         self._flags = 0
         self._chunked = False
 
-        if _RECYCLE_HEADER_BUFFER and self._head is not None:
+        if _RECYCLE_HEADER_BUFFER and self._head is not None and len(self._head) <= _REQUEST_HEAD_SIZE:
             self._head[:] = b""
         else:
             self._head = None
