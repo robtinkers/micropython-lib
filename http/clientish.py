@@ -332,7 +332,6 @@ def _parse_headers(sock, status, all_headers, and_cookies):
     headers = None if all_headers is None else []
 
     while True:
-        line = None
         line = sock.readline()
         if not line:
             raise IncompleteRead(None, "connection closed while reading response headers", None, None, status)
