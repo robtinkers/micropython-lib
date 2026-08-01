@@ -155,39 +155,48 @@ def _equals_ci(a:ptr8, b:ptr8, length:int) -> int:
     return 1
 
 @micropython.viper
-def _contains_lc(haystack:ptr8, haystack_len:int, needle:ptr8, needle_len:int) -> int:
+def _endswith_lc(haystack: ptr8, haystack_len: int, needle: ptr8, needle_len: int) -> int:
     if haystack_len < needle_len:
         return 0
-    last = haystack_len - needle_len
-    i = 0
-    while i <= last:
-        j = 0
-        while j < needle_len:
-            x = haystack[i + j]
+    while needle_len:
+        haystack_len -= 1
+        needle_len -= 1
+        x = haystack[haystack_len]
+        y = needle[needle_len]
+        if x != y:
             if 65 <= x and x <= 90:
                 x += 32
-            if x != needle[j]:
-                break
+            if x != y:
+                return 0
+    return 1
+
+@micropython.viper
+def _contains_lc(haystack:ptr8, haystack_len:int, needle:ptr8, needle_len:int) -> int:
+    if needle_len == 0:
+        return 1
+    if haystack_len < needle_len:
+        return 0
+    haystack_len -= needle_len
+    first = needle[0]
+    i = 0
+    while i <= haystack_len:
+        x = haystack[i]
+        if x != first:
+            if x < 65 or x > 90 or x + 32 != first:
+                i += 1
+                continue
+        j = 1
+        while j < needle_len:
+            x = haystack[i + j]
+            y = needle[j]
+            if x != y:
+                if x < 65 or x > 90 or x + 32 != y:
+                    break
             j += 1
         if j == needle_len:
             return 1
         i += 1
     return 0
-
-@micropython.viper
-def _endswith_lc(haystack:ptr8, haystack_len:int, needle:ptr8, needle_len:int) -> int:
-    if haystack_len < needle_len:
-        return 0
-    i = haystack_len - needle_len
-    j = 0
-    while j < needle_len:
-        x = haystack[i + j]
-        if 65 <= x and x <= 90:
-            x += 32
-        if x != needle[j]:
-            return 0
-        j += 1
-    return 1
 
 @micropython.viper
 def _validate(haystack:ptr8, haystack_len:int, strict:int) -> int:
