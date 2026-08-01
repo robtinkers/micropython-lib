@@ -2,22 +2,23 @@
 #
 # Serious HTTP for tiny devices.
 
+_COMPATISH_EXCEPTIONS = const(0)
+_DEFAULT_TIMEOUT = const(10)
+_ENABLE_SSL = const(1)
+_ENABLE_VIPER = const(1)
+_GC_FREE_THRESHOLD = const(32768)
+_READ_BLOCK_SIZE = const(2048)
+_READ_MUST_RETURN_BYTES = const(0)
+_RECYCLE_HEADER_BUFFER = const(1)
+_REQUEST_HEAD_SIZE = const(512)
+
 import micropython, socket, errno, gc
+if _ENABLE_SSL:
+    import ssl
 
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
 OK = const(200)
-
-_COMPATISH_EXCEPTIONS = const(0)
-_ENABLE_SSL = const(1)
-_ENABLE_VIPER = const(1)
-_READ_MUST_RETURN_BYTES = const(0)
-_RECYCLE_HEADER_BUFFER = const(1)
-
-_DEFAULT_TIMEOUT = const(10)
-_GC_FREE_THRESHOLD = const(32768)
-_READ_BLOCK_SIZE = const(2048)
-_REQUEST_HEAD_SIZE = const(512)
 
 _RF_HOST = const(1)
 _RF_CONNECTION_CLOSE = const(4)
@@ -1115,8 +1116,6 @@ class HTTPConnection:
             self._reset_request()
 
 if _ENABLE_SSL:
-
-    import ssl
 
     class HTTPSConnection(HTTPConnection):
         default_port = HTTPS_PORT
