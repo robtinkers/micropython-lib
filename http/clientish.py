@@ -8,6 +8,7 @@ HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
 OK = const(200)
 
+_COMPATISH_EXCEPTIONS = const(0)
 _ENABLE_SSL = const(1)
 _ENABLE_VIPER = const(1)
 _READ_MUST_RETURN_BYTES = const(0)
@@ -74,41 +75,66 @@ class ResponseNotReady(ImproperConnectionState): pass
 class NotConnected(ImproperConnectionState): pass
 
 class BadStatusLine(HTTPException):
-    def __init__(self, value):
-        super().__init__(value)
-        self.line = value
+    def __init__(self, line):
         self.errno = None
+        self.args = line,
+        self.line = line
 
-class UnknownProtocol(BadStatusLine): pass
+if _COMPATISH_EXCEPTIONS:
+    class UnknownProtocol(HTTPException):
+        def __init__(self, version):
+            self.errno = None
+            self.args = version,
+            self.version = version
+else:
+    class UnknownProtocol(BadStatusLine): pass
 
 class RequestLengthMismatch(HTTPException):
     def __init__(self, observed, expected):
-        super().__init__()
-        self.value = None
-        self.observed = observed
-        self.expected = expected
+        self.errno = None
+        if _COMPATISH_EXCEPTIONS:
+            self.partial = observed
+            if type(observed) is int and type(expected) is int:
+                self.expected = expected - observed
+            else:
+                self.expected = None
+        else:
+            self.observed = observed
+            self.expected = expected
+        self.args = (observed, self.expected)
 
 class TransportError(HTTPException):
-    def __init__(self, error, value, _count=None, _length=None, _status=None):
-        super().__init__(error, value)
-        self.value = value
-        self.count = _count
-        self.length = _length
-        if type(_count) is int and type(_length) is int:
-            self.expected = _length - _count
-        else:
-            self.expected = None
+    def __init__(self, error, message, _count=None, _length=None, _status=None):
+        self.errno = error
+        self.message = message
         self.status = _status
+        if _COMPATISH_EXCEPTIONS:
+            self.partial = _count
+            if type(_count) is int and type(_length) is int:
+                self.expected = _length - _count
+            else:
+                try: self.expected = _length - len(_count)
+                except Exception: self.expected = None
+            self.args = _count,
+        else:
+            self.count = _count
+            self.length = _length
+            self.args = (error, message)
 
 class ConnectError(TransportError): pass
 class IncompleteWrite(TransportError): pass
 class IncompleteRead(TransportError): pass
 
-class RemoteDisconnected(IncompleteRead):
-    def __init__(self):
-        super().__init__(None, None)
-
-class InvalidURL(ValueError): pass
+if _COMPATISH_EXCEPTIONS:
+    class RemoteDisconnected(BadStatusLine):
+        def __init__(self):
+            super().__init__(None)
+    class InvalidURL(HTTPException): pass
+else:
+    class RemoteDisconnected(IncompleteRead):
+        def __init__(self):
+            super().__init__(None, None)
+    class InvalidURL(ValueError): pass
 
 def _encode_and_validate(x, strict=False):
     if x is None:
@@ -246,6 +272,8 @@ def _parse_status_line(sock):
             version = 10
         elif version.startswith(b"TTP/1."):
             version = 11
+        elif _COMPATISH_EXCEPTIONS:
+            raise UnknownProtocol(first + version)
         else:
             raise UnknownProtocol(first + line)
 
