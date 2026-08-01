@@ -411,6 +411,14 @@ class HTTPResponse:
             raise TypeError("buffer required")
         return self._read_body(buf, None)
 
+    def drain(self, buf=None):
+        if buf is None:
+            buf = bytearray(_READ_BLOCK_SIZE)
+        elif not buf:
+            raise ValueError("non-empty buffer required")
+        while self.readinto(buf):
+            pass
+
     def detach(self):
         sock = self._sock
         if sock is None:
