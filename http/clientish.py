@@ -593,6 +593,7 @@ class HTTPResponse:
             self._abort_read("socket read failed", _errno(e.errno))
 
 class HTTPConnection:
+    response_class = HTTPResponse
     default_port = HTTP_PORT
 
     def __init__(self, host, port=None, *, timeout=_DEFAULT_TIMEOUT, network=None):
@@ -1090,7 +1091,6 @@ if _ENABLE_SSL:
     import ssl
 
     class HTTPSConnection(HTTPConnection):
-        response_class = HTTPResponse
         default_port = HTTPS_PORT
 
         def __init__(self, host, port=None, *,
