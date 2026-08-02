@@ -22,6 +22,12 @@ HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
 OK = const(200)
 
+ENONET = getattr(errno, "ENONET", 64)
+ENETDOWN = getattr(errno, "ENETDOWN", 100)
+ENETUNREACH = getattr(errno, "ENETUNREACH", 101)
+EHOSTDOWN = getattr(errno, "EHOSTDOWN", 112)
+EHOSTUNREACH = getattr(errno, "EHOSTUNREACH", 113)
+
 _RF_HOST = const(1)
 _RF_CONNECTION_CLOSE = const(4)
 _RF_CONTENT_LENGTH = const(8)
@@ -33,8 +39,9 @@ _CS_IDLE = const(0)
 _CS_REQUEST_BUILDING = const(1)
 _CS_REQUEST_HEAD_OPEN = const(2)
 _CS_REQUEST_BODY_OPEN = const(3)
-_CS_RESPONSE_ACTIVE = const(4)
-_CS_RESPONSE_REUSABLE = const(5)
+_CS_RESPONSE_CREATING = const(4)
+_CS_RESPONSE_ACTIVE = const(5)
+_CS_RESPONSE_REUSABLE = const(6)
 
 _ACCEPT_ENCODING = b"Accept-Encoding"
 _CONNECTION = b"Connection"
@@ -59,12 +66,6 @@ _KEEP_RESPONSE_HEADERS = (
     b"ETag",
     b"Retry-After",
 )
-
-_ENONET = getattr(errno, "ENONET", 64)
-_ENETDOWN = getattr(errno, "ENETDOWN", 100)
-_ENETUNREACH = getattr(errno, "ENETUNREACH", 101)
-_EHOSTDOWN = getattr(errno, "EHOSTDOWN", 112)
-_EHOSTUNREACH = getattr(errno, "EHOSTUNREACH", 113)
 
 def _errno(err):
     return err or 0
@@ -237,7 +238,7 @@ def create_connection(address, timeout=None, *, resolver=None):
     try:
         infos = resolver(address[0], address[1], 0, socket.SOCK_STREAM)
     except OSError as e:
-        raise OSError(_EHOSTDOWN, str(e))
+        raise OSError(EHOSTDOWN, str(e))
 
     exc = None
     for info in infos:
@@ -259,7 +260,7 @@ def create_connection(address, timeout=None, *, resolver=None):
             _close_quietly(sock)
             raise
     if exc is None:
-        raise OSError(_EHOSTUNREACH, "host unreachable")
+        raise OSError(EHOSTUNREACH, "host unreachable")
     raise exc
 
 def _parse_hostport_from_url(url):
@@ -376,6 +377,8 @@ def _derive_response_framing(method, version, status, response_headers):
         if key is _CONTENT_LENGTH:
             try:
                 val = int(val, 10)
+                if val < 0:
+                    val = -1
             except (OverflowError, ValueError):
                 val = -1
             if length is None:
@@ -406,7 +409,7 @@ def _derive_response_framing(method, version, status, response_headers):
         return False, None, False
 
     if status < 200 or status == 204:
-        return False, 0, (reusable and chunked is None and length is None)
+        return False, 0, (reusable and chunked is None and (length is None or (length == 0 and status == 204)))
 
     if method == b"HEAD" or status == 304:
         return False, 0, (reusable and length != -1)
@@ -498,9 +501,10 @@ class HTTPResponse:
         sock = self._sock
         if sock is None:
             raise NotConnected()
-        if self._owner is not None:
-            self._owner._release_response(self, None, None)
+        owner = self._owner
         self._sock = self._owner = None
+        if owner is not None:
+            owner._release_response(self, None, None)
         return sock
 
     def close(self):
@@ -511,10 +515,11 @@ class HTTPResponse:
         raise IncompleteRead(error, message, self._count, self._length, self.status)
 
     def _release_socket(self, complete):
-        if self._owner is not None:
-            self._owner._release_response(
-                self, self._sock, complete)
+        sock = self._sock
+        owner = self._owner
         self._sock = self._owner = None
+        if owner is not None:
+            owner._release_response(self, sock, complete)
 
     def _get_chunk_left(self):
         while True:
@@ -574,7 +579,7 @@ class HTTPResponse:
 
             if self._length is not None:
                 n = self._length - self._count
-                if n == 0:
+                if n <= 0:
                     self.close()
                     return 0 if into else b""
                 if amt is None or n < amt:
@@ -731,6 +736,8 @@ class HTTPConnection:
         if self._state != _CS_IDLE:
             raise CannotSendRequest()
         self.close()
+        if self._state != _CS_IDLE or self._sock is not None:
+            raise CannotSendRequest()
         self._open_socket()
 
     def close(self):
@@ -951,18 +958,23 @@ class HTTPConnection:
                 reusable = reusable and not (self._flags & _RF_CONNECTION_CLOSE)
                 owner = self
 
+            self._state = _CS_RESPONSE_CREATING
+
             resp = self.response_class(
                 owner, sock, self.method, self.url,
                 version, status, reason, response_headers,
                 response_chunked, response_length)
 
+            if self._state != _CS_RESPONSE_CREATING:
+                raise ResponseNotReady()
+
             if sock is None:
+                self._state = _CS_RESPONSE_ACTIVE
                 return resp
 
             self._sock = None
             self._resp = resp
-            if reusable:
-                self._state = _CS_RESPONSE_REUSABLE
+            self._state = _CS_RESPONSE_REUSABLE if reusable else _CS_RESPONSE_ACTIVE
 
             if response_length == 0 and status != 101:
                 resp.close()
@@ -1035,15 +1047,15 @@ class HTTPConnection:
         if callable(body):
             body = body()
 
+        if isinstance(body, str):
+            body = body.encode()
+
         if body is None:
             return
 
         if self._state == _CS_REQUEST_HEAD_OPEN:
             self._send_bytes(b"\r\n", False)
             self._state = _CS_REQUEST_BODY_OPEN
-
-        if isinstance(body, str):
-            body = body.encode()
 
         if isinstance(body, _BUFFER_TYPES):
             send(body)
@@ -1113,6 +1125,7 @@ class HTTPConnection:
         self._send_bytes(b"\r\n", False)
 
     def _open_socket(self):
+        state = self._state
         try:
             network = self._network
             if network is not None:
@@ -1121,9 +1134,11 @@ class HTTPConnection:
                 except (MemoryError, OSError):
                     raise
                 except Exception as e:
-                    raise OSError(_ENETDOWN, str(e))
+                    raise OSError(ENETDOWN, str(e))
+                if self._state != state or self._sock is not None:
+                    raise CannotSendRequest()
                 if not network:
-                    raise OSError(_ENETUNREACH, "network unreachable")
+                    raise OSError(ENETUNREACH, "network unreachable")
 
             if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
                 gc.collect()
@@ -1156,10 +1171,10 @@ class HTTPConnection:
             if resp is not None and not resp.closed:
                 resp_sock = resp.detach()
         finally:
+            self._reset_request()
             if resp_sock is not sock:
                 _close_quietly(resp_sock)
             _close_quietly(sock)
-            self._reset_request()
 
 if _ENABLE_SSL:
 
@@ -1176,22 +1191,23 @@ if _ENABLE_SSL:
 
         def _open_socket(self):
             super()._open_socket()
-            raw = self._sock
+            raw, self._sock = self._sock, None
             gc.collect()
             try:
                 if self._hostname:
                     self._sock = self._context.wrap_socket(raw, server_hostname=self._hostname)
                 else:
                     self._sock = self._context.wrap_socket(raw)
+                raw = None
             except MemoryError:
-                self._sock = None
                 _close_quietly(raw)
+                raw = None
                 raise
             except Exception as e:
-                self._sock = None
                 _close_quietly(raw)
+                raw = None
                 if isinstance(e, OSError):
                     raise ConnectError(_errno(e.errno), str(e))
-                raise ConnectError(_ENONET, str(e))
+                raise ConnectError(ENONET, str(e))
             finally:
                 gc.collect()
