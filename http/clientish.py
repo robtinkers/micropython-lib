@@ -235,7 +235,7 @@ def create_connection(address, timeout=None, *, resolver=None):
     if resolver is None:
         resolver = socket.getaddrinfo
     try:
-        infos = resolver(address[0], addres[1], 0, socket.SOCK_STREAM)
+        infos = resolver(address[0], address[1], 0, socket.SOCK_STREAM)
     except OSError as e:
         raise OSError(_EHOSTDOWN, str(e))
 
@@ -292,16 +292,14 @@ def _parse_status_line(sock):
         if first != b"H":
             raise BadStatusLine(first + b"...")
         line = sock.readline()
-        if not line.endswith(b"\n"):
-            break
-        if not line.startswith(b"TTP/"):
+        if not line.startswith(b"TTP/") or line[-1] != 10:
             break
 
-        parts = line.split(None, 2)
-        if len(parts) == 3:
-            version, status, reason = parts
-        elif len(parts) == 2:
-            version, status = parts
+        status = line.split(None, 2)
+        if len(status) == 3:
+            version, status, reason = status
+        elif len(status) == 2:
+            version, status = status
             reason = b""
         else:
             break
@@ -335,9 +333,9 @@ def _parse_headers(sock, status, all_headers, and_cookies):
         line = None
         line = sock.readline()
         if not line:
-            raise IncompleteRead(None, "connection closed while reading response headers", None, None, status)
-        if not line.endswith(b"\n"):
-            raise IncompleteRead(None, "incomplete response header line", None, None, status)
+            raise IncompleteRead(None, "EOF in response headers", None, None, status)
+        if line[-1] != 10:
+            raise IncompleteRead(None, "unterminated response header", None, None, status)
         if line == b"\r\n" or line == b"\n":
             return headers
         if headers is None:
@@ -378,7 +376,7 @@ def _derive_response_framing(method, version, status, response_headers):
         if key is _CONTENT_LENGTH:
             try:
                 val = int(val, 10)
-            except (TypeError, ValueError, OverflowError):
+            except (OverflowError, ValueError):
                 val = -1
             if length is None:
                 length = val
@@ -413,10 +411,10 @@ def _derive_response_framing(method, version, status, response_headers):
     if method == b"HEAD" or status == 304:
         return False, 0, (reusable and length != -1)
 
-    if chunked:
+    if chunked is True:
         return True, None, reusable
 
-    if chunked is not None:
+    if chunked is False:
         if length is not None and length >= 0:
             return False, length, False
         return False, None, False
@@ -492,7 +490,7 @@ class HTTPResponse:
                     return
             buf = bytearray(size)
         elif not buf:
-            raise ValueError("non-empty buffer required")
+            raise ValueError("empty buffer")
         while self.readinto(buf):
             pass
 
@@ -500,9 +498,8 @@ class HTTPResponse:
         sock = self._sock
         if sock is None:
             raise NotConnected()
-        owner = self._owner
-        if owner is not None:
-            owner._release_response(self, None, None)
+        if self._owner is not None:
+            self._owner._release_response(self, None, None)
         self._sock = self._owner = None
         return sock
 
@@ -514,10 +511,9 @@ class HTTPResponse:
         raise IncompleteRead(error, message, self._count, self._length, self.status)
 
     def _release_socket(self, complete):
-        sock = self._sock
-        owner = self._owner
-        if owner is not None:
-            owner._release_response(self, sock, complete)
+        if self._owner is not None:
+            self._owner._release_response(
+                self, self._sock, complete)
         self._sock = self._owner = None
 
     def _get_chunk_left(self):
@@ -525,7 +521,7 @@ class HTTPResponse:
             if self._chunk_left is None:
                 line = self._sock.readline()
                 if not line:
-                    self._abort_read("unexpected EOF before chunk size")
+                    self._abort_read("EOF before chunk size")
                 pos = line.find(b";")
                 try:
                     if pos >= 0:
@@ -533,7 +529,7 @@ class HTTPResponse:
                     size = int(line, 16)
                     if size < 0:
                         self._abort_read("negative chunk size")
-                except ValueError:
+                except (OverflowError, ValueError):
                     self._abort_read("invalid chunk size")
                 if size > 0:
                     self._chunk_left = size
@@ -545,11 +541,11 @@ class HTTPResponse:
                         self.close()
                         return 0
                     if not line:
-                        self._abort_read("unexpected EOF in chunk trailers")
+                        self._abort_read("EOF in chunk trailers")
             elif self._chunk_left == 0:
                 line = self._sock.readline()
                 if not line:
-                    self._abort_read("unexpected EOF before chunk terminator")
+                    self._abort_read("EOF before chunk terminator")
                 if not (line == b"\r\n" or line == b"\n"):
                     self._abort_read("invalid chunk terminator")
                 self._chunk_left = None
@@ -577,14 +573,12 @@ class HTTPResponse:
                 return 0 if into else b""
 
             if self._length is not None:
-                remaining = self._length - self._count
-                if remaining == 0:
+                n = self._length - self._count
+                if n == 0:
                     self.close()
                     return 0 if into else b""
-                if amt is None:
-                    amt = remaining
-                else:
-                    amt = min(amt, remaining)
+                if amt is None or n < amt:
+                    amt = n
 
             if into and not self._chunked:
                 n = sock.readinto(buf, amt)
@@ -593,7 +587,7 @@ class HTTPResponse:
                         self._length = self._count
                         self.close()
                         return 0
-                    self._abort_read("unexpected EOF in response body")
+                    self._abort_read("EOF in response body")
 
                 self._count += n
                 if self._length is not None and self._count >= self._length:
@@ -602,43 +596,46 @@ class HTTPResponse:
 
             out = buf if into else (b"" if amt is None else bytearray(amt))
             total = 0
+
             if amt is not None:
-                bmv = out if isinstance(out, memoryview) else memoryview(out)
+                data = out if isinstance(out, memoryview) else memoryview(out)
 
             while amt is None or total < amt:
                 if into:
-                    want = amt - total
+                    n = amt - total
                 elif amt is None:
-                    want = _READ_BLOCK_SIZE
+                    n = _READ_BLOCK_SIZE
                 else:
-                    want = min(amt - total, _READ_BLOCK_SIZE)
+                    n = min(amt - total, _READ_BLOCK_SIZE)
 
                 if self._chunked:
-                    want = min(want, self._get_chunk_left())
-                    if want == 0:
+                    n = min(n, self._get_chunk_left())
+                    if n == 0:
                         break
 
                 if amt is None:
-                    data = sock.read(want)
+                    data = sock.read(n)
                     n = len(data)
                 else:
-                    n = sock.readinto(bmv if not total else bmv[total:], want)
+                    n = sock.readinto(data if not total else data[total:], n)
 
                 if not n:
                     if self._chunked:
-                        self._abort_read("unexpected EOF in chunk data")
+                        self._abort_read("EOF in chunk data")
                     if self._length is not None:
-                        self._abort_read("unexpected EOF in response body")
+                        self._abort_read("EOF in response body")
                     self._length = self._count
                     self.close()
                     break
 
                 self._count += n
                 total += n
+
                 if self._chunked:
                     self._chunk_left -= n
                 elif self._length is not None and self._count >= self._length:
                     self.close()
+
                 if amt is None:
                     if not out:
                         out = data
@@ -652,13 +649,16 @@ class HTTPResponse:
                 return total
 
             if amt is not None and total < amt:
-                bmv = None
+                data = None
                 del out[total:]
+
             if _READ_MUST_RETURN_BYTES and type(out) is not bytes:
                 out = bytes(out)
+
             return out
-        except (MemoryError, OverflowError):
-            out = bmv = data = None
+
+        except MemoryError:
+            out = data = None
             self._release_socket(False)
             gc.collect()
             raise
@@ -697,7 +697,7 @@ class HTTPConnection:
         if port is None:
             port = self.default_port
         if not isinstance(port, int):
-            raise TypeError("port must be an int")
+            raise TypeError("port must be int")
 
         if port == self.default_port:
             hostport = the_host
@@ -734,9 +734,8 @@ class HTTPConnection:
         _close_quietly(self.detach())
 
     def detach(self):
-        resp = self._resp
-        if resp is not None:
-            return resp.detach()
+        if self._resp is not None:
+            return self._resp.detach()
         sock, self._sock = self._sock, None
         self._reset_request()
         return sock
@@ -839,7 +838,7 @@ class HTTPConnection:
             if value is not None:
                 try:
                     value = int(value, 10)
-                except (TypeError, ValueError, OverflowError):
+                except (OverflowError, TypeError, ValueError):
                     value = -1
                 if value >= 0 and (length is None or length == value):
                     length = value
@@ -984,21 +983,21 @@ class HTTPConnection:
         length = self._length
 
         if encode_chunked is not None:
-            chunked = bool(encode_chunked)
+            encode_chunked = bool(encode_chunked)
         elif flags & _RF_TRANSFER_ENCODING:
-            chunked = bool(flags & _RF_TRANSFER_CHUNKED)
+            encode_chunked = bool(flags & _RF_TRANSFER_CHUNKED)
         elif flags & _RF_CONTENT_LENGTH:
-            chunked = False
+            encode_chunked = False
         elif isinstance(body, _BUFFER_TYPES):
-            chunked = False
+            encode_chunked = False
             length = len(body)
         else:
-            chunked = body is not None
+            encode_chunked = (body is not None)
 
-        self._chunked = chunked
+        self._chunked = encode_chunked
 
         if not (flags & _RF_TRANSFER_ENCODING):
-            if chunked:
+            if encode_chunked:
                 self._append_header(_TRANSFER_ENCODING, _CHUNKED)
                 flags |= _RF_TRANSFER_ENCODING | _RF_TRANSFER_CHUNKED
             elif not (flags & _RF_CONTENT_LENGTH):
@@ -1115,12 +1114,12 @@ class HTTPConnection:
             network = self._network
             if network is not None:
                 try:
-                    ready = network()
+                    network = network()
                 except (MemoryError, OSError):
                     raise
                 except Exception as e:
                     raise OSError(_ENETDOWN, str(e))
-                if not ready:
+                if not network:
                     raise OSError(_ENETUNREACH, "network unreachable")
 
             if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
@@ -1181,11 +1180,13 @@ if _ENABLE_SSL:
                     self._sock = self._context.wrap_socket(raw, server_hostname=self._hostname)
                 else:
                     self._sock = self._context.wrap_socket(raw)
+            except MemoryError:
+                self._sock = None
+                _close_quietly(raw)
+                raise
             except Exception as e:
                 self._sock = None
                 _close_quietly(raw)
-                if isinstance(e, MemoryError):
-                    raise
                 if isinstance(e, OSError):
                     raise ConnectError(_errno(e.errno), str(e))
                 raise ConnectError(_ENONET, str(e))
