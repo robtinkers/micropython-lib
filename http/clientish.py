@@ -657,7 +657,7 @@ class HTTPResponse:
 
             return out
 
-        except MemoryError:
+        except (MemoryError, OverflowError):
             out = data = None
             self._release_socket(False)
             gc.collect()
