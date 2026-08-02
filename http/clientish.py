@@ -56,10 +56,10 @@ _CLOSE = b"close"
 _BUFFER_TYPES = (bytes, bytearray, memoryview)
 
 _KEEP_RESPONSE_HEADERS = (
+    b"Content-Type",
     _CONTENT_LENGTH,
     _TRANSFER_ENCODING,
     _CONNECTION,
-    b"Content-Type",
     _SET_COOKIE,
     b"Location",
     b"ETag",
