@@ -657,10 +657,13 @@ class HTTPResponse:
 
             return out
 
-        except (MemoryError, OverflowError):
+        except MemoryError:
             out = data = None
             self._release_socket(False)
             gc.collect()
+            raise
+        except OverflowError:
+            self._release_socket(False)
             raise
         except OSError as e:
             self._abort_read("socket read failed", _errno(e.errno))
