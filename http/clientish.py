@@ -734,8 +734,6 @@ class HTTPConnection:
         if self._state != _CS_IDLE:
             raise CannotSendRequest()
         self.close()
-        if self._state != _CS_IDLE or self._sock is not None:
-            raise CannotSendRequest()
         self._open_socket()
 
     def close(self):
