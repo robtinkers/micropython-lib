@@ -507,17 +507,17 @@ class HTTPResponse:
     def close(self):
         self._release_socket(self._count == self._length)
 
-    if _EXTRA_METHODS:
+    def detach(self):
+        sock = self._sock
+        if sock is None:
+            raise NotConnected()
+        owner = self._owner
+        self._sock = self._owner = None
+        if owner is not None:
+            owner._release_response(self, None, None)
+        return sock
 
-        def detach(self):
-            sock = self._sock
-            if sock is None:
-                raise NotConnected()
-            owner = self._owner
-            self._sock = self._owner = None
-            if owner is not None:
-                owner._release_response(self, None, None)
-            return sock
+    if _EXTRA_METHODS:
 
         def drain(self, buf=None):
             if buf is None:
