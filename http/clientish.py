@@ -106,9 +106,9 @@ else:
 class RequestLengthMismatch(HTTPException):
     def __init__(self, observed, expected):
         self.errno = None
+        self.args = (observed, expected)
         self.observed = observed
         self.expected = expected
-        self.args = (observed, self.expected)
 
 class TransportError(HTTPException):
     def __init__(self, error, message, _count=None, _length=None, _status=None):
