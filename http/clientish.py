@@ -5,9 +5,11 @@
 import micropython
 
 _COMPATISH_EXCEPTIONS = const(0)
+_DECODE_HEADERS = const(1)
 _DEFAULT_TIMEOUT = const(10)
 _ENABLE_SSL = const(1)
 _GC_FREE_THRESHOLD = const(32768)
+_ITERATE_HEADERS = const(0)
 _READ_BLOCK_SIZE = const(1024)
 _READ_BLOCK_SIZE_HEXCRLF = b"400\r\n"
 _READ_MUST_RETURN_BYTES = const(0)
@@ -220,6 +222,40 @@ def _encode_and_validate(x, strict=0):
     if not strict or type(x) is bytes:
         return x
     return bytes(x)
+
+if _DECODE_HEADERS:
+
+    @micropython.viper
+    def _latin1_to_utf8(src: ptr8, srclen: int, dst: ptr8) -> int:
+        write = int(dst) != 0
+        dstlen = 0
+        i = 0
+        while i < srclen:
+            b = src[i]
+            i += 1
+            if b < 128:
+                if write:
+                    dst[dstlen] = b
+                dstlen += 1
+            else:
+                if write:
+                    dst[dstlen]   = 0xC0 | (b >> 6)
+                    dst[dstlen+1] = 0x80 | (b & 0x3F)
+                dstlen += 2
+        return dstlen
+
+    def decode_latin1(buf, default=None):
+        if buf is None:
+            return default
+        buflen = len(buf)
+        if buflen == 0:
+            return ""
+        utf8len = _latin1_to_utf8(buf, buflen, 0)
+        if utf8len == buflen:
+            return buf.decode()
+        utf8out = bytearray(utf8len)
+        _latin1_to_utf8(buf, buflen, utf8out)
+        return utf8out.decode()
 
 def _errno(err):
     return err or 0
@@ -440,7 +476,10 @@ class HTTPResponse:
         self.url = url
         self.version = version
         self.status = status
-        self.reason = reason.rstrip()
+        if _DECODE_HEADERS:
+            self.reason = decode_latin1(reason.rstrip())
+        else:
+            self.reason = reason.rstrip()
         self._headers = headers
         self._chunked = chunked
         self._length = length
@@ -482,10 +521,23 @@ class HTTPResponse:
                 result = val
             else:
                 result += b", " + val
-        return default if result is None else result
+        if result is None:
+            return default
+        if _DECODE_HEADERS:
+            result = decode_latin1(result, default)
+        return result
 
     def getheaders(self):
-        return self._headers
+        if _DECODE_HEADERS:
+            if _ITERATE_HEADERS:
+                return ((decode_latin1(k), decode_latin1(v)) for k,v in self._headers)
+            else:
+                return [(decode_latin1(k), decode_latin1(v)) for k,v in self._headers]
+        else:
+            if _ITERATE_HEADERS:
+                return iter(self._headers)
+            else:
+                return self._headers
 
     def read(self, amt=None):
         return self._read_body(None, amt)
@@ -494,6 +546,32 @@ class HTTPResponse:
         if buf is None:
             raise TypeError("buffer required")
         return self._read_body(buf, None)
+
+    def readline(self):
+        if self._chunked:
+            self._abort_read("readline() on chunked stream")
+        sock = self._sock
+        if sock is None:
+            if self._length is not None and self._count >= self._length:
+                return b""
+            raise NotConnected()
+        owner = self._owner
+        if owner is not None:
+            owner._state = _CS_RESPONSE_ACTIVE
+        try:
+            line = sock.readline()
+        except OSError as e:
+            self._abort_read("socket read failed", _errno(e.errno))
+        if not line:
+            if self._length is not None and self._count < self._length:
+                self._abort_read("EOF in response body")
+            self._length = self._count
+            self.close()
+            return b""
+        self._count += len(line)
+        if self._length is not None and self._count >= self._length:
+            self.close()
+        return line
 
     def drain(self, buf=None):
         if buf is None:
@@ -1173,6 +1251,7 @@ class HTTPConnection:
             _close_quietly(sock)
 
 if _ENABLE_SSL:
+
     class HTTPSConnection(HTTPConnection):
         default_port = HTTPS_PORT
 
@@ -1205,4 +1284,4 @@ if _ENABLE_SSL:
                     raise ConnectError(_errno(e.errno), str(e))
                 raise ConnectError(ENONET, str(e))
             finally:
-                gc.collect()
+                gc.collect()            
