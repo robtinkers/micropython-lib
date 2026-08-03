@@ -524,7 +524,7 @@ class HTTPResponse:
         if result is None:
             return default
         if _DECODE_HEADERS:
-            result = decode_latin1(result, default)
+            result = decode_latin1(result)
         return result
 
     def getheaders(self):
