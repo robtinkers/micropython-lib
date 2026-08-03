@@ -10,6 +10,7 @@ _COMPATISH_DECODE_HEADERS = const(0)
 _COMPATISH_ALL_HEADERS = const(0)
 _COMPATISH_READ_RETURNS_BYTES = const(0)
 
+_ENABLE_EXTENSIONS = const(1)
 _ENABLE_SSL = const(1)
 _ITERATE_HEADERS = const(1)
 _RECYCLE_BUFFERS = const(1)
@@ -17,7 +18,7 @@ _RECYCLE_BUFFERS = const(1)
 _DEFAULT_TIMEOUT = const(10)
 _GC_FREE_THRESHOLD = const(32768)
 _READ_BLOCK_SIZE = const(1024)
-_READ_BLOCK_SIZE_HEXCRLF = b"400\r\n"
+_READ_BLOCK_SIZE_HEXCRLF = const(b"400\r\n")
 _REQUEST_HEAD_SIZE = const(256)
 
 import socket, errno, gc
@@ -125,7 +126,7 @@ class TransportError(HTTPException):
             self.count = _count
             self.length = _length
             self.args = (error, message)
-    
+
     def __str__(self):
         return self.__class__.__name__ + "(" + repr(self.errno) + ", " + repr(self.message) + ", ...)"
 
@@ -506,15 +507,31 @@ class HTTPResponse:
     def close(self):
         self._release_socket(self._count == self._length)
 
-    def detach(self):
-        sock = self._sock
-        if sock is None:
-            raise NotConnected()
-        owner = self._owner
-        self._sock = self._owner = None
-        if owner is not None:
-            owner._release_response(self, None, None)
-        return sock
+    if _ENABLE_EXTENSIONS:
+
+        def detach(self):
+            sock = self._sock
+            if sock is None:
+                raise NotConnected()
+            owner = self._owner
+            self._sock = self._owner = None
+            if owner is not None:
+                owner._release_response(self, None, None)
+            return sock
+
+        def drain(self, buf=None):
+            if buf is None:
+                size = _READ_BLOCK_SIZE
+                if self._length is not None:
+                    size = min(size, self._length - self._count)
+                    if size <= 0:
+                        self.close()
+                        return
+                buf = bytearray(size)
+            elif not buf:
+                raise ValueError("empty buffer")
+            while self.readinto(buf):
+                pass
 
     def getheader(self, name, default=None):
         name = _encode_and_validate(name)
@@ -554,20 +571,6 @@ class HTTPResponse:
         if buf is None:
             raise TypeError("buffer required")
         return self._read_body(buf, None)
-
-    def drain(self, buf=None):
-        if buf is None:
-            size = _READ_BLOCK_SIZE
-            if self._length is not None:
-                size = min(size, self._length - self._count)
-                if size <= 0:
-                    self.close()
-                    return
-            buf = bytearray(size)
-        elif not buf:
-            raise ValueError("empty buffer")
-        while self.readinto(buf):
-            pass
 
     def _read_body(self, buf, amt):
         try:
@@ -674,7 +677,7 @@ class HTTPResponse:
 
             return out
         except MemoryError:
-            out = data = None
+            out = data = sock = None
             self._release_socket(False)
             gc.collect()
             raise
@@ -851,8 +854,7 @@ class HTTPConnection:
         else:
             hostport = b"%s:%d" % (the_host, port)
 
-        self.host = the_host
-        self._hostaddr = hostaddr
+        self.host = hostaddr
         self._hostname = hostname
         self._hostport = hostport
         self.port = port
@@ -1129,7 +1131,7 @@ class HTTPConnection:
 
             if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
                 gc.collect()
-            self._sock = create_connection((self._hostaddr, self.port), self.timeout)
+            self._sock = create_connection((self.host, self.port), self.timeout)
         except OSError as e:
             raise ConnectError(_errno(e.errno), str(e))
 
