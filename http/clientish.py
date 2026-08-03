@@ -5,15 +5,15 @@
 import micropython
 
 _COMPATISH_EXCEPTIONS = const(0)
-_COMPATISH_EXTRA_METHODS = const(0)
-_COMPATISH_DECODE_HEADERS = const(0)
-_COMPATISH_ALL_HEADERS = const(0)
+_COMPATISH_MOST_METHODS = const(0)
 _COMPATISH_READ_RETURNS_BYTES = const(0)
+_COMPATISH_ALL_HEADERS = const(0)
+_COMPATISH_DECODE_HEADERS = const(0)
 
-_ENABLE_EXTENSIONS = const(1)
-_ENABLE_SSL = const(1)
+_EXTRA_METHODS = const(1)
 _ITERATE_HEADERS = const(1)
 _RECYCLE_BUFFERS = const(1)
+_SSL_ENABLED = const(1)
 
 _DEFAULT_TIMEOUT = const(10)
 _GC_FREE_THRESHOLD = const(32768)
@@ -22,7 +22,7 @@ _READ_BLOCK_SIZE_HEXCRLF = const(b"400\r\n")
 _REQUEST_HEAD_SIZE = const(256)
 
 import socket, errno, gc
-if _ENABLE_SSL:
+if _SSL_ENABLED:
     import ssl
 
 HTTP_PORT = const(80)
@@ -490,7 +490,7 @@ class HTTPResponse:
         self.url = url
         self.version = version
         self.status = status
-        if _COMPATISH_EXTRA_METHODS:
+        if _COMPATISH_MOST_METHODS:
             self.code = status
         self.reason = reason.rstrip()
         self._headers = headers
@@ -507,7 +507,7 @@ class HTTPResponse:
     def close(self):
         self._release_socket(self._count == self._length)
 
-    if _ENABLE_EXTENSIONS:
+    if _EXTRA_METHODS:
 
         def detach(self):
             sock = self._sock
@@ -738,7 +738,7 @@ class HTTPResponse:
     def closed(self):
         return self._sock is None
 
-    if _COMPATISH_EXTRA_METHODS:
+    if _COMPATISH_MOST_METHODS:
         def isclosed(self):
             return self._sock is None
 
@@ -1315,7 +1315,7 @@ class HTTPConnection:
                 _close_quietly(resp_sock)
             _close_quietly(sock)
 
-if _ENABLE_SSL:
+if _SSL_ENABLED:
 
     class HTTPSConnection(HTTPConnection):
         default_port = HTTPS_PORT
