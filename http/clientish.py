@@ -1284,4 +1284,4 @@ if _ENABLE_SSL:
                     raise ConnectError(_errno(e.errno), str(e))
                 raise ConnectError(ENONET, str(e))
             finally:
-                gc.collect()            
+                gc.collect()
