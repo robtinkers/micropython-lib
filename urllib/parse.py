@@ -6,10 +6,10 @@ import micropython
 
 _BYTE_SEQUENCES = (str, bytes, bytearray, memoryview)
 
-_USES_RELATIVE = frozenset([
-    "", "file", "ftp", "http", "https", "shttp", "rtsp", "rtsps", "rtspu",
-    "sftp", "ws", "wss",
-])
+_USES_RELATIVE = (
+    "http", "https", "ws", "wss", "ftp", "file", "sftp", "rtsp", "rtsps",
+    "rtspu", "shttp",
+)
 
 _USES_NETLOC = _USES_RELATIVE
 
