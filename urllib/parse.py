@@ -4,11 +4,11 @@
 
 import micropython
 
-_BYTE_SEQUENCES = (str, bytes, bytearray, memoryview)
+_BYTE_BUFFERS = (str, bytes, bytearray, memoryview)
 
 _USES_RELATIVE = (
-    "http", "https", "ws", "wss", "ftp", "file", "sftp", "rtsp", "rtsps",
-    "rtspu", "shttp",
+    "http", "https", "ws", "wss", "ftp", "file",
+    "sftp", "rtsp", "rtsps", "rtspu", "shttp",
 )
 
 _USES_NETLOC = _USES_RELATIVE
@@ -44,7 +44,6 @@ class _compiled_blob(bytearray):
         super().__init__(_COMPILED_EMPTY)
 
 def compile_safe(safe, flags=0):
-    """Compile safe characters into a 16-byte bytearray."""
     if flags not in (0, 1):
         raise ValueError("flags must be 0 (quote) or 1 (quote_plus)")
     safeblob = _compiled_blob()
@@ -112,51 +111,45 @@ def _quote_helper(src: ptr8, srclen: int, safeblob_obj: object, out: ptr8) -> in
 
     return outlen if modified else 0
 
-def _quote(s, safe, flags):
-    if not isinstance(s, _BYTE_SEQUENCES):
-        raise TypeError("quote input must be str or bytes-like")
-
+def _quote(src, safe, flags):
     if isinstance(safe, _compiled_blob):
         if len(safe) != 16 or safe[0] != flags:
             raise TypeError("pre-compiled safe is incompatible with current method")
     elif not safe:                                 # "" or b""
         safe = _COMPILED_PLUS if flags else _COMPILED_EMPTY
-    elif not flags and len(safe) == 1 and safe[0] in (47, "/"):  # "/" or b"/"
+    elif not flags and len(safe) == 1 and safe[0] in (47, '/'):  # '/' or b'/'
         safe = _COMPILED_SLASH
     else:
         safe = compile_safe(safe, flags)
 
-    if isinstance(s, str):
-        # on micropython, memoryview(str) gives you direct access to the underlying bytes
-        src = memoryview(s)
-    else:
-        src = s
     srclen = len(src)
+    if srclen == 0:
+        return b""
     outlen = _quote_helper(src, srclen, safe, 0)
     if outlen < 0:
         raise NotImplementedError("compiled safe blobs require little-endian byte order")
-    if srclen == 0:
-        return ""
-    if outlen == 0:
-        if isinstance(s, str):
-            return s
-        if isinstance(s, memoryview):
-            s = bytes(s)
-        return s.decode()
+    if outlen > 0:
+        out = bytearray(outlen)
+        _quote_helper(src, srclen, safe, out)
+        return out.decode()
 
-    out = bytearray(outlen)
-    _quote_helper(src, srclen, safe, out)
-    return out.decode()
+    if isinstance(src, memoryview):
+        return bytes(src)
+    return src
 
 def quote(s, safe="/"):
+    if isinstance(s, str):
+        return _quote(s.encode(), safe, 0).decode()
     return _quote(s, safe, 0)
 
 def quote_plus(s, safe=""):
+    if isinstance(s, str):
+        return _quote(s.encode(), safe, 1).decode()
     return _quote(s, safe, 1)
 
 def quote_from_bytes(bs, safe="/"):
     if not isinstance(bs, (bytes, bytearray)):
-        raise TypeError("quote_from_bytes() expected bytes")
+        raise TypeError("bytes required")
     return _quote(bs, safe, 0)
 
 @micropython.viper
@@ -213,16 +206,7 @@ def _unquote_helper(src: ptr8, start: int, end: int, out: ptr8) -> int:
 
     return outlen if modified else -outlen
 
-def _unquote(s, start, end, plusmode: bool):
-    # Returns a bytes-like object that supports .decode(): bytes or bytearray.
-    # Callers that need real bytes (unquote_to_bytes) must materialise it.
-    if isinstance(s, str):
-        # on micropython, memoryview(str) gives you direct access to the underlying bytes
-        # but you're going to have a hard time unless (start == 0 and end is None)
-        assert(start == 0 and end is None)
-        src = memoryview(s)
-    else:
-        src = s
+def _unquote(src, start, end, plusmode):
     srclen = len(src)
     if end is None:
         end = srclen
@@ -241,20 +225,25 @@ def _unquote(s, start, end, plusmode: bool):
         out = src[start:end]
     else:
         out = src
-
     if isinstance(out, memoryview):
-        out = bytes(out)
+        return bytes(out)
     return out
 
 def unquote(s):
-    return _unquote(s, 0, None, False).decode()
+    if isinstance(s, str):
+        return _unquote(s.encode(), 0, None, False).decode()
+    return _unquote(s, 0, None, False)
 
 def unquote_plus(s):
-    return _unquote(s, 0, None, True).decode()
+    if isinstance(s, str):
+        return _unquote(s.encode(), 0, None, True).decode()
+    return _unquote(s, 0, None, True)
 
 def unquote_to_bytes(s) -> bytes:
+    if isinstance(s, str):
+        s = s.encode()
     out = _unquote(s, 0, None, False)
-    if not isinstance(out, bytes):
+    if type(out) is not bytes:
         out = bytes(out)
     return out
 
@@ -262,11 +251,11 @@ def _urlencode_generator(query, doseq=False, safe="", quote_via=quote_plus):
     if hasattr(query, "items"):
         query = query.items()
     for key, val in query:
-        if not isinstance(key, _BYTE_SEQUENCES):
+        if not isinstance(key, _BYTE_BUFFERS):
             key = str(key)
         key = quote_via(key, safe)
 
-        if not isinstance(val, _BYTE_SEQUENCES):
+        if not isinstance(val, _BYTE_BUFFERS):
             if doseq:
                 try:
                     len(val)
@@ -274,7 +263,7 @@ def _urlencode_generator(query, doseq=False, safe="", quote_via=quote_plus):
                     pass
                 else:
                     for v in val:
-                        if not isinstance(v, _BYTE_SEQUENCES):
+                        if not isinstance(v, _BYTE_BUFFERS):
                             v = str(v)
                         yield key + "=" + quote_via(v, safe)
                     continue
@@ -293,9 +282,8 @@ def _mv_find(mv: ptr8, b: int, start: int, end: int) -> int:
         i += 1
     return -1
 
-def _parse_generator(s, keep_blank_values=False, strict_parsing=False,
-                     errors="ignore", separator='&', max_num_fields=None,
-                     _decode=True):
+def _parse_generator(s, *, keep_blank_values=False, strict_parsing=False, _decode=True,
+                     errors="ignore", max_num_fields=None, separator='&'):
     if isinstance(s, str):
         # on micropython, memoryview(str) gives you direct access to the underlying bytes
         src = memoryview(s)
@@ -381,7 +369,7 @@ def urldecode(qs, *args, **kwargs) -> dict:
     return out
 
 # Extension
-def locsplit_as_tuple(netloc: str) -> tuple:
+def locsplit_to_tuple(netloc: str) -> tuple:
     if (sep := netloc.rfind('@')) >= 0:
         userpass, hostport = netloc[:sep], netloc[sep+1:]
         if (sep := userpass.find(':')) >= 0:
@@ -425,10 +413,10 @@ def locsplit_as_tuple(netloc: str) -> tuple:
 
 # Extension
 def locsplit(netloc: str) -> dict:
-    return dict(zip(('username', 'password', 'hostname', 'port'), locsplit_as_tuple(netloc)))
+    return dict(zip(('username', 'password', 'hostname', 'port'), locsplit_to_tuple(netloc)))
 
 # Derived from CPython (all bugs are mine)
-def urlsplit_as_tuple(url: str, scheme, allow_fragments: bool) -> tuple:
+def urlsplit_to_tuple(url: str, scheme, allow_fragments: bool) -> tuple:
     # Only lstrip url, as some applications rely on preserving trailing space.
     # (https://url.spec.whatwg.org/#concept-basic-url-parser would strip both)
     url = url.lstrip(_WHATWG_C0_AND_SPACE)
@@ -464,7 +452,7 @@ class SplitResult(tuple):
     @property
     def _locsplit(self):
         if self._locsplit_ is None:
-            self._locsplit_ = locsplit_as_tuple(self[1])
+            self._locsplit_ = locsplit_to_tuple(self[1])
         return self._locsplit_
 
     @property
@@ -504,7 +492,7 @@ class SplitResult(tuple):
         return urlunsplit(self)
 
 def urlsplit(url: str, scheme=None, allow_fragments=True) -> SplitResult:
-    return SplitResult(*urlsplit_as_tuple(url, scheme, allow_fragments))
+    return SplitResult(*urlsplit_to_tuple(url, scheme, allow_fragments))
 
 def _urlunsplit(scheme, netloc, path, query, fragment) -> str:
     parts = []
@@ -534,6 +522,21 @@ def _urlunsplit(scheme, netloc, path, query, fragment) -> str:
 
     return "".join(parts)
 
+def urldefrag_to_tuple(url):
+    if isinstance(url, str):
+        base, hash, frag = url.rpartition('#')
+        empty = ""
+    else:
+        if isinstance(url, memoryview):
+            url = bytes(url)
+        base, hash, frag = url.rpartition(b'#')
+        empty = b""
+    if not hash:
+        return (url, empty)
+    return (base, frag)
+
+urldefrag = urldefrag_to_tuple
+
 def urlunsplit(components: tuple) -> str:
     scheme, netloc, path, query, fragment = components
     if not netloc:
@@ -550,8 +553,8 @@ def urljoin(base: str, url: str, allow_fragments: bool=True) -> str:
     if not url:
         return base
 
-    bscheme, bnetloc, bpath, bquery, bfragment = urlsplit_as_tuple(base, None, allow_fragments)
-    scheme, netloc, path, query, fragment = urlsplit_as_tuple(url, None, allow_fragments)
+    bscheme, bnetloc, bpath, bquery, bfragment = urlsplit_to_tuple(base, None, allow_fragments)
+    scheme, netloc, path, query, fragment = urlsplit_to_tuple(url, None, allow_fragments)
 
     if scheme is None:
         scheme = bscheme
