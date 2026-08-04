@@ -537,7 +537,7 @@ urldefrag = urldefrag_to_tuple
 
 def urlunsplit(components: tuple, *, keep_empty=False) -> str:
     scheme, netloc, path, query, frag = components
-    empty = "" if keep_empty else None
+    empty = None if not keep_empty else ""
     if not netloc:
         if scheme and scheme in _USES_NETLOC and (not path or path.startswith('/')):
             netloc = ""
