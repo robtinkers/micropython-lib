@@ -4,8 +4,6 @@
 
 import micropython
 
-_BYTE_BUFFERS = (str, bytes, bytearray, memoryview)
-
 _USES_RELATIVE = (
     "http", "https", "ws", "wss", "ftp", "file",
     "sftp", "rtsp", "rtsps", "rtspu", "shttp",
@@ -13,27 +11,25 @@ _USES_RELATIVE = (
 
 _USES_NETLOC = _USES_RELATIVE
 
-_WHATWG_C0_AND_SPACE = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d\x0e\x0f\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f\x20"
-
 _HEX_DIGITS = b"0123456789ABCDEF"
 
 _COMPILED_EMPTY = (
     b"\x00\x69\x69\x69"
     b"\x00\x60\xff\x03"  # 0-9, -, .
     b"\xfe\xff\xff\x87"  # A-Z, _
-    b"\xfe\xff\xff\x47"  # a-z, ~
+    b"\xfe\xff\xff\x07"  # a-z
 )
 _COMPILED_SLASH = (
     b"\x00\x66\x99\x00"
     b"\x00\xe0\xff\x03"  # slash
     b"\xfe\xff\xff\x87"
-    b"\xfe\xff\xff\x47"
+    b"\xfe\xff\xff\x07"
 )
 _COMPILED_PLUS = (
     b"\x01\x66\x99\x00"  # plus mode
     b"\x00\x60\xff\x03"
     b"\xfe\xff\xff\x87"
-    b"\xfe\xff\xff\x47"
+    b"\xfe\xff\xff\x07"
 )
 
 class _compiled_blob(bytearray):
@@ -123,8 +119,6 @@ def _quote(src, safe, flags):
         _quote_helper(src, srclen, safe, out)
     elif isinstance(src, str):
         return src
-    elif isinstance(src, memoryview):
-        out = bytes(src)
     else:
         out = src
     return out.decode()
@@ -237,14 +231,16 @@ def unquote_to_bytes(s) -> bytes:
     return _unquote(s, 0, None, False)
 
 def _urlencode_generator(query, doseq=False, safe="", quote_via=quote_plus):
+    bytes_like = array(str, bytes, bytearray)
+
     if hasattr(query, "items"):
         query = query.items()
     for key, val in query:
-        if not isinstance(key, _BYTE_BUFFERS):
+        if not isinstance(key, bytes_like):
             key = str(key)
         key = quote_via(key, safe)
 
-        if not isinstance(val, _BYTE_BUFFERS):
+        if not isinstance(val, bytes_like):
             if doseq:
                 try:
                     len(val)
@@ -252,7 +248,7 @@ def _urlencode_generator(query, doseq=False, safe="", quote_via=quote_plus):
                     pass
                 else:
                     for v in val:
-                        if not isinstance(v, _BYTE_BUFFERS):
+                        if not isinstance(v, bytes_like):
                             v = str(v)
                         yield key + "=" + quote_via(v, safe)
                     continue
@@ -404,38 +400,56 @@ def locsplit_to_tuple(netloc: str) -> tuple:
 def locsplit(netloc: str) -> dict:
     return dict(zip(('username', 'password', 'hostname', 'port'), locsplit_to_tuple(netloc)))
 
-# Derived from CPython (all bugs are mine)
-def urlsplit_to_tuple(url: str, scheme, allow_fragments: bool) -> tuple:
-    # Only lstrip url, as some applications rely on preserving trailing space.
-    # (https://url.spec.whatwg.org/#concept-basic-url-parser would strip both)
-    url = url.lstrip(_WHATWG_C0_AND_SPACE)
+def urlsplit_to_tuple(url, scheme=None, allow_fragments=True, *, missing_as_none=False):
+    ss = isinstance(url, str)
 
-    if scheme:
-        scheme = scheme.strip(_WHATWG_C0_AND_SPACE)
+    starts = 0
+    finish = len(url)
 
-    netloc = query = fragment = None
-    if (colon := url.find(':')) > 0 and url[0].isalpha():
-        if (slash := url.find('/')) < 0 or colon < slash:
-            scheme, url = url[:colon].lower(), url[colon+1:]
-    if url.startswith("//"):
-        delim = len(url)
-        for c in "/?#":
-            if 0 <= (x := url.find(c, 2)) < delim:
-                delim = x
-        netloc, url = url[2:delim], url[delim:]
+    # 1. Skip leading whitespace
+    for i in range(finish):
+        if url[i] <= (" " if ss else 32):
+            starts = i + 1
+        else:
+            break
 
-    if allow_fragments and (i := url.find('#')) >= 0:
-        url, fragment = url[:i], url[i+1:]
+    netloc = query = frag = (None if missing_as_none else "" if ss else b"")
+    if scheme is None:
+        scheme = netloc
 
-    if (i := url.find('?')) >= 0:
-        url, query = url[:i], url[i+1:]
+    # 2. Extract Fragment (Right-to-Left)
+    # Finding this first allows us to virtually shrink the string using finish
+    if allow_fragments and (i := url.find('#' if ss else b'#', starts)) >= 0:
+        frag = url[i+1:]
+        finish = i
 
-    return (scheme, netloc, url, query, fragment)
+    # 3. Extract Query (Right-to-Left)
+    if (i := url.find('?' if ss else b'?', starts)) >= 0 and i < finish:
+        query = url[i+1:finish]
+        finish = i
+
+    # 4. Extract Scheme (Left-to-Right)
+    colon = url.find(':' if ss else b':', starts)
+    if starts < colon < finish and url[starts:starts+1].isalpha():
+        slash = url.find('/' if ss else b'/', starts)
+        if slash < 0 or colon < slash:
+            scheme = url[starts:colon].lower()
+            starts = colon + 1
+
+    # 5. Extract Netloc (Left-to-Right)
+    if url.startswith("//" if ss else b"//", starts):
+        starts += 2
+        slash = url.find('/' if ss else b'/', starts)
+        delim = slash if (0 <= slash < finish) else finish
+        netloc = url[starts:delim]
+        starts = delim
+
+    return (scheme, netloc, url[starts:finish], query, frag)
 
 class SplitResult(tuple):
 
-    def __init__(self, scheme, netloc, path, query, fragment):
-        super().__init__((scheme or "", netloc or "", path, query or "", fragment or ""))
+    def __init__(self, scheme, netloc, path, query, frag):
+        super().__init__((scheme, netloc, path, query, frag))
         self._locsplit_ = None
 
     @property
@@ -483,57 +497,59 @@ class SplitResult(tuple):
 def urlsplit(url: str, scheme=None, allow_fragments=True) -> SplitResult:
     return SplitResult(*urlsplit_to_tuple(url, scheme, allow_fragments))
 
-def _urlunsplit(scheme, netloc, path, query, fragment) -> str:
+def _urlunsplit(scheme, netloc, path, query, frag):
+    ss = isinstance(path, str)
     parts = []
 
     if scheme is not None:
         parts.append(scheme)
-        parts.append(":")
+        parts.append(":" if ss else b":")
 
     if netloc is not None:
-        parts.append("//")
+        parts.append("//" if ss else b"//")
         parts.append(netloc)
-        if path and not path.startswith("/"):
-            parts.append("/")
+        if path and not path.startswith("/" if ss else b"/"):
+            parts.append("/" if ss else b"/")
     else:
-        if path and path.startswith("//"):
-            parts.append("//")
+        if path and path.startswith("//" if ss else b"//"):
+            parts.append("//" if ss else b"//")
     if path:
         parts.append(path)
 
     if query is not None:
-        parts.append("?")
+        parts.append("?" if ss else b"?")
         parts.append(query)
 
-    if fragment is not None:
-        parts.append("#")
-        parts.append(fragment)
+    if frag is not None:
+        parts.append("#" if ss else b"#")
+        parts.append(frag)
 
-    return "".join(parts)
+    return ("" if ss else b"").join(parts)
 
 def urldefrag_to_tuple(url):
-    if isinstance(url, str):
-        base, hash, frag = url.rpartition('#')
-        empty = ""
-    else:
-        if isinstance(url, memoryview):
-            url = bytes(url)
-        base, hash, frag = url.rpartition(b'#')
-        empty = b""
+    ss = isinstance(url, str)
+    base, hash, frag = url.rpartition('#' if ss else b'#')
     if not hash:
-        return (url, empty)
+        return (url, "" if ss else b"")
     return (base, frag)
 
 urldefrag = urldefrag_to_tuple
 
-def urlunsplit(components: tuple) -> str:
-    scheme, netloc, path, query, fragment = components
+def urlunsplit(components: tuple, *, keep_empty=False) -> str:
+    scheme, netloc, path, query, frag = components
+    empty = "" if keep_empty else None
     if not netloc:
         if scheme and scheme in _USES_NETLOC and (not path or path.startswith('/')):
             netloc = ""
         else:
             netloc = None
-    return _urlunsplit(scheme or None, netloc, path or "", query or None, fragment or None)
+    return _urlunsplit(
+        empty if scheme is None else scheme,
+        empty if netloc is None else netloc,
+        path or "",
+        empty if query is None else query,
+        empty if frag is None else frag,
+    )
 
 # Derived from CPython (all bugs are mine)
 def urljoin(base: str, url: str, allow_fragments: bool=True) -> str:
@@ -543,7 +559,7 @@ def urljoin(base: str, url: str, allow_fragments: bool=True) -> str:
         return base
 
     bscheme, bnetloc, bpath, bquery, bfragment = urlsplit_to_tuple(base, None, allow_fragments)
-    scheme, netloc, path, query, fragment = urlsplit_to_tuple(url, None, allow_fragments)
+    scheme, netloc, path, query, frag = urlsplit_to_tuple(url, None, allow_fragments)
 
     if scheme is None:
         scheme = bscheme
@@ -551,16 +567,16 @@ def urljoin(base: str, url: str, allow_fragments: bool=True) -> str:
         return url
     if not scheme or scheme in _USES_NETLOC:
         if netloc:
-            return _urlunsplit(scheme, netloc, path, query, fragment)
+            return _urlunsplit(scheme, netloc, path, query, frag)
         netloc = bnetloc
 
     if not path:
         path = bpath
         if query is None:
             query = bquery
-            if fragment is None:
-                fragment = bfragment
-        return _urlunsplit(scheme, netloc, path, query, fragment)
+            if frag is None:
+                frag = bfrag
+        return _urlunsplit(scheme, netloc, path, query, frag)
 
     base_parts = bpath.split('/')
     if base_parts[-1] != "":
@@ -596,4 +612,4 @@ def urljoin(base: str, url: str, allow_fragments: bool=True) -> str:
         # then we need to append the trailing '/'
         resolved_path.append("")
 
-    return _urlunsplit(scheme, netloc, "/".join(resolved_path) or "/", query, fragment)
+    return _urlunsplit(scheme, netloc, "/".join(resolved_path) or "/", query, frag)
