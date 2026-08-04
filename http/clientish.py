@@ -179,6 +179,24 @@ def _endswith_lc(haystack: ptr8, haystack_len: int, needle: ptr8, needle_len: in
                 return 0
     return 1
 
+if _EXTRA_METHODS:
+
+    @micropython.viper
+    def _startswith_lc(haystack: ptr8, haystack_len: int, needle: ptr8, needle_len: int) -> int:
+        if haystack_len < needle_len:
+            return 0
+        i = 0
+        while i < needle_len:
+            x = haystack[i]
+            y = needle[i]
+            if x != y:
+                if 65 <= x and x <= 90:
+                    x += 32
+                if x != y:
+                    return 0
+            i += 1
+        return 1
+
 @micropython.viper
 def _contains_lc(haystack: ptr8, haystack_len: int, needle: ptr8, needle_len: int) -> int:
     if needle_len == 0:
