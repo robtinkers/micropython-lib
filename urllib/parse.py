@@ -1,6 +1,6 @@
 # urllib/parse.py
 #
-# urllib.parse for Micropython, optimised for memory footprint and churn.
+# Serious parsing for tiny devices.
 
 import micropython
 
@@ -17,11 +17,8 @@ _WHATWG_C0_AND_SPACE = "\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0a\x0b\x0c\x0d
 
 _HEX_DIGITS = b"0123456789ABCDEF"
 
-# Standard safeblob for ASCII 32-127, stored as four little-endian words.
-# The flags word is [mode, 0x66, 0x99, 0x00], so its middle bytes also act as
-# a byte-order marker. The remaining words cover 32-63, 64-95, and 96-127.
 _COMPILED_EMPTY = (
-    b"\x00\x66\x99\x00"
+    b"\x00\x69\x69\x69"
     b"\x00\x60\xff\x03"  # 0-9, -, .
     b"\xfe\xff\xff\x87"  # A-Z, _
     b"\xfe\xff\xff\x47"  # a-z, ~
@@ -58,22 +55,17 @@ def compile_safe(safe, flags=0):
 @micropython.viper
 def _quote_helper(src: ptr8, srclen: int, safeblob_obj: object, out: ptr8) -> int:
     safeblob = ptr32(safeblob_obj)
-    write = int(out) != 0
-    modified = 0
-    outlen = 0
-    b = 0
-
-    # Unpack safeblob into local variables for speed
     flags = safeblob[0]
-    if (flags & 0x00FFFF00) != 0x00996600:
-        return -1
-    flags &= 0xFF
+    if flags != 0 and flags != 1:
+        return -2
     safe1 = safeblob[1] # 32-63
     safe2 = safeblob[2] # 64-95
     safe3 = safeblob[3] # 96-127
 
     hex_digits = ptr8(_HEX_DIGITS)
-
+    write = int(out) != 0
+    modified = 0
+    outlen = 0
     i = 0
     while i < srclen:
         b = src[i]
@@ -109,7 +101,7 @@ def _quote_helper(src: ptr8, srclen: int, safeblob_obj: object, out: ptr8) -> in
                 out[outlen + 2] = hex_digits[b & 0xF]
             outlen += 3
 
-    return outlen if modified else 0
+    return outlen if modified else -1
 
 def _quote(src, safe, flags):
     if isinstance(safe, _compiled_blob):
@@ -123,28 +115,28 @@ def _quote(src, safe, flags):
         safe = compile_safe(safe, flags)
 
     srclen = len(src)
-    if srclen == 0:
-        return b""
     outlen = _quote_helper(src, srclen, safe, 0)
-    if outlen < 0:
-        raise NotImplementedError("compiled safe blobs require little-endian byte order")
-    if outlen > 0:
+    if outlen == 0:
+        return ""
+    elif outlen > 0:
         out = bytearray(outlen)
         _quote_helper(src, srclen, safe, out)
-        return out.decode()
-
-    if isinstance(src, memoryview):
-        return bytes(src)
-    return src
+    elif isinstance(src, str):
+        return src
+    elif isinstance(src, memoryview):
+        out = bytes(src)
+    else:
+        out = src
+    return out.decode()
 
 def quote(s, safe="/"):
     if isinstance(s, str):
-        return _quote(s.encode(), safe, 0).decode()
+        s = s.encode()
     return _quote(s, safe, 0)
 
 def quote_plus(s, safe=""):
     if isinstance(s, str):
-        return _quote(s.encode(), safe, 1).decode()
+        s = s.encode()
     return _quote(s, safe, 1)
 
 def quote_from_bytes(bs, safe="/"):
@@ -226,26 +218,23 @@ def _unquote(src, start, end, plusmode):
     else:
         out = src
     if isinstance(out, memoryview):
-        return bytes(out)
+        out = bytes(out)
     return out
 
 def unquote(s):
     if isinstance(s, str):
-        return _unquote(s.encode(), 0, None, False).decode()
-    return _unquote(s, 0, None, False)
+        s = s.encode()
+    return _unquote(s, 0, None, False).decode()
 
 def unquote_plus(s):
     if isinstance(s, str):
-        return _unquote(s.encode(), 0, None, True).decode()
-    return _unquote(s, 0, None, True)
+        s = s.encode()
+    return _unquote(s, 0, None, True).decode()
 
 def unquote_to_bytes(s) -> bytes:
     if isinstance(s, str):
         s = s.encode()
-    out = _unquote(s, 0, None, False)
-    if type(out) is not bytes:
-        out = bytes(out)
-    return out
+    return _unquote(s, 0, None, False)
 
 def _urlencode_generator(query, doseq=False, safe="", quote_via=quote_plus):
     if hasattr(query, "items"):
