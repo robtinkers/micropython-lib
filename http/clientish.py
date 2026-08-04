@@ -2,7 +2,7 @@
 #
 # Serious HTTP for tiny devices.
 
-import micropython
+import micropython, socket, errno, gc
 
 _COMPATISH_EXCEPTIONS = const(0)
 _COMPATISH_MOST_METHODS = const(0)
@@ -20,10 +20,6 @@ _GC_FREE_THRESHOLD = const(32768)
 _READ_BLOCK_SIZE = const(1024)
 _READ_BLOCK_SIZE_HEXCRLF = const(b"400\r\n")
 _REQUEST_HEAD_SIZE = const(256)
-
-import socket, errno, gc
-if _SSL_ENABLED:
-    import ssl
 
 HTTP_PORT = const(80)
 HTTPS_PORT = const(443)
@@ -1334,6 +1330,8 @@ class HTTPConnection:
             _close_quietly(sock)
 
 if _SSL_ENABLED:
+
+    import ssl
 
     class HTTPSConnection(HTTPConnection):
         default_port = HTTPS_PORT
