@@ -50,38 +50,31 @@ def compile_safe(safe, flags=0):
 
 @micropython.viper
 def _quote_helper(src: ptr8, srclen: int, safeblob_obj: object, res: ptr8) -> int:
-    safeblob = ptr32(safeblob_obj)
-    flags = safeblob[0] & 0xFF
-    if (flags != 0 and flags != 1) or (safeblob[0] >> 24) != 0x69:
+    safeblob = ptr8(safeblob_obj)
+    write = int(res) != 0
+    flags = safeblob[0]
+
+    if (flags != 0 and flags != 1) or safeblob[3] != 0x69:
         return -999
-    safe1 = safeblob[1] # 32-63
-    safe2 = safeblob[2] # 64-95
-    safe3 = safeblob[3] # 96-127
 
     hex_digits = ptr8(_HEX_DIGITS)
-    write = int(res) != 0
     modified = 0
     reslen = 0
     i = 0
+
     while i < srclen:
         b = src[i]
         i += 1
 
-        if b == 32 and flags == 1: # space and quote_plus
+        if b == 32 and flags:
             modified = 1
             if write:
-                res[reslen] = 43 # '+'
+                res[reslen] = 43
             reslen += 1
             continue
 
-        if b < 32:
-            is_safe = 0
-        elif b < 64:
-            is_safe = (safe1 >> (b & 31)) & 1
-        elif b < 96:
-            is_safe = (safe2 >> (b & 31)) & 1
-        elif b < 128:
-            is_safe = (safe3 >> (b & 31)) & 1
+        if 32 <= b and b < 128:
+            is_safe = (safeblob[b >> 3] >> (b & 7)) & 1
         else:
             is_safe = 0
 
@@ -92,32 +85,36 @@ def _quote_helper(src: ptr8, srclen: int, safeblob_obj: object, res: ptr8) -> in
         else:
             modified = 1
             if write:
-                res[reslen] = 37 # '%'
+                res[reslen] = 37
                 res[reslen + 1] = hex_digits[b >> 4]
-                res[reslen + 2] = hex_digits[b & 0xF]
+                res[reslen + 2] = hex_digits[b & 15]
             reslen += 3
 
     return reslen if modified else -1
 
 def _quote(src, safe, flags):
-    if isinstance(safe, _compiled_blob):
+    srclen = len(src)
+    compiled = isinstance(safe, _compiled_blob)
+
+    if compiled:
         if len(safe) != 16 or safe[0] != flags:
-            raise TypeError("pre-compiled safe is incompatible with current method")
-    elif not safe:                                 # "" or b""
+            raise TypeError("incompatible safe")
+
+    if srclen == 0:
+        return None
+
+    if compiled:
+        pass
+    elif not safe:
         safe = _COMPILED_PLUS if flags else _COMPILED_EMPTY
-    elif not flags and len(safe) == 1 and safe[0] in (47, '/'):  # '/' or b'/'
+    elif not flags and len(safe) == 1 and safe[0] in (47, "/"):
         safe = _COMPILED_SLASH
     else:
         safe = compile_safe(safe, flags)
 
-    srclen = len(src)
     reslen = _quote_helper(src, srclen, safe, 0)
-    if reslen == -999:
-        raise NotImplementedError("compiled safe requires little-endian byte order")
     if reslen < 0:
         return None
-    if reslen == 0:
-        return b""
 
     res = bytearray(reslen)
     _quote_helper(src, srclen, safe, res)
@@ -246,17 +243,21 @@ def _unquote(src, start, end, plusmode):
 
 def unquote(s):
     if isinstance(s, str):
-        s = s.encode()
+        if "%" not in s:
+            return s
+        s = memoryview(s)
     return _unquote(s, 0, None, False).decode()
 
 def unquote_plus(s):
     if isinstance(s, str):
-        s = s.encode()
+        if "%" not in s and "+" not in s:
+            return s
+        s = memoryview(s)
     return _unquote(s, 0, None, True).decode()
 
 def unquote_to_bytes(s):
     if isinstance(s, str):
-        s = s.encode()
+        s = memoryview(s)
     return _unquote(s, 0, None, False)
 
 # Extension
@@ -550,36 +551,36 @@ def _parse_generator(s, *, keep_blank_values=False, strict_parsing=False,
             i = j + 1
             continue
 
-        eq = _mv_find(src, 61, i, j) # '='
+        eq = _mv_find(src, 61, i, j)
 
         try:
             if eq < 0:
-                # key (no '=')
                 if strict_parsing:
                     raise ValueError("bad query field")
-                if keep_blank_values:
-                    key = _unquote(src, i, j, True)
-                    val = b""
-                    if do_decode:
-                        key = key.decode()
-                        val = ""
-                    elif not isinstance(key, bytes):
-                        key = bytes(key)
-                    yield key, val
+                if not keep_blank_values:
+                    i = j + 1
+                    continue
+                eq = j
+                val = b""
             else:
-                # key=value
-                if keep_blank_values or (eq + 1 < j):
-                    key = _unquote(src, i, eq, True)
-                    val = _unquote(src, eq + 1, j, True)
-                    if do_decode:
-                        key = key.decode()
-                        val = val.decode()
-                    else:
-                        if not isinstance(key, bytes):
-                            key = bytes(key)
-                        if not isinstance(val, bytes):
-                            val = bytes(val)
-                    yield key, val
+                if not keep_blank_values and eq + 1 == j:
+                    i = j + 1
+                    continue
+                val = _unquote(src, eq + 1, j, True)
+
+            key = _unquote(src, i, eq, True)
+
+            if do_decode:
+                key = key.decode()
+                val = val.decode()
+            else:
+                if not isinstance(key, bytes):
+                    key = bytes(key)
+                if not isinstance(val, bytes):
+                    val = bytes(val)
+
+            yield key, val
+
         except UnicodeError:
             if errors != "ignore":
                 raise
@@ -651,7 +652,7 @@ def urljoin(base, url, allow_fragments=True):
         return res if ss else res.encode()
 
     base_parts = bpath.split('/')
-    if base_parts[-1] != (""):
+    if base_parts[-1]:
         # the last item is not a directory, so will not be taken into account
         # in resolving the relative path
         del base_parts[-1]
@@ -680,13 +681,13 @@ def urljoin(base, url, allow_fragments=True):
         elif seg != ".":
             segments[w] = seg
             w += 1
-    
+
     if segments[-1] in (".", ".."):
         segments[w] = ""
         w += 1
-    
+
     del segments[w:]
-    
+
     res = _urlunsplit(
         scheme,
         netloc,
