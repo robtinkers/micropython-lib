@@ -175,6 +175,7 @@ def _unquote_helper(src: ptr8, start: int, end: int, res: ptr8) -> int:
     else:
         plusmode = 0
     write = int(res) != 0
+
     modified = 0
     reslen = 0
     n1 = n2 = c = b = 0
@@ -182,6 +183,7 @@ def _unquote_helper(src: ptr8, start: int, end: int, res: ptr8) -> int:
     while i < end:
         b = src[i]
         i += 1
+
         if b == 37 and i + 1 < end: # '%'
             c = src[i]
             if 48 <= c and c <= 57: # 0-9
@@ -209,9 +211,11 @@ def _unquote_helper(src: ptr8, start: int, end: int, res: ptr8) -> int:
         elif b == 43 and plusmode: # '+'
             modified = 1
             b = 32 # space
+
         if write:
             res[reslen] = b
         reslen += 1
+
     return reslen if modified else -reslen
 
 def _unquote(src, start, end, plusmode):
@@ -312,7 +316,6 @@ def urlsplit_to_tuple(url, scheme=None, allow_fragments=True, *, missing_as_none
     starts = 0
     finish = len(url)
 
-    # 1. Skip leading whitespace
     for i in range(finish):
         if url[i] <= (" " if ss else 32):
             starts = i + 1
@@ -323,17 +326,14 @@ def urlsplit_to_tuple(url, scheme=None, allow_fragments=True, *, missing_as_none
     if scheme is None:
         scheme = missing
 
-    # 2. Extract Fragment (Right-to-Left)
     if allow_fragments and (i := url.find('#' if ss else b'#', starts)) >= 0:
         frag = url[i+1:]
         finish = i
 
-    # 3. Extract Query (Right-to-Left)
     if (i := url.find('?' if ss else b'?', starts)) >= 0 and i < finish:
         query = url[i+1:finish]
         finish = i
 
-    # 4. Extract Scheme (Left-to-Right)
     colon = url.find(':' if ss else b':', starts)
     if starts < colon < finish and url[starts:starts+1].isalpha():
         slash = url.find('/' if ss else b'/', starts)
@@ -341,7 +341,6 @@ def urlsplit_to_tuple(url, scheme=None, allow_fragments=True, *, missing_as_none
             scheme = url[starts:colon].lower()
             starts = colon + 1
 
-    # 5. Extract Netloc (Left-to-Right)
     if url.startswith("//" if ss else b"//", starts):
         starts += 2
         slash = url.find('/' if ss else b'/', starts)
