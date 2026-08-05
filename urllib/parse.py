@@ -673,4 +673,3 @@ def urljoin(base, url, allow_fragments: bool=True):
 
     res = _urlunsplit(scheme, netloc, "/".join(resolved_path) or "/", query, frag)
     return res if ss else res.encode()
-
