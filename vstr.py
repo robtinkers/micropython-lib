@@ -141,7 +141,7 @@ def rfindpin(haystack: object, pin: int) -> int:
     return -1
 
 @micropython.viper
-def findpin_slice(haystack_ptr: ptr8, start: int, end: int, pin: int) -> int:
+def slice_findpin(haystack_ptr: ptr8, start: int, end: int, pin: int) -> int:
     while start < end:
         if haystack_ptr[start] == pin:
             return start
@@ -149,7 +149,7 @@ def findpin_slice(haystack_ptr: ptr8, start: int, end: int, pin: int) -> int:
     return -1
 
 @micropython.viper
-def rfindpin_slice(haystack_ptr: ptr8, start: int, end: int, pin: int) -> int:
+def slice_rfindpin(haystack_ptr: ptr8, start: int, end: int, pin: int) -> int:
     while start < end:
         end -= 1
         if haystack_ptr[end] == pin:
@@ -171,8 +171,8 @@ def containspin(haystack: object, pin: int) -> int:
         haystack = memoryview(haystack)
     return 1 if findpin(haystack, pin) >= 0 else 0
 
-def containspin_slice(haystack_ptr, start: int, end: int, pin: int) -> int:
-    return 1 if findpin_slice(haystack_ptr, start, end, pin) >= 0 else 0
+def slice_containspin(haystack_ptr, start: int, end: int, pin: int) -> int:
+    return 1 if slice_findpin(haystack_ptr, start, end, pin) >= 0 else 0
 
 @micropython.viper
 def equals(haystack: object, needle: object) -> int:
@@ -226,7 +226,7 @@ def equals_ci(haystack: object, needle: object) -> int:
     return 1
 
 @micropython.viper
-def equals_slice(haystack_ptr: ptr8, start: int, end: int, needle_ptr: ptr8) -> int:
+def slice_equals(haystack_ptr: ptr8, start: int, end: int, needle_ptr: ptr8) -> int:
     i = start
     j = 0
     while i < end:
@@ -237,7 +237,7 @@ def equals_slice(haystack_ptr: ptr8, start: int, end: int, needle_ptr: ptr8) -> 
     return 1
 
 @micropython.viper
-def equals_slice_ci(haystack_ptr: ptr8, start: int, end: int, needle_ptr: ptr8) -> int:
+def slice_equals_ci(haystack_ptr: ptr8, start: int, end: int, needle_ptr: ptr8) -> int:
     i = start
     j = 0
     while i < end:
