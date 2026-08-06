@@ -82,7 +82,7 @@ def find(haystack: object, needle: object, needle_len=None, *, _flags=0) -> int:
         if needle_len is None:
             needle = memoryview(needle)
         else:
-            needle = memoryview(needle[:needle_len])
+            needle = memoryview(needle[:needle_len]) # ugh
         needle_len = len(needle)
     elif needle_len is None or needle_len > len(needle):
         needle_len = len(needle)
@@ -365,7 +365,7 @@ def containstoken(haystack: object, needle: object, needle_len=None, *, _flags=0
         if needle_len is None:
             needle = memoryview(needle)
         else:
-            needle = memoryview(needle[:needle_len])
+            needle = memoryview(needle[:needle_len]) # ugh
         needle_len = len(needle)
     elif needle_len is None or needle_len > len(needle):
         needle_len = len(needle)
