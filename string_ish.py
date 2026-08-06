@@ -157,19 +157,15 @@ def slice_containspin(haystack_ptr, start: int, end: int, pin: int) -> int:
     return 1 if slice_findpin(haystack_ptr, start, end, pin) >= 0 else 0
 
 @micropython.viper
-def _equals_flags(haystack: object, needle: object, ci_flag: int) -> int:
+def _equals(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int) -> int:
     if isinstance(haystack, str):
         haystack = memoryview(haystack)
-    if isinstance(needle, str):
-        needle = memoryview(needle)
 
     haystack_len = int(len(haystack))
-    needle_len = int(len(needle))
     if haystack_len != needle_len:
         return 0
 
     haystack_ptr = ptr8(haystack)
-    needle_ptr = ptr8(needle)
 
     i = 0
     while i < haystack_len:
@@ -186,11 +182,21 @@ def _equals_flags(haystack: object, needle: object, ci_flag: int) -> int:
         i += 1
     return 1
 
-def equals(haystack: object, needle: object) -> int:
-    return _equals_flags(haystack, needle, 0)
+def equals(haystack: object, needle: object, needle_len=None, *, _flags=0) -> int:
+    if isinstance(needle, str):
+        if needle_len is None:
+            needle = memoryview(needle)
+        else:
+            needle = memoryview(needle[:needle_len]) # ugh
+        needle_len = len(needle)
+    elif needle_len is None or needle_len > len(needle):
+        needle_len = len(needle)
+    elif needle_len < 0:
+        needle_len = max(0, len(needle) + needle_len)
+    return _equals(haystack, needle, needle_len, _flags)
 
-def equals_ci(haystack: object, needle: object) -> int:
-    return _equals_flags(haystack, needle, 1)
+def equals_ci(haystack: object, needle: object, needle_len=None) -> int:
+    return equals(haystack, needle, needle_len, _flags=1)
 
 @micropython.viper
 def slice_equals(haystack_ptr: ptr8, start: int, end: int, needle_ptr: ptr8) -> int:
