@@ -262,6 +262,12 @@ def unquote_to_bytes(s):
     return _unquote(s, 0, None, False)
 
 # Extension
+def unquote_plus_to_bytes(s):
+    if isinstance(s, str):
+        s = memoryview(s)
+    return _unquote(s, 0, None, True)
+
+# Extension
 def locsplit_to_tuple(netloc, *, missing_as_none=False):
     ss = isinstance(netloc, str)
     missing = None if missing_as_none else "" if ss else b""
