@@ -94,9 +94,13 @@ def find_ci(haystack: object, needle: object, needle_len=None) -> int:
     return find(haystack, needle, needle_len, _flags=1)
 
 def contains(haystack: object, needle: object, needle_len=None) -> int:
+    if isinstance(haystack, str):
+        haystack = memoryview(haystack)
     return 1 if find(haystack, needle, needle_len) >= 0 else 0
 
 def contains_ci(haystack: object, needle: object, needle_len=None) -> int:
+    if isinstance(haystack, str):
+        haystack = memoryview(haystack)
     return 1 if find(haystack, needle, needle_len, _flags=1) >= 0 else 0
 
 @micropython.viper
@@ -280,7 +284,7 @@ def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag:
         return 0
     haystack_len = int(len(haystack))
     if needle_len < 0 or haystack_len < needle_len:
-        return -1
+        return 0
     last_start = haystack_len - needle_len
 
     haystack_ptr = ptr8(haystack)
