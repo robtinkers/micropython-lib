@@ -275,16 +275,15 @@ def locsplit_to_tuple(netloc, *, missing_as_none=False):
         hostport = netloc
         username, password = missing, missing
 
-    if hostport and hostport.startswith('[' if ss else b'['): # Handle IPv6 (simple check)
-        if (sep := hostport.find(']' if ss else b']')) >= 0:
-            host, port = hostport[1:sep], hostport[sep+1:]
-        else: # *shrug*
-            host, port = hostport, missing
-    else:
-        if (sep := hostport.rfind(':' if ss else b':')) >= 0:
-            host, port = hostport[:sep], hostport[sep:]
+    if (sep := hostport.find('[' if ss else b'[')) >= 0:
+        if (0 == sep < (port := hostport.find(']' if ss else b']', sep))):
+            host, port = hostport[sep+1:port], hostport[port+1:]
         else:
-            host, port = hostport, missing
+            raise ValueError("bad IPv6 address")
+    elif (sep := hostport.rfind(':' if ss else b':')) >= 0:
+        host, port = hostport[:sep], hostport[sep:]
+    else:
+        host, port = hostport, missing
 
     if host:
         # Preserve zone ID case for IPv6 scoped addresses
@@ -352,6 +351,10 @@ def urlsplit_to_tuple(url, scheme=None, allow_fragments=True, *, missing_as_none
         delim = slash if (0 <= slash < finish) else finish
         netloc = url[starts:delim]
         starts = delim
+
+    if netloc and (i := netloc.find('[' if ss else b'[')) >= 0:
+        if not (netloc.rfind('@' if ss else b'@') + 1 == i < netloc.find(']' if ss else b']')):
+            raise ValueError("bad IPv6 address")
 
     return (scheme, netloc, url[starts:finish], query, frag)
 
