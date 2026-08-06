@@ -41,9 +41,9 @@ def _find(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int) -> 
     if isinstance(haystack, str):
         return -1
 
-    haystack_len = int(len(haystack))
     if needle_len == 0:
         return 0
+    haystack_len = int(len(haystack))
     if needle_len < 0 or haystack_len < needle_len:
         return -1
     last_start = haystack_len - needle_len
@@ -86,6 +86,8 @@ def find(haystack: object, needle: object, needle_len=None, *, _flags=0) -> int:
         needle_len = len(needle)
     elif needle_len is None or needle_len > len(needle):
         needle_len = len(needle)
+    elif needle_len < 0:
+        needle_len = max(0, len(needle) + needle_len)
     return _find(haystack, needle, needle_len, _flags)
 
 def find_ci(haystack: object, needle: object, needle_len=None) -> int:
@@ -307,9 +309,9 @@ def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag:
     if isinstance(haystack, str):
         haystack = memoryview(haystack)
 
-    haystack_len = int(len(haystack))
     if needle_len == 0:
         return 0
+    haystack_len = int(len(haystack))
     if needle_len < 0 or haystack_len < needle_len:
         return -1
     last_start = haystack_len - needle_len
@@ -367,6 +369,8 @@ def containstoken(haystack: object, needle: object, needle_len=None, *, _flags=0
         needle_len = len(needle)
     elif needle_len is None or needle_len > len(needle):
         needle_len = len(needle)
+    elif needle_len < 0:
+        needle_len = max(0, len(needle) + needle_len)
     return _containstoken(haystack, needle, needle_len, _flags)
 
 def containstoken_ci(haystack: object, needle: object, needle_len=None) -> int:
