@@ -320,12 +320,6 @@ def urlsplit_to_tuple(url, scheme=None, allow_fragments=True, *, missing_as_none
     starts = 0
     finish = len(url)
 
-    for i in range(finish):
-        if url[i] <= (" " if ss else 32):
-            starts = i + 1
-        else:
-            break
-
     netloc = query = frag = missing
     if scheme is None:
         scheme = missing
