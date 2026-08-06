@@ -1,6 +1,4 @@
-# stringish.py
-#
-# stringish helpers for MicroPython
+# string_ish.py
 
 @micropython.viper
 def upper(buf: object, writeable: int) -> int:
