@@ -84,10 +84,8 @@ def find(haystack: object, needle: object, needle_len=None, *, _flags=0) -> int:
         else:
             needle = memoryview(needle[:needle_len])
         needle_len = len(needle)
-    elif needle_len is None:
+    elif needle_len is None or needle_len > len(needle):
         needle_len = len(needle)
-    elif needle_len > len(needle):
-        return -1
     return _find(haystack, needle, needle_len, _flags)
 
 def find_ci(haystack: object, needle: object, needle_len=None) -> int:
@@ -330,7 +328,6 @@ def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag:
             ):
                 i += 1
                 continue
-
         # Candidate must end at a token boundary.
         after = i + needle_len
         if after < haystack_len:
@@ -342,12 +339,11 @@ def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag:
             ):
                 i += 1
                 continue
-
+        # Test candidate
         j = 0
         while j < needle_len:
             x = haystack_ptr[i + j]
             y = needle_ptr[j]
-
             if x != y:
                 if ci_flag:
                     if 65 <= x and x <= 90:
@@ -356,14 +352,10 @@ def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag:
                         y += 32
                 if x != y:
                     break
-
             j += 1
-
         if j == needle_len:
             return 1
-
         i += 1
-
     return 0
 
 def containstoken(haystack: object, needle: object, needle_len=None, *, _flags=0) -> int:
@@ -373,10 +365,8 @@ def containstoken(haystack: object, needle: object, needle_len=None, *, _flags=0
         else:
             needle = memoryview(needle[:needle_len])
         needle_len = len(needle)
-    elif needle_len is None:
+    elif needle_len is None or needle_len > len(needle):
         needle_len = len(needle)
-    elif needle_len > len(needle):
-        return 0
     return _containstoken(haystack, needle, needle_len, _flags)
 
 def containstoken_ci(haystack: object, needle: object, needle_len=None) -> int:
