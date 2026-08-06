@@ -1,6 +1,9 @@
 
 @micropython.viper
 def upper(buf: object, writeable: int) -> int:
+    if isinstance(buf, str):
+        buf = memoryview(buf)
+
     buf_len = int(len(buf))
     buf_ptr = ptr8(buf)
     result = 0
@@ -16,6 +19,9 @@ def upper(buf: object, writeable: int) -> int:
 
 @micropython.viper
 def lower(buf: object, writeable: int) -> int:
+    if isinstance(buf, str):
+        buf = memoryview(buf)
+
     buf_len = int(len(buf))
     buf_ptr = ptr8(buf)
     result = 0
