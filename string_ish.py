@@ -293,7 +293,7 @@ def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag:
             if ((48 <= x and x <= 57)
                 or (65 <= x and x <= 90)
                 or (97 <= x and x <= 122)
-                or x == 45 or x == 46 or x == 95
+                or x == 45 or x == 46 or x == 95 # -._
             ):
                 i += 1
                 continue
@@ -304,7 +304,7 @@ def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag:
             if ((48 <= x and x <= 57)
                 or (65 <= x and x <= 90)
                 or (97 <= x and x <= 122)
-                or x == 45 or x == 46 or x == 95
+                or x == 45 or x == 46 or x == 95 # -._
             ):
                 i += 1
                 continue
