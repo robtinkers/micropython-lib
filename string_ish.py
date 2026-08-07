@@ -129,7 +129,7 @@ def all_ascii(buf: object) -> bool:
     return True
 
 @micropython.viper
-def _spaces(buf: object, flags: int) -> object:
+def _strip(buf: object, flags: int) -> object:
     if _CHECK_OBJECT_TYPE and not isinstance(buf, _BYTES_LIKE):
         raise TypeError("buf")
 
@@ -150,14 +150,14 @@ def _spaces(buf: object, flags: int) -> object:
             start += 1
     return (start, end)
 
-def spaces(buf: object) -> tuple:
-    return _spaces(buf, 3)
+def strip(buf: object) -> tuple:
+    return _strip(buf, 3)
 
-def lspaces(buf: object) -> int:
-    return _spaces(buf, 2)[0]
+def lstrip(buf: object) -> int:
+    return _strip(buf, 2)[0]
 
-def rspaces(buf: object) -> int:
-    return _spaces(buf, 1)[1]
+def rstrip(buf: object) -> int:
+    return _strip(buf, 1)[1]
 
 @micropython.viper
 def _find(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int) -> int:
