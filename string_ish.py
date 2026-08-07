@@ -1,6 +1,9 @@
 # string_ish.py
 
-_BYTES_LIKE = (bytes, bytearray, memoryview)
+_CHECK_OBJECT_TYPE = const(0)
+
+if _CHECK_OBJECT_TYPE:
+    _BYTES_LIKE = (bytes, bytearray, memoryview)
 
 def _dispatch(func, haystack: object, needle: object, needle_len=None, flags=0):
     if isinstance(needle, str):
@@ -19,7 +22,7 @@ def _dispatch(func, haystack: object, needle: object, needle_len=None, flags=0):
 def _to(buf: object, flags: int) -> int:
     if isinstance(buf, str):
         buf = memoryview(buf)
-    elif not isinstance(buf, _BYTES_LIKE):
+    elif _CHECK_OBJECT_TYPE and not isinstance(buf, _BYTES_LIKE):
         raise TypeError("buf")
     mutable = isinstance(buf, bytearray) or bool(flags & 128)
 
@@ -53,7 +56,7 @@ def to_upper(buf: object, force: bool=False) -> int:
 def _all(buf: object, flags: int) -> bool:
     if isinstance(buf, str):
         buf = memoryview(buf)
-    elif not isinstance(buf, _BYTES_LIKE):
+    elif _CHECK_OBJECT_TYPE and not isinstance(buf, _BYTES_LIKE):
         raise TypeError("buf")
 
     buf_len = int(len(buf))
@@ -102,15 +105,32 @@ def all_lower(buf: object) -> bool:
 def all_digit(buf: object) -> bool:
     return _all(buf, 2)
 
-def all_ascii(buf: object) -> bool:
-    return _all(buf, 1|2|4|8|16|64)
-
 def all_print(buf: object) -> bool:
     return _all(buf, 2|4|8|64)
 
+#def all_ascii(buf: object) -> bool:
+#    return _all(buf, 1|2|4|8|16|64)
+
 @micropython.viper
-def _strip(buf: object, flags: int) -> object:
-    if not isinstance(buf, _BYTES_LIKE):
+def all_ascii(buf: object) -> bool:
+    if isinstance(buf, str):
+        buf = memoryview(buf)
+    elif _CHECK_OBJECT_TYPE and not isinstance(buf, _BYTES_LIKE):
+        raise TypeError("buf")
+
+    buf_len = int(len(buf))
+    buf_ptr = ptr8(buf)
+
+    i = 0
+    while i < buf_len:
+        if buf_ptr[i] >= 128:
+            return False
+        i += 1
+    return True
+
+@micropython.viper
+def _spaces(buf: object, flags: int) -> object:
+    if _CHECK_OBJECT_TYPE and not isinstance(buf, _BYTES_LIKE):
         raise TypeError("buf")
 
     buf_len = int(len(buf))
@@ -130,18 +150,18 @@ def _strip(buf: object, flags: int) -> object:
             start += 1
     return (start, end)
 
-def strip(buf: object) -> tuple:
-    return _strip(buf, 3)
+def spaces(buf: object) -> tuple:
+    return _spaces(buf, 3)
 
-def lstrip(buf: object) -> int:
-    return _strip(buf, 2)[0]
+def lspaces(buf: object) -> int:
+    return _spaces(buf, 2)[0]
 
-def rstrip(buf: object) -> int:
-    return _strip(buf, 1)[0]
+def rspaces(buf: object) -> int:
+    return _spaces(buf, 1)[1]
 
 @micropython.viper
 def _find(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int) -> int:
-    if not isinstance(haystack, _BYTES_LIKE):
+    if _CHECK_OBJECT_TYPE and not isinstance(haystack, _BYTES_LIKE):
         raise TypeError("haystack")
 
     haystack_len = int(len(haystack))
@@ -188,8 +208,8 @@ def find_ci(haystack: object, needle: object, needle_len=None) -> int:
 
 @micropython.viper
 def _rfind(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int) -> int:
-    if isinstance(haystack, str):
-        haystack = memoryview(haystack)
+    if _CHECK_OBJECT_TYPE and not isinstance(haystack, _BYTES_LIKE):
+        raise TypeError("haystack")
 
     haystack_len = int(len(haystack))
     if needle_len == 0:
@@ -246,7 +266,7 @@ def contains_ci(haystack: object, needle: object, needle_len=None) -> bool:
 def countpins(haystack: object, pin: int) -> int:
     if isinstance(haystack, str):
         haystack = memoryview(haystack)
-    elif not isinstance(haystack, _BYTES_LIKE):
+    elif _CHECK_OBJECT_TYPE and not isinstance(haystack, _BYTES_LIKE):
         raise TypeError("haystack")
 
     haystack_len = int(len(haystack))
@@ -262,7 +282,7 @@ def countpins(haystack: object, pin: int) -> int:
 
 @micropython.viper
 def findpin(haystack: object, pin: int) -> int:
-    if not isinstance(haystack, _BYTES_LIKE):
+    if _CHECK_OBJECT_TYPE and not isinstance(haystack, _BYTES_LIKE):
         raise TypeError("haystack")
 
     haystack_len = int(len(haystack))
@@ -277,7 +297,7 @@ def findpin(haystack: object, pin: int) -> int:
 
 @micropython.viper
 def rfindpin(haystack: object, pin: int) -> int:
-    if not isinstance(haystack, _BYTES_LIKE):
+    if _CHECK_OBJECT_TYPE and not isinstance(haystack, _BYTES_LIKE):
         raise TypeError("haystack")
 
     haystack_len = int(len(haystack))
@@ -318,7 +338,7 @@ def slice_containspin(haystack_ptr, start: int, end: int, pin: int) -> bool:
 def _equals(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int) -> bool:
     if isinstance(haystack, str):
         haystack = memoryview(haystack)
-    elif not isinstance(haystack, _BYTES_LIKE):
+    elif _CHECK_OBJECT_TYPE and not isinstance(haystack, _BYTES_LIKE):
         raise TypeError("haystack")
 
     haystack_len = int(len(haystack))
@@ -363,11 +383,11 @@ def slice_equals(haystack_ptr: ptr8, start: int, end: int, needle_ptr: ptr8) -> 
 def _startswith(haystack: object, needle: object, ci_flag: int) -> bool:
     if isinstance(haystack, str):
         haystack = memoryview(haystack)
-    elif not isinstance(haystack, _BYTES_LIKE):
+    elif _CHECK_OBJECT_TYPE and not isinstance(haystack, _BYTES_LIKE):
         raise TypeError("haystack")
     if isinstance(needle, str):
         needle = memoryview(needle)
-    elif not isinstance(needle, _BYTES_LIKE):
+    elif _CHECK_OBJECT_TYPE and not isinstance(needle, _BYTES_LIKE):
         raise TypeError("needle")
 
     haystack_len = int(len(haystack))
@@ -403,11 +423,11 @@ def startswith_ci(haystack: object, needle: object) -> bool:
 def _endswith(haystack: object, needle: object, ci_flag: int) -> bool:
     if isinstance(haystack, str):
         haystack = memoryview(haystack)
-    elif not isinstance(haystack, _BYTES_LIKE):
+    elif _CHECK_OBJECT_TYPE and not isinstance(haystack, _BYTES_LIKE):
         raise TypeError("haystack")
     if isinstance(needle, str):
         needle = memoryview(needle)
-    elif not isinstance(needle, _BYTES_LIKE):
+    elif _CHECK_OBJECT_TYPE and not isinstance(needle, _BYTES_LIKE):
         raise TypeError("needle")
 
     i = int(len(haystack))
@@ -443,7 +463,7 @@ def endswith_ci(haystack: object, needle: object) -> bool:
 def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int) -> bool:
     if isinstance(haystack, str):
         haystack = memoryview(haystack)
-    elif not isinstance(haystack, _BYTES_LIKE):
+    elif _CHECK_OBJECT_TYPE and not isinstance(haystack, _BYTES_LIKE):
         raise TypeError("haystack")
 
     haystack_len = int(len(haystack))
@@ -497,8 +517,8 @@ def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag:
         i += 1
     return False
 
-def containstoken(haystack: object, needle: object, needle_len=None) -> int:
-    return _dispatch(_containstoken, needle, needle_len, 0)
+def containstoken(haystack: object, needle: object, needle_len=None) -> bool:
+    return _dispatch(_containstoken, haystack, needle, needle_len, 0)
 
-def containstoken_ci(haystack: object, needle: object, needle_len=None) -> int:
-    return _dispatch(_containstoken, needle, needle_len, 1)
+def containstoken_ci(haystack: object, needle: object, needle_len=None) -> bool:
+    return _dispatch(_containstoken, haystack, needle, needle_len, 1)
