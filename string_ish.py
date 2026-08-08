@@ -138,26 +138,26 @@ def _strip(buf: object, flags: int) -> object:
 
     start = 0
     end = buf_len
-    if flags & 1:
-        while end:
+    if flags & 2:
+        while end > start:
             if buf_ptr[end-1] > 32:
                 break
             end -= 1
-    if flags & 2:
+    if flags & 1:
         while start < end:
             if buf_ptr[start] > 32:
                 break
             start += 1
-    return (start, end)
+    return (start, buf_len - end)
+
+def lstrip(buf: object) -> int:
+    return _strip(buf, 1)[0]
+
+def rstrip(buf: object) -> int:
+    return _strip(buf, 2)[1]
 
 def strip(buf: object) -> tuple:
     return _strip(buf, 3)
-
-def lstrip(buf: object) -> int:
-    return _strip(buf, 2)[0]
-
-def rstrip(buf: object) -> int:
-    return _strip(buf, 1)[1]
 
 @micropython.viper
 def _find(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int) -> int:
