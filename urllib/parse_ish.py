@@ -153,7 +153,6 @@ def quote_from_bytes(bs, safe="/"):
         raise TypeError("bytes required")
     return quote(bs, safe)
 
-# Extension
 def quote_to_bytes(s, safe="/"):
     if isinstance(s, str):
         res = _quote(memoryview(s), safe, 0)
@@ -162,21 +161,6 @@ def quote_to_bytes(s, safe="/"):
         return res
     else:
         res = _quote(s, safe, 0)
-        if res is None:
-            res = s
-            if isinstance(res, memoryview):
-                res = bytes(res)
-        return res
-
-# Extension
-def quote_plus_to_bytes(s, safe=""):
-    if isinstance(s, str):
-        res = _quote(memoryview(s), safe, 1)
-        if res is None:
-            return s.encode()
-        return res
-    else:
-        res = _quote(s, safe, 1)
         if res is None:
             res = s
             if isinstance(res, memoryview):
@@ -514,6 +498,12 @@ def _urlencode_generator(query, doseq, safe, quote_via, equals):
         yield key + equals + quote_via(val, safe)
 
 def urlencode(query, doseq=False, safe="", quote_via=quote_plus):
+    if safe and not isinstance(safe, _compiled_blob):
+        if quote_via is quote_plus:
+            safe = compile_safe(safe, 1)
+        elif quote_via is quote:
+            safe = compile_safe(safe, 0)
+
     if quote_via is quote_plus or isinstance(quote_via(""), str):
         separator, equals = "&", "="
     else:
@@ -529,13 +519,17 @@ def urlencode(query, doseq=False, safe="", quote_via=quote_plus):
     )
 
 @micropython.viper
-def _mv_find(mv: ptr8, b: int, start: int, end: int) -> int:
+def _find_equalsep(mv: ptr8, start: int, end: int, separator: int) -> object:
+    equals = -1
     i = start
     while i < end:
-        if mv[i] == b:
-            return i
+        b = mv[i]
+        if b == separator:
+            return (equals, i)
+        if b == 61 and equals < 0:
+            equals = i
         i += 1
-    return -1
+    return (equals, end)
 
 def _parse_generator(s, *, keep_blank_values=False, strict_parsing=False,
                      errors="ignore", max_num_fields=None, separator='&'):
@@ -562,16 +556,12 @@ def _parse_generator(s, *, keep_blank_values=False, strict_parsing=False,
             num_fields += 1
             if num_fields > max_num_fields:
                 raise ValueError("Max number of fields exceeded")
-        j = _mv_find(src, sep, i, srclen)
-        if j < 0:
-            j = srclen
+        eq, j = _find_equalsep(src, i, srclen, sep)
         if i == j:
             if strict_parsing:
                 raise ValueError("bad query field")
             i = j + 1
             continue
-
-        eq = _mv_find(src, 61, i, j)
 
         try:
             if eq < 0:
@@ -610,10 +600,11 @@ def _parse_generator(s, *, keep_blank_values=False, strict_parsing=False,
 def parse_qs(qs, *args, **kwargs):
     res = {}
     for key, val in _parse_generator(qs, *args, **kwargs):
-        if key in res:
-            res[key].append(val)
-        else:
+        values = res.get(key)
+        if values is None:
             res[key] = [val]
+        else:
+            values.append(val)
     return res
 
 def parse_qsl(qs, *args, **kwargs):
