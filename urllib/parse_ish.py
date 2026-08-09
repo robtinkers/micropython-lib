@@ -153,6 +153,7 @@ def quote_from_bytes(bs, safe="/"):
         raise TypeError("bytes required")
     return quote(bs, safe)
 
+# Extension
 def quote_to_bytes(s, safe="/"):
     if isinstance(s, str):
         res = _quote(memoryview(s), safe, 0)
@@ -161,6 +162,21 @@ def quote_to_bytes(s, safe="/"):
         return res
     else:
         res = _quote(s, safe, 0)
+        if res is None:
+            res = s
+            if isinstance(res, memoryview):
+                res = bytes(res)
+        return res
+
+# Extension
+def quote_plus_to_bytes(s, safe=""):
+    if isinstance(s, str):
+        res = _quote(memoryview(s), safe, 1)
+        if res is None:
+            return s.encode()
+        return res
+    else:
+        res = _quote(s, safe, 1)
         if res is None:
             res = s
             if isinstance(res, memoryview):
