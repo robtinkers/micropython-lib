@@ -765,7 +765,7 @@ def urljoin(base, url, allow_fragments=True):
     if base_parts[-1]:
         del base_parts[-1]
 
-    if path.startswith(xSLASH): # `not path` was already checked earlier
+    if path.startswith(xSLASH):
         segments = path.split(xSLASH)
     else:
         segments = base_parts
