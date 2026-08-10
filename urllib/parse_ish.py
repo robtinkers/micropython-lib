@@ -5,8 +5,8 @@
 import micropython
 
 _USES_RELATIVE = (
-    "http", "https", "ws", "wss", "ftp", "file",
-    "sftp", "rtsp", "rtsps", "rtspu", "shttp",
+    b"http", b"https", b"ws", b"wss",
+     "http",  "https",  "ws",  "wss",
 )
 
 _USES_NETLOC = _USES_RELATIVE
@@ -241,7 +241,6 @@ def _unquote(src, start, end, plusmode):
     srclen = len(src)
     if end is None:
         end = srclen
-    assert(0 <= start <= end <= srclen)
     if start == end:
         return b""
 
@@ -274,15 +273,16 @@ def unquote_plus(s):
         s = memoryview(s)
     return _unquote(s, 0, None, True).decode()
 
+# Extension: can return a fresh bytearray
 def unquote_to_bytes(s):
     if isinstance(s, str):
         s = memoryview(s)
     res = _unquote(s, 0, None, False)
-    if res is s and not isinstance(res, bytes):
+    if not isinstance(res, bytes) and res is s:
         res = bytes(res)
     return res
 
-# Extension
+# Extension: can return a fresh bytearray
 def unquote_plus_to_bytes(s):
     if isinstance(s, str):
         s = memoryview(s)
@@ -326,7 +326,7 @@ def locsplit_to_tuple(netloc, *, missing_as_none=False):
         # Preserve zone ID case for IPv6 scoped addresses
         if (sep := host.find('%' if ss else b'%')) >= 0:
             host = host[:sep].lower() + host[sep:]
-        else:
+        elif not host.islower():
             host = host.lower()
     else:
         host = None
@@ -344,7 +344,13 @@ def locsplit_to_tuple(netloc, *, missing_as_none=False):
 
 # Extension
 def locsplit(netloc, *, missing_as_none=False):
-    return dict(zip(('username', 'password', 'hostname', 'port'), locsplit_to_tuple(netloc, missing_as_none=missing_as_none)))
+    result = locsplit_to_tuple(netloc, missing_as_none=missing_as_none)
+    return {
+        "username": result[0],
+        "password": result[1],
+        "hostname": result[2],
+        "port": result[3],
+    }
 
 @micropython.viper
 def _is_scheme(buf_ptr: ptr8, start: int, colon: int) -> bool:
@@ -435,19 +441,22 @@ def urlsplit_to_tuple(url, scheme=None, allow_fragments=True, *, missing_as_none
     return (scheme, netloc, url[start:end], query, frag)
 
 class SplitResult(tuple):
+    _keep_empty = False
 
-    def __init__(self, scheme, netloc, path, query, frag):
-        super().__init__((scheme, netloc, path, query, frag))
-        self._locsplit_ = None
-        if not isinstance(netloc, (str, bytes)):
+    def __init__(self, the_tuple):
+        if len(the_tuple) != 5:
+            raise ValueError("invalid SplitResult")
+        super().__init__(the_tuple)
+        if not isinstance(the_tuple[1], (str, bytes)):
             self._locsplit
-        self._keep_empty = False
 
     @property
     def _locsplit(self):
-        if self._locsplit_ is None:
-            self._locsplit_ = locsplit_to_tuple(self[1], missing_as_none=True)
-        return self._locsplit_
+        result = getattr(self, "_locsplit_", None)
+        if result is None:
+            result = locsplit_to_tuple(self[1], missing_as_none=True)
+            self._locsplit_ = result
+        return result
 
     @property
     def scheme(self): return self[0]
@@ -485,8 +494,10 @@ class SplitResult(tuple):
     def geturl(self):
         return urlunsplit(self)
 
-keep_def urlsplit(url, scheme=None, allow_fragments=True, *, missing_as_none=False):
-    res = SplitResult(*urlsplit_to_tuple(url, scheme, allow_fragments, missing_as_none=missing_as_none))
+def urlsplit(url, scheme=None, allow_fragments=True, *, missing_as_none=False):
+    res = SplitResult(urlsplit_to_tuple(url, scheme, allow_fragments, missing_as_none=missing_as_none))
+    if missing_as_none:
+        res._keep_empty = True
     return res
 
 def _urlunsplit(scheme, netloc, path, query, frag):
@@ -523,6 +534,8 @@ def _urlunsplit(scheme, netloc, path, query, frag):
 def urlunsplit(components, *, keep_empty=None):
     if keep_empty is None:
         keep_empty = getattr(components, "_keep_empty", False)
+    elif keep_empty and not getattr(components, "_keep_empty", True):
+        raise ValueError("cannot distinguish empty and missing URI components")
 
     scheme, netloc, path, query, frag = components
     ss = isinstance(path, str)
@@ -549,31 +562,7 @@ def urlunsplit(components, *, keep_empty=None):
 
     return _urlunsplit(scheme, netloc, path, query, frag)
 
-def _urlencode_generator(query, doseq, safe, quote_via, equals):
-    if hasattr(query, "items"):
-        query = query.items()
-    for item in query:
-        if not isinstance(item, (list, tuple)) or len(item) != 2:
-            raise TypeError("query item is not a key-value pair")
-        key, val = item
-        if not isinstance(key, (str, bytes, bytearray)):
-            key = str(key)
-        key = quote_via(key, safe)
-
-        if not isinstance(val, (str, bytes, bytearray)):
-            if doseq and not isinstance(val, memoryview):
-                try: len(val)
-                except TypeError: pass
-                else:
-                    for v in val:
-                        if not isinstance(v, (str, bytes, bytearray)):
-                            v = str(v)
-                        yield key + equals + quote_via(v, safe)
-                    continue
-            val = str(val)
-        yield key + equals + quote_via(val, safe)
-
-def urlencode(query, doseq=False, safe="", quote_via=quote_plus):
+def urlencode(query, doseq=False, safe="", *, quote_via=quote_plus):
     if quote_via is quote_plus or quote_via is quote:
         if safe and not isinstance(safe, _compiled_safe):
             safe = compile_safe(safe, 1 if quote_via is quote_plus else 0)
@@ -587,38 +576,60 @@ def urlencode(query, doseq=False, safe="", quote_via=quote_plus):
     else:
         separator, equals = b"&", b"="
 
-    return separator.join(
-        _urlencode_generator(
-            query,
-            doseq,
-            safe,
-            quote_via,
-            equals,
-        )
-    )
+    result = []
+
+    if hasattr(query, "items"):
+        query = query.items()
+    for item in query:
+        if not isinstance(item, (list, tuple)) or len(item) != 2:
+            raise TypeError("query item is not a key-value pair")
+        key, val = item
+        if not isinstance(key, (str, bytes, bytearray)):
+            key = str(key)
+        key = quote_via(key, safe)
+        if not isinstance(val, (str, bytes, bytearray)):
+            if doseq and not isinstance(val, memoryview):
+                try: len(val)
+                except TypeError: pass
+                else:
+                    for v in val:
+                        if not isinstance(v, (str, bytes, bytearray)):
+                            v = str(v)
+                        result.append(key + equals + quote_via(v, safe))
+                    continue
+            val = str(val)
+        result.append(key + equals + quote_via(val, safe))
+
+    return separator.join(result)
 
 @micropython.viper
-def _parse_helper(mv: ptr8, start: int, end: int, separator: int) -> object:
-    equals = -1
+def _parse_counter(ptr: ptr8, length: int, pin: int) -> int:
+    count = 0
+    i = 0
+    while i < length:
+        if ptr[i] == pin:
+            count += 1
+        i += 1
+    return count
+
+@micropython.viper
+def _parse_scanner(ptr: ptr8, start: int, end: int, pin: int) -> int:
     i = start
     while i < end:
-        b = mv[i]
-        if b == separator:
-            return (equals, i)
-        if b == 61 and equals < 0:
-            equals = i
+        if ptr[i] == pin:
+            return i
         i += 1
-    return (equals, end)
+    return -1
 
-def _parse_generator(s, *, keep_blank_values=False, strict_parsing=False,
+def _parse_generator(qs, *, keep_blank_values=False, strict_parsing=False,
                      errors="ignore", max_num_fields=None, separator='&'):
-    if s is None:
+    if qs is None:
         return
-    if isinstance(s, str):
-        src = memoryview(s)
+    if isinstance(qs, str):
+        src = memoryview(qs)
         do_decode = True
     else:
-        src = s
+        src = qs
         do_decode = False
     srclen = len(src)
     if srclen == 0:
@@ -628,21 +639,21 @@ def _parse_generator(s, *, keep_blank_values=False, strict_parsing=False,
     except TypeError: sep = -1
     if not (0 <= sep <= (127 if do_decode else 255)):
         raise ValueError("invalid separator")
+    if max_num_fields is not None and _parse_counter(src, srclen, sep) + 1 > max_num_fields:
+        raise ValueError("too many fields")
     i = 0
-    num_fields = 0
 
     while i <= srclen:
-        if max_num_fields is not None:
-            num_fields += 1
-            if num_fields > max_num_fields:
-                raise ValueError("Max number of fields exceeded")
-        eq, j = _parse_helper(src, i, srclen, sep)
+        j = _parse_scanner(src, i, srclen, sep)
+        if j < 0:
+            j = srclen
         if i == j:
             if strict_parsing:
                 raise ValueError("bad query field")
             i = j + 1
             continue
 
+        eq = _parse_scanner(src, i, j, 61)
         if eq < 0:
             if strict_parsing:
                 raise ValueError("bad query field")
@@ -677,9 +688,9 @@ def _parse_generator(s, *, keep_blank_values=False, strict_parsing=False,
 
         i = j + 1
 
-def parse_qs(qs, *args, **kwargs):
+def parse_qs(qs, **kwargs):
     res = {}
-    for key, val in _parse_generator(qs, *args, **kwargs):
+    for key, val in _parse_generator(qs, **kwargs):
         values = res.get(key)
         if values is None:
             res[key] = [val]
@@ -687,12 +698,15 @@ def parse_qs(qs, *args, **kwargs):
             values.append(val)
     return res
 
-def parse_qsl(qs, *args, **kwargs):
-    return list(_parse_generator(qs, *args, **kwargs))
+def parse_qsl(qs, **kwargs):
+    return list(_parse_generator(qs, **kwargs))
 
-def urldecode(qs, *args, **kwargs):
+def iter_qsl(qs, **kwargs):
+    return _parse_generator(qs, **kwargs)
+
+def urldecode(qs, **kwargs):
     res = {}
-    for key, val in _parse_generator(qs, *args, **kwargs):
+    for key, val in _parse_generator(qs, **kwargs):
         res[key] = val
     return res
 
@@ -716,9 +730,16 @@ def urljoin(base, url, allow_fragments=True):
         raise TypeError("arguments must be similar types")
 
     ss = isinstance(base, str)
-    if not ss:
-        base = base.decode()
-        url = url.decode()
+    if ss:
+        xDOT = '.'
+        xDOTDOT = '..'
+        xSLASH = '/'
+        xBLANK = ''
+    else:
+        xDOT = b'.'
+        xDOTDOT = b'..'
+        xSLASH = b'/'
+        xBLANK = b''
 
     bscheme, bnetloc, bpath, bquery, bfrag = urlsplit_to_tuple(base, None, allow_fragments, missing_as_none=True)
     scheme, netloc, path, query, frag = urlsplit_to_tuple(url, None, allow_fragments, missing_as_none=True)
@@ -726,11 +747,10 @@ def urljoin(base, url, allow_fragments=True):
     if scheme is None:
         scheme = bscheme
     if scheme != bscheme or (scheme and scheme not in _USES_RELATIVE):
-        return url if ss else url.encode()
+        return url
     if not scheme or scheme in _USES_NETLOC:
         if netloc:
-            res = _urlunsplit(scheme, netloc, path, query, frag)
-            return res if ss else res.encode()
+            return _urlunsplit(scheme, netloc, path, query, frag)
         netloc = bnetloc
 
     if not path:
@@ -739,51 +759,44 @@ def urljoin(base, url, allow_fragments=True):
             query = bquery
             if frag is None:
                 frag = bfrag
-        res = _urlunsplit(scheme, netloc, path, query, frag)
-        return res if ss else res.encode()
+        return _urlunsplit(scheme, netloc, path, query, frag)
 
-    base_parts = bpath.split('/')
+    base_parts = bpath.split(xSLASH)
     if base_parts[-1]:
-        # the last item is not a directory, so will not be taken into account
-        # in resolving the relative path
         del base_parts[-1]
 
-    # for rfc3986, ignore all base path should the first character be root.
-    if path.startswith('/'): # `not path` was already checked earlier
-        segments = path.split('/')
+    if path.startswith(xSLASH): # `not path` was already checked earlier
+        segments = path.split(xSLASH)
     else:
         segments = base_parts
-        segments.extend(path.split("/"))
-        # Remove empty segments in the middle (keep first and last as-is)
+        segments.extend(path.split(xSLASH))
         w = 1
         for r in range(1, len(segments) - 1):
             seg = segments[r]
             if seg:
                 segments[w] = seg
                 w += 1
-        # delete the now-unused tail (but preserve the last element)
         del segments[w:len(segments) - 1]
 
     w = 0
     for seg in segments:
-        if seg == "..":
+        if seg == xDOTDOT:
             if w:
                 w -= 1
-        elif seg != ".":
+        elif seg != xDOT:
             segments[w] = seg
             w += 1
 
-    if segments[-1] in (".", ".."):
-        segments[w] = ""
+    if segments[-1] in (xDOT, xDOTDOT):
+        segments[w] = xBLANK
         w += 1
 
     del segments[w:]
 
-    res = _urlunsplit(
+    return _urlunsplit(
         scheme,
         netloc,
-        "/".join(segments) or "/",
+        xSLASH.join(segments) or xSLASH,
         query,
         frag,
     )
-    return res if ss else res.encode()
