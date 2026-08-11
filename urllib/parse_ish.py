@@ -782,7 +782,7 @@ def urljoin(base, url, allow_fragments=True):
     for seg in segments:
         if seg == xDOTDOT:
             if w:
-                w -= 1
+                w -= 1_
         elif seg != xDOT:
             segments[w] = seg
             w += 1
