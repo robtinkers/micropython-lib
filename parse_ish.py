@@ -1,4 +1,4 @@
-# urllib/parse.py
+# parse_ish.py
 #
 # Serious parsing for tiny devices.
 
