@@ -1,4 +1,4 @@
-# http/client_ish.py
+# client_ish.py
 #
 # Serious HTTP for tiny devices.
 
