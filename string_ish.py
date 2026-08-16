@@ -545,8 +545,8 @@ def slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
     if start == end:
         return -1
 
-    cutoff = 0x7FFFFFFF // base
-    cutlim = 0x7FFFFFFF - cutoff * base
+    cutoff = 0x3FFFFFFF // base
+    cutlim = 0x3FFFFFFF - cutoff * base
 
     value = 0
     while start < end:
@@ -573,4 +573,4 @@ def slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
     return value
 
 def parse_uint(buf: object, base: int=10) -> int:
-    return slice_uint(buf, 0, len(buf), base)
+    return slice_uint(buf, 0, len(buf), base)	
