@@ -1,4 +1,6 @@
 # string_ish.py
+#
+# String helpers for tiny devices.
 
 _CHECK_OBJECT_TYPE = const(0)
 
