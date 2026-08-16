@@ -323,13 +323,13 @@ def _parse_status_line(sock):
     raise BadStatusLine(b"H" + line)
 
 def _header_value(line, name_length):
-    value_start = name_length + 1
+    name_length += 1
     value_end = len(line)
-    while value_start < value_end and line[value_start] <= 32:
-        value_start += 1
-    while value_end > value_start and line[value_end - 1] <= 32:
+    while name_length < value_end and line[name_length] <= 32:
+        name_length += 1
+    while value_end > name_length and line[value_end - 1] <= 32:
         value_end -= 1
-    return line[value_start:value_end]
+    return line[name_length:value_end]
 
 def _parse_headers(sock, status, with_headers):
     headers = None
