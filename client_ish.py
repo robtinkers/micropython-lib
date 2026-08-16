@@ -5,7 +5,7 @@
 import micropython, socket, errno, gc
 
 from string_ish import (
-    equals_ci, contains_ci, startswith_ci, endswith_ci, parse_uint, slice_uint,
+    equals_ci, contains_ci, startswith_ci, endswith_ci, parse_uint, slice_uint, slice_equals,
 )
 
 _COMPATISH_EXCEPTIONS = const(0)
@@ -15,6 +15,7 @@ _COMPATISH_DECODE_HEADERS = const(0)
 
 _EXTRA_METHODS = const(1)
 _ITERATE_HEADERS = const(1)
+_PARSE_REASON = const(1)
 _RECYCLE_BUFFERS = const(1)
 _SSL_ENABLED = const(1)
 
@@ -59,6 +60,13 @@ _TRANSFER_ENCODING = b"Transfer-Encoding"
 
 _CHUNKED = b"chunked"
 _CLOSE = b"close"
+if not _PARSE_REASON:
+    if _COMPATISH_DECODE_HEADERS:
+        _OKAY = "OK"
+        _NOT_OKAY = "Not OK"
+    else:
+        _OKAY = b"OK"
+        _NOT_OKAY = b"Not OK"
 
 _BUFFER_TYPES = (bytes, bytearray, memoryview)
 
@@ -265,36 +273,47 @@ def _parse_status_line(sock):
         if first != b"H":
             raise BadStatusLine(first + b"...")
         line = sock.readline()
-        if not line.startswith(b"TTP/") or line[-1] != 10:
+        line_length = len(line)
+
+        if (
+            line_length < 4
+            or not slice_equals(line, 0, 4, b"TTP/")
+            or line[line_length - 1] != 10
+        ):
             break
 
-        status = line.split(None, 2)
-        if len(status) == 3:
-            version, status, reason = status
-        elif len(status) == 2:
-            version, status = status
-            reason = b""
-        else:
+        pos = 4
+        while pos < line_length and line[pos] > 32:
+            pos += 1
+        if pos == line_length:
             break
 
-        if version == b"TTP/1.0":
-            version = 10
-        elif version.startswith(b"TTP/1."):
-            version = 11
+        if pos == 7 and slice_equals(line, 4, 7, b"1.0"):
+            first = 10
+        elif pos >= 6 and slice_equals(line, 4, 6, b"1."):
+            first = 11
         elif _COMPATISH_EXCEPTIONS:
-            raise UnknownProtocol(first + version)
+            raise UnknownProtocol(b"H" + line[:pos])
         else:
-            raise UnknownProtocol(first + line)
+            raise UnknownProtocol(b"H" + line)
 
-        if len(status) != 3:
+        while pos < line_length and line[pos] <= 32:
+            pos += 1
+        if pos + 3 >= line_length or line[pos + 3] > 32:
             break
-        status = parse_uint(status)
+        status = slice_uint(line, pos, pos + 3, 10)
         if status < 100:
             break
 
-        return version, status, reason
+        if _PARSE_REASON:
+            pos += 3
+            while pos < line_length and line[pos] <= 32:
+                pos += 1
+            return (first, status, b"" if pos == line_length else line[pos:])
+        else:
+            return (first, status, _OKAY if status == 200 else _NOT_OKAY)
 
-    raise BadStatusLine(first + line)
+    raise BadStatusLine(b"H" + line)
 
 def _header_value(line, name_length):
     value_start = name_length + 1
@@ -306,20 +325,11 @@ def _header_value(line, name_length):
     return line[value_start:value_end]
 
 def _parse_headers(sock, status, with_headers):
-    headers = []
+    headers = None
     content_length = None
     content_chunked = None
     new_location = None
     connection = None
-
-    if not with_headers or isinstance(with_headers, (bool, list, set, tuple)):
-        pass
-    elif isinstance(with_headers, (bytes, bytearray)):
-        with_headers = (with_headers, )
-    elif isinstance(with_headers, str):
-        with_headers = (with_headers.encode(), )
-    else:
-        with_headers = tuple(with_headers)
 
     while True:
         line = sock.readline()
@@ -328,6 +338,8 @@ def _parse_headers(sock, status, with_headers):
         if line[-1] != 10:
             raise IncompleteRead(None, "unterminated response header", None, None, status)
         if line == b"\r\n" or line == b"\n":
+            if headers is None:
+                headers = ()
             return headers, connection, content_chunked, content_length, new_location
         if line[0] <= 32:
             continue
@@ -351,11 +363,19 @@ def _parse_headers(sock, status, with_headers):
             new_location = line
 
         elif name_length == 10 and startswith_ci(line, _CONNECTION, 10):
-            line = _header_value(line, name_length)
-            connection = line
+            if retained_name is not None:
+                line = _header_value(line, name_length)
+                connection = line
+            else:
+                #TODO: something zero-allocation
+                line = _header_value(line, name_length)
+                connection = line
 
         elif name_length == 14 and startswith_ci(line, _CONTENT_LENGTH, 14):
+            #TODO: refactor this mess
             if retained_name is not None:
+                if headers is None:
+                    headers = []
                 headers.append((retained_name, _header_value(line, name_length)))
                 retained_name = None
             line = slice_uint(line, name_length + 1, len(line), 10)
@@ -365,8 +385,13 @@ def _parse_headers(sock, status, with_headers):
                 content_length = -1
 
         elif name_length == 17 and startswith_ci(line, _TRANSFER_ENCODING, 17):
-            line = _header_value(line, name_length)
-            content_chunked = endswith_ci(line, _CHUNKED, 7)
+            if retained_name is not None:
+                line = _header_value(line, name_length)
+                content_chunked = endswith_ci(line, _CHUNKED, 7)
+            else:
+                #TODO: something zero-allocation
+                line = _header_value(line, name_length)
+                content_chunked = endswith_ci(line, _CHUNKED, 7)
 
         elif retained_name is not None:
             line = _header_value(line, name_length)
@@ -375,6 +400,8 @@ def _parse_headers(sock, status, with_headers):
             continue
 
         if retained_name is not None:
+            if headers is None:
+                headers = []
             headers.append((retained_name, line))
 
 def _derive_response_framing(method, version, status, connection, chunked, length):
@@ -428,16 +455,20 @@ class HTTPResponse:
             raise ValueError("socket owner required")
         self._owner = owner
         self._sock = sock
+        self.method = method
         if _COMPATISH_DECODE_HEADERS:
             url = decode_latin1(url)
-            reason = decode_latin1(reason)
-        self.method = method
         self.url = url
         self.version = version
         self.status = status
         if _COMPATISH_MOST_METHODS:
             self.code = status
-        self._reason = reason
+        if _PARSE_REASON:
+            if _COMPATISH_DECODE_HEADERS:
+                reason = decode_latin1(reason)
+            self._reason = reason
+        else:
+            self.reason = reason
         self._headers = headers
         self._chunked = chunked
         self._length = length
@@ -449,9 +480,10 @@ class HTTPResponse:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    @property
-    def reason(self):
-        return self._reason.rstrip()
+    if _PARSE_REASON:
+        @property
+        def reason(self):
+            return self._reason.rstrip()
 
     def close(self):
         self._release_socket(self._count == self._length)
@@ -483,10 +515,10 @@ class HTTPResponse:
         name = _encode_and_validate(name)
         if name is None:
             return default
-        len_name = len(name)
+        name_length = len(name)
         result = None
         for key, val in self._headers:
-            if len(key) != len_name or not equals_ci(key, name, len_name):
+            if len(key) != name_length or not equals_ci(key, name, name_length):
                 continue
             if result is None:
                 result = val
@@ -562,9 +594,7 @@ class HTTPResponse:
 
             out = buf if into else (b"" if amt is None else bytearray(amt))
             total = 0
-
-            if amt is not None:
-                data = out if isinstance(out, memoryview) else memoryview(out)
+            data = None
 
             while amt is None or total < amt:
                 if into:
@@ -582,8 +612,12 @@ class HTTPResponse:
                 if amt is None:
                     data = sock.read(n)
                     n = len(data)
+                elif not total:
+                    n = sock.readinto(out, n)
                 else:
-                    n = sock.readinto(data if not total else data[total:], n)
+                    if data is None:
+                        data = out if isinstance(out, memoryview) else memoryview(out)
+                    n = sock.readinto(data[total:], n)
 
                 if not n:
                     if self._chunked:
@@ -904,16 +938,16 @@ class HTTPConnection:
                 gc.collect()
                 raise
 
-        len_name = len(name)
+        name_length = len(name)
         length = self._length
         flags = self._flags
 
-        if len_name == 4 and equals_ci(name, _HOST, 4):
+        if name_length == 4 and equals_ci(name, _HOST, 4):
             flags |= _RF_HOST
-        elif len_name == 10 and equals_ci(name, _CONNECTION, 10):
+        elif name_length == 10 and equals_ci(name, _CONNECTION, 10):
             if value is not None and contains_ci(value, _CLOSE, 5):
                 flags |= _RF_CONNECTION_CLOSE
-        elif len_name == 14 and equals_ci(name, _CONTENT_LENGTH, 14):
+        elif name_length == 14 and equals_ci(name, _CONTENT_LENGTH, 14):
             flags |= _RF_CONTENT_LENGTH
             if value is not None:
                 value = parse_uint(value)
@@ -921,9 +955,9 @@ class HTTPConnection:
                     length = value
                 else:
                     length = -1
-        elif len_name == 15 and equals_ci(name, _ACCEPT_ENCODING, 15):
+        elif name_length == 15 and equals_ci(name, _ACCEPT_ENCODING, 15):
             flags |= _RF_ACCEPT_ENCODING
-        elif len_name == 17 and equals_ci(name, _TRANSFER_ENCODING, 17):
+        elif name_length == 17 and equals_ci(name, _TRANSFER_ENCODING, 17):
             flags |= _RF_TRANSFER_ENCODING
             if value is not None:
                 flags &= ~_RF_TRANSFER_CHUNKED
@@ -1003,6 +1037,15 @@ class HTTPConnection:
 
             if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
                 gc.collect()
+
+            if not with_headers or isinstance(with_headers, (bool, list, set, tuple)):
+                pass
+            elif isinstance(with_headers, (bytes, bytearray)):
+                with_headers = (with_headers, )
+            elif isinstance(with_headers, str):
+                with_headers = (with_headers.encode(), )
+            else:
+                with_headers = tuple(with_headers)
 
             status = None
             try:
@@ -1191,10 +1234,10 @@ class HTTPConnection:
     def _send_chunk(self, data):
         if not data:
             return
-        len_data = len(data)
+        data_length = len(data)
         self._send_bytes(
-            _READ_BLOCK_SIZE_HEXCRLF if len_data == _READ_BLOCK_SIZE
-            else b"%X\r\n" % len_data, False)
+            _READ_BLOCK_SIZE_HEXCRLF if data_length == _READ_BLOCK_SIZE
+            else b"%X\r\n" % data_length, False)
         self._send_bytes(data)
         self._send_bytes(b"\r\n", False)
 
