@@ -309,7 +309,9 @@ def _parse_status_line(sock):
             pos += 3
             while pos < line_length and line[pos] <= 32:
                 pos += 1
-            return (first, status, b"" if pos == line_length else line[pos:])
+            while line_length > pos and line[line_length-1] <= 32:
+                line_length -= 1
+            return (first, status, b"" if pos == line_length else line[pos:line_length])
         else:
             return (first, status, _OKAY if status == 200 else _NOT_OKAY)
 
@@ -463,12 +465,9 @@ class HTTPResponse:
         self.status = status
         if _COMPATISH_MOST_METHODS:
             self.code = status
-        if _PARSE_REASON:
-            if _COMPATISH_DECODE_HEADERS:
-                reason = decode_latin1(reason)
-            self._reason = reason
-        else:
-            self.reason = reason
+        if _COMPATISH_DECODE_HEADERS and _PARSE_REASON:
+            reason = decode_latin1(reason)
+        self.reason = reason
         self._headers = headers
         self._chunked = chunked
         self._length = length
@@ -479,11 +478,6 @@ class HTTPResponse:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
-
-    if _PARSE_REASON:
-        @property
-        def reason(self):
-            return self._reason.rstrip()
 
     def close(self):
         self._release_socket(self._count == self._length)
