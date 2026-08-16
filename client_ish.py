@@ -5,7 +5,7 @@
 import micropython, socket, errno, gc
 
 from string_ish import (
-    contains_ci, endswith_ci, equals_ci, startswith_ci,
+    equals_ci, contains_ci, startswith_ci, endswith_ci, slice_uint,
 )
 
 _COMPATISH_EXCEPTIONS = const(0)
@@ -197,9 +197,6 @@ if _COMPATISH_DECODE_HEADERS:
         _latin1_to_utf8(buf, buflen, utf8out)
         return utf8out.decode()
 
-def _errno(err):
-    return err or 0
-
 def _close_quietly(sock):
     if sock is not None:
         try:
@@ -289,9 +286,9 @@ def _parse_status_line(sock):
         else:
             raise UnknownProtocol(first + line)
 
-        if len(status) != 3 or not status.isdigit():
+        if len(status) != 3:
             break
-        status = int(status, 10)
+        status = slice_uint(status, 0, 3, 10)
         if status < 100:
             break
 
@@ -315,7 +312,13 @@ def _parse_headers(sock, status, with_headers):
     new_location = None
     connection = None
 
-    if with_headers and not isinstance(with_headers, (bool, list, set, tuple)):
+    if not with_headers or isinstance(with_headers, (bool, list, set, tuple)):
+        pass
+    elif isinstance(with_headers, (bytes, bytearray)):
+        with_headers = (with_headers, )
+    elif isinstance(with_headers, str):
+        with_headers = (with_headers.encode(), )
+    else:
         with_headers = tuple(with_headers)
 
     while True:
@@ -352,16 +355,10 @@ def _parse_headers(sock, status, with_headers):
             connection = line
 
         elif name_length == 14 and startswith_ci(line, _CONTENT_LENGTH, 14):
-            line = _header_value(line, name_length)
             if retained_name is not None:
-                headers.append((retained_name, line))
+                headers.append((retained_name, _header_value(line, name_length)))
                 retained_name = None
-            try:
-                line = int(line, 10)
-                if line < 0:
-                    line = -1
-            except (OverflowError, ValueError):
-                line = -1
+            line = slice_uint(line, name_length + 1, len(line), 10)
             if content_length is None:
                 content_length = line
             elif content_length >= 0 and content_length != line:
@@ -476,9 +473,6 @@ class HTTPResponse:
                 size = _READ_BLOCK_SIZE
                 if self._length is not None:
                     size = min(size, self._length - self._count)
-                    if size <= 0:
-                        self.close()
-                        return
                 buf = bytearray(size)
             elif not buf:
                 raise ValueError("empty buffer")
@@ -637,7 +631,7 @@ class HTTPResponse:
             self._release_socket(False)
             raise
         except OSError as e:
-            self._abort_read("socket read failed", _errno(e.errno))
+            self._abort_read("socket read failed", e.errno)
 
     def _get_chunk_left(self):
         while True:
@@ -646,13 +640,8 @@ class HTTPResponse:
                 if not line:
                     self._abort_read("EOF before chunk size")
                 pos = line.find(b";")
-                try:
-                    if pos >= 0:
-                        line = line[:pos]
-                    size = int(line, 16)
-                    if size < 0:
-                        self._abort_read("negative chunk size")
-                except (OverflowError, ValueError):
+                size = slice_uint(line, 0, pos if pos >= 0 else len(line), 16)
+                if size < 0:
                     self._abort_read("invalid chunk size")
                 if size > 0:
                     self._chunk_left = size
@@ -771,16 +760,14 @@ class HTTPConnection:
                 if the_host[sep + 1] != 58:
                     raise InvalidURL(host)
                 if port is None and sep + 2 < len(the_host):
-                    try: port = int(the_host[sep + 2:], 10)
-                    except ValueError: port = -1
+                    port = slice_uint(the_host, sep + 2, len(the_host), 10)
                 the_host = the_host[:sep + 1]
             hostaddr = the_host[1:sep]
         elif colons == 1:
             sep = the_host.find(b":")
             if sep + 1 < len(the_host):
                 if port is None:
-                    try: port = int(the_host[sep + 1:], 10)
-                    except ValueError: port = -1
+                    port = slice_uint(the_host, sep + 1, len(the_host), 10)
             hostaddr = the_host[:sep]
             the_host = hostaddr
         elif colons:
@@ -926,10 +913,7 @@ class HTTPConnection:
         elif len_name == 14 and equals_ci(name, _CONTENT_LENGTH, 14):
             flags |= _RF_CONTENT_LENGTH
             if value is not None:
-                try:
-                    value = int(value, 10)
-                except (OverflowError, TypeError, ValueError):
-                    value = -1
+                value = slice_uint(value, 0, len(value), 10)
                 if value >= 0 and (length is None or length == value):
                     length = value
                 else:
@@ -1022,11 +1006,11 @@ class HTTPConnection:
                 while True:
                     version, status, reason = _parse_status_line(self._sock)
                     headers, connection, content_chunked, content_length, new_location = _parse_headers(
-                        self._sock, status, with_headers)
+                        self._sock, status, False if status == 100 else with_headers)
                     if status != 100:
                         break
             except OSError as e:
-                raise IncompleteRead(_errno(e.errno), "socket read failed", None, None, status)
+                raise IncompleteRead(e.errno, "socket read failed", None, None, status)
 
             response_chunked, response_length, reusable = _derive_response_framing(
                 self.method, version, status, connection, content_chunked, content_length)
@@ -1085,7 +1069,7 @@ class HTTPConnection:
                 gc.collect()
             self._sock = create_connection((self.host, self.port), self.timeout)
         except OSError as e:
-            raise ConnectError(_errno(e.errno), str(e))
+            raise ConnectError(e.errno, str(e))
 
     def _prep_request(self, body, encode_chunked):
         if isinstance(body, str):
@@ -1220,7 +1204,7 @@ class HTTPConnection:
         try:
             self._sock.sendall(data)
         except OSError as e:
-            raise IncompleteWrite(_errno(e.errno), "socket write failed", self._count, self._length)
+            raise IncompleteWrite(e.errno, "socket write failed", self._count, self._length)
 
         if accounting:
             self._count += len(data)
@@ -1300,7 +1284,7 @@ if _SSL_ENABLED:
                 _close_quietly(raw)
                 raw = None
                 if isinstance(e, OSError):
-                    raise ConnectError(_errno(e.errno), str(e))
+                    raise ConnectError(e.errno, str(e))
                 raise ConnectError(ENONET, str(e))
             finally:
                 gc.collect()
