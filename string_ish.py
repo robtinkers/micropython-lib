@@ -411,10 +411,10 @@ def _startswith(haystack: object, needle_ptr: ptr8, needle_len: int, flags: int)
     return True
 
 def startswith(haystack: object, needle: object, needle_len=None, *, trim=False) -> bool:
-    return _dispatch(_startswith, haystack, needle, needle_len, 0 | (2 if trim else 0))
+    return _dispatch(_startswith, haystack, needle, needle_len, 2 if trim else 0)
 
 def startswith_ci(haystack: object, needle: object, needle_len=None, *, trim=False) -> bool:
-    return _dispatch(_startswith, haystack, needle, needle_len, 1 | (2 if trim else 0))
+    return _dispatch(_startswith, haystack, needle, needle_len, 3 if trim else 1)
 
 @micropython.viper
 def _endswith(haystack: object, needle_ptr: ptr8, needle_len: int, flags: int) -> bool:
@@ -449,10 +449,10 @@ def _endswith(haystack: object, needle_ptr: ptr8, needle_len: int, flags: int) -
     return True
 
 def endswith(haystack: object, needle: object, needle_len=None, *, trim=False) -> bool:
-    return _dispatch(_endswith, haystack, needle, needle_len, 0 | (2 if trim else 0))
+    return _dispatch(_endswith, haystack, needle, needle_len, 2 if trim else 0)
 
 def endswith_ci(haystack: object, needle: object, needle_len=None, *, trim=False) -> bool:
-    return _dispatch(_endswith, haystack, needle, needle_len, 1 | (2 if trim else 0))
+    return _dispatch(_endswith, haystack, needle, needle_len, 3 if trim else 1)
 
 @micropython.viper
 def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int) -> bool:
@@ -472,29 +472,42 @@ def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag:
 
     i = 0
     while i <= last_start:
+        x = haystack_ptr[i]
+        y = needle_ptr[0]
+        if x != y:
+            if ci_flag:
+                if 65 <= x and x <= 90:
+                    x += 32
+                if 65 <= y and y <= 90:
+                    y += 32
+            if x != y:
+                i += 1
+                continue
+
         # Candidate must begin at a token boundary.
         if i:
             x = haystack_ptr[i - 1]
             if ((48 <= x and x <= 57)
                 or (65 <= x and x <= 90)
                 or (97 <= x and x <= 122)
-                or x == 45 or x == 46 or x == 95 # -._
+                or x == 45 or x == 46 or x == 95
             ):
                 i += 1
                 continue
+
         # Candidate must end at a token boundary.
-        after = i + needle_len
-        if after < haystack_len:
-            x = haystack_ptr[after]
+        j = i + needle_len
+        if j < haystack_len:
+            x = haystack_ptr[j]
             if ((48 <= x and x <= 57)
                 or (65 <= x and x <= 90)
                 or (97 <= x and x <= 122)
-                or x == 45 or x == 46 or x == 95 # -._
+                or x == 45 or x == 46 or x == 95
             ):
                 i += 1
                 continue
-        # Test candidate
-        j = 0
+
+        j = 1
         while j < needle_len:
             x = haystack_ptr[i + j]
             y = needle_ptr[j]
@@ -507,9 +520,11 @@ def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag:
                 if x != y:
                     break
             j += 1
+
         if j == needle_len:
             return True
         i += 1
+
     return False
 
 def containstoken(haystack: object, needle: object, needle_len=None) -> bool:
