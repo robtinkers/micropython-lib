@@ -5,7 +5,8 @@
 import micropython, socket, errno, gc
 
 from string_ish import (
-    equals_ci, contains_ci, startswith_ci, endswith_ci, parse_uint, slice_uint, slice_equals,
+    equals_ci, contains_ci, containstoken_ci, startswith_ci, endswith_ci,
+    parse_uint, slice_uint, slice_equals,
 )
 
 _COMPATISH_EXCEPTIONS = const(0)
@@ -41,6 +42,10 @@ _RF_CONTENT_LENGTH = const(8)
 _RF_ACCEPT_ENCODING = const(16)
 _RF_TRANSFER_ENCODING = const(32)
 _RF_TRANSFER_CHUNKED = const(64)
+
+_CM_UNDEFINED = const(0)
+_CM_CLOSE = const(1)
+_CM_KEEPALIVE = const(2)
 
 _CS_IDLE = const(0)
 _CS_REQUEST_BUILDING = const(1)
@@ -331,7 +336,7 @@ def _parse_headers(sock, status, with_headers):
     content_length = None
     content_chunked = None
     new_location = None
-    connection = None
+    connection = _CM_UNDEFINED
 
     while True:
         line = sock.readline()
@@ -367,33 +372,30 @@ def _parse_headers(sock, status, with_headers):
         elif name_length == 10 and startswith_ci(line, _CONNECTION, 10):
             if retained_name is not None:
                 line = _header_value(line, name_length)
-                connection = line
+            if containstoken_ci(line, _CLOSE, 5):
+                connection = _CM_CLOSE
+            elif containstoken_ci(line, b"keep-alive", 10):
+                connection = _CM_KEEPALIVE
             else:
-                #TODO: something zero-allocation
-                line = _header_value(line, name_length)
-                connection = line
+                connection = _CM_UNDEFINED
 
         elif name_length == 14 and startswith_ci(line, _CONTENT_LENGTH, 14):
-            #TODO: refactor this mess
-            if retained_name is not None:
-                if headers is None:
-                    headers = []
-                headers.append((retained_name, _header_value(line, name_length)))
-                retained_name = None
-            line = slice_uint(line, name_length + 1, len(line), 10)
+            name_length = slice_uint(line, 15, len(line), 10)
+
             if content_length is None:
-                content_length = line
-            elif content_length >= 0 and content_length != line:
+                content_length = name_length
+            elif content_length >= 0 and content_length != name_length:
                 content_length = -1
+
+            if retained_name is not None:
+                line = _header_value(line, 14)
 
         elif name_length == 17 and startswith_ci(line, _TRANSFER_ENCODING, 17):
             if retained_name is not None:
                 line = _header_value(line, name_length)
                 content_chunked = endswith_ci(line, _CHUNKED, 7)
             else:
-                #TODO: something zero-allocation
-                line = _header_value(line, name_length)
-                content_chunked = endswith_ci(line, _CHUNKED, 7)
+                content_chunked = endswith_ci(line, _CHUNKED, 7, trim=True)
 
         elif retained_name is not None:
             line = _header_value(line, name_length)
@@ -408,15 +410,12 @@ def _parse_headers(sock, status, with_headers):
 
 def _derive_response_framing(method, version, status, connection, chunked, length):
     http10 = (version == 10)
-    reusable = None
 
-    if connection is not None:
-        if http10:
-            reusable = (len(connection) == 10 and equals_ci(connection, b"keep-alive", 10))
-        else:
-            reusable = not contains_ci(connection, _CLOSE, 5)
-
-    if reusable is None:
+    if connection == _CM_CLOSE:
+        reusable = False
+    elif connection == _CM_KEEPALIVE:
+        reusable = True
+    else:
         reusable = not http10
 
     if chunked and (http10 or length is not None):
