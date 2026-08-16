@@ -522,6 +522,9 @@ def slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
     if start == end:
         return -1
 
+    cutoff = 0x7FFFFFFF // base
+    cutlim = 0x7FFFFFFF - cutoff * base
+
     value = 0
     while start < end:
         char = buf_ptr[start]
@@ -539,10 +542,11 @@ def slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
             return value
         if digit >= base:
             return -1
-        value = value * base + digit
-        if value < 0:  # native-int overflow
+        if value > cutoff or (value == cutoff and digit > cutlim):
             return -1
+        value = value * base + digit
         start += 1
+
     return value
 
 def parse_uint(buf: object, base: int=10) -> int:
