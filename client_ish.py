@@ -308,13 +308,15 @@ def _header_value(line, name_length):
         value_end -= 1
     return line[value_start:value_end]
 
-
 def _parse_headers(sock, status, with_headers):
     headers = []
     content_length = None
     content_chunked = None
     new_location = None
     connection = None
+
+    if with_headers and not isinstance(with_headers, (bool, list, set, tuple)):
+        with_headers = tuple(with_headers)
 
     while True:
         line = sock.readline()
