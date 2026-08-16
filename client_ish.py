@@ -4,10 +4,13 @@
 
 import micropython, socket, errno, gc
 
+from string_ish import (
+    contains_ci, endswith_ci, equals_ci, startswith_ci,
+)
+
 _COMPATISH_EXCEPTIONS = const(0)
 _COMPATISH_MOST_METHODS = const(0)
 _COMPATISH_READ_RETURNS_BYTES = const(0)
-_COMPATISH_ALL_HEADERS = const(0)
 _COMPATISH_DECODE_HEADERS = const(0)
 
 _EXTRA_METHODS = const(1)
@@ -50,6 +53,7 @@ _ACCEPT_ENCODING = b"Accept-Encoding"
 _CONNECTION = b"Connection"
 _CONTENT_LENGTH = b"Content-Length"
 _HOST = b"Host"
+_LOCATION = b"Location"
 _SET_COOKIE = b"Set-Cookie"
 _TRANSFER_ENCODING = b"Transfer-Encoding"
 
@@ -57,17 +61,6 @@ _CHUNKED = b"chunked"
 _CLOSE = b"close"
 
 _BUFFER_TYPES = (bytes, bytearray, memoryview)
-
-_KEEP_RESPONSE_HEADERS = (
-    b"Content-Type",
-    _CONTENT_LENGTH,
-    _TRANSFER_ENCODING,
-    _CONNECTION,
-    _SET_COOKIE,
-    b"Location",
-    b"ETag",
-    b"Retry-After",
-)
 
 class HTTPException(Exception): pass
 
@@ -142,84 +135,6 @@ else:
         def __init__(self):
             super().__init__(None, None)
     class InvalidURL(ValueError): pass
-
-@micropython.viper
-def _equals_ci(a: ptr8, b: ptr8, length: int) -> int:
-    i = 0
-    while i < length:
-        x = a[i]
-        y = b[i]
-        if x != y:
-            if 65 <= x and x <= 90:
-                x += 32
-            if 65 <= y and y <= 90:
-                y += 32
-            if x != y:
-                return 0
-        i += 1
-    return 1
-
-@micropython.viper
-def _endswith_lc(haystack: ptr8, haystack_len: int, needle: ptr8, needle_len: int) -> int:
-    if haystack_len < needle_len:
-        return 0
-    while needle_len:
-        haystack_len -= 1
-        needle_len -= 1
-        x = haystack[haystack_len]
-        y = needle[needle_len]
-        if x != y:
-            if 65 <= x and x <= 90:
-                x += 32
-            if x != y:
-                return 0
-    return 1
-
-if _EXTRA_METHODS:
-
-    @micropython.viper
-    def _startswith_lc(haystack: ptr8, haystack_len: int, needle: ptr8, needle_len: int) -> int:
-        if haystack_len < needle_len:
-            return 0
-        i = 0
-        while i < needle_len:
-            x = haystack[i]
-            y = needle[i]
-            if x != y:
-                if 65 <= x and x <= 90:
-                    x += 32
-                if x != y:
-                    return 0
-            i += 1
-        return 1
-
-@micropython.viper
-def _contains_lc(haystack: ptr8, haystack_len: int, needle: ptr8, needle_len: int) -> int:
-    if needle_len == 0:
-        return 1
-    if haystack_len < needle_len:
-        return 0
-    haystack_len -= needle_len
-    first = needle[0]
-    i = 0
-    while i <= haystack_len:
-        x = haystack[i]
-        if x != first:
-            if x < 65 or x > 90 or x + 32 != first:
-                i += 1
-                continue
-        j = 1
-        while j < needle_len:
-            x = haystack[i + j]
-            y = needle[j]
-            if x != y:
-                if x < 65 or x > 90 or x + 32 != y:
-                    break
-            j += 1
-        if j == needle_len:
-            return 1
-        i += 1
-    return 0
 
 @micropython.viper
 def _validate(haystack: ptr8, haystack_len: int, strict: int) -> int:
@@ -384,77 +299,94 @@ def _parse_status_line(sock):
 
     raise BadStatusLine(first + line)
 
-def _parse_headers(sock, status, all_headers, and_cookies):
-    if all_headers is None:
-        all_headers = bool(_COMPATISH_ALL_HEADERS)
-    if and_cookies is None:
-        and_cookies = all_headers
+def _header_value(line, name_length):
+    value_start = name_length + 1
+    value_end = len(line)
+    while value_start < value_end and line[value_start] <= 32:
+        value_start += 1
+    while value_end > value_start and line[value_end - 1] <= 32:
+        value_end -= 1
+    return line[value_start:value_end]
 
+
+def _parse_headers(sock, status, with_headers):
     headers = []
+    content_length = None
+    content_chunked = None
+    new_location = None
+    connection = None
 
     while True:
-        line = None
         line = sock.readline()
         if not line:
             raise IncompleteRead(None, "EOF in response headers", None, None, status)
         if line[-1] != 10:
             raise IncompleteRead(None, "unterminated response header", None, None, status)
         if line == b"\r\n" or line == b"\n":
-            return headers
+            return headers, connection, content_chunked, content_length, new_location
         if line[0] <= 32:
             continue
 
-        pos = line.find(b":")
-        if pos == -1:
+        name_length = line.find(b":")
+        if name_length == -1:
             continue
 
-        for name in _KEEP_RESPONSE_HEADERS:
-            if len(name) == pos and _equals_ci(line, name, pos):
-                break
+        retained_name = None
+        if with_headers is True:
+            retained_name = line[:name_length]
+        elif with_headers:
+            for retained_name in with_headers:
+                if len(retained_name) == name_length and startswith_ci(line, retained_name, name_length):
+                    break
+            else:
+                retained_name = None
+
+        if name_length == 8 and startswith_ci(line, _LOCATION, 8):
+            line = _header_value(line, name_length)
+            new_location = line
+
+        elif name_length == 10 and startswith_ci(line, _CONNECTION, 10):
+            line = _header_value(line, name_length)
+            connection = line
+
+        elif name_length == 14 and startswith_ci(line, _CONTENT_LENGTH, 14):
+            line = _header_value(line, name_length)
+            if retained_name is not None:
+                headers.append((retained_name, line))
+                retained_name = None
+            try:
+                line = int(line, 10)
+                if line < 0:
+                    line = -1
+            except (OverflowError, ValueError):
+                line = -1
+            if content_length is None:
+                content_length = line
+            elif content_length >= 0 and content_length != line:
+                content_length = -1
+
+        elif name_length == 17 and startswith_ci(line, _TRANSFER_ENCODING, 17):
+            line = _header_value(line, name_length)
+            content_chunked = endswith_ci(line, _CHUNKED, 7)
+
+        elif retained_name is not None:
+            line = _header_value(line, name_length)
+
         else:
-            name = None
-
-        if name is None:
-            if not all_headers:
-                continue
-            name = line[:pos]
-        elif name is _SET_COOKIE and not and_cookies:
             continue
 
-        pos += 1
-        end = len(line)
-        while pos < end and line[pos] <= 32: pos += 1
-        while end > pos and line[end - 1] <= 32: end -= 1
-        headers.append((name, line[pos:end]))
+        if retained_name is not None:
+            headers.append((retained_name, line))
 
-def _derive_response_framing(method, version, status, headers):
+def _derive_response_framing(method, version, status, connection, chunked, length):
     http10 = (version == 10)
-    length = None
-    chunked = None
     reusable = None
 
-    for key, val in headers:
-        if key is _CONTENT_LENGTH:
-            try:
-                val = int(val, 10)
-                if val < 0:
-                    val = -1
-            except (OverflowError, ValueError):
-                val = -1
-            if length is None:
-                length = val
-            elif length != val:
-                length = -1
-
-        elif key is _CONNECTION:
-            if reusable is not False:
-                if http10:
-                    reusable = (len(val) == 10 and _equals_ci(val, b"keep-alive", 10))
-                else:
-                    reusable = not _contains_lc(val, len(val), _CLOSE, 5)
-
-        elif key is _TRANSFER_ENCODING:
-            chunked = bool(_endswith_lc(val, len(val), _CHUNKED, 7))
+    if connection is not None:
+        if http10:
+            reusable = (len(connection) == 10 and equals_ci(connection, b"keep-alive", 10))
+        else:
+            reusable = not contains_ci(connection, _CLOSE, 5)
 
     if reusable is None:
         reusable = not http10
@@ -506,7 +438,7 @@ class HTTPResponse:
         self.status = status
         if _COMPATISH_MOST_METHODS:
             self.code = status
-        self.reason = reason.rstrip()
+        self._reason = reason
         self._headers = headers
         self._chunked = chunked
         self._length = length
@@ -517,6 +449,10 @@ class HTTPResponse:
 
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
+
+    @property
+    def reason(self):
+        return self._reason.rstrip()
 
     def close(self):
         self._release_socket(self._count == self._length)
@@ -554,7 +490,7 @@ class HTTPResponse:
         len_name = len(name)
         result = None
         for key, val in self._headers:
-            if len(key) != len_name or not _equals_ci(key, name, len_name):
+            if len(key) != len_name or not equals_ci(key, name, len_name):
                 continue
             if result is None:
                 result = val
@@ -792,7 +728,7 @@ class HTTPResponse:
             length = len(name)
             values = None
             for key, value in self._headers:
-                if len(key) == length and _equals_ci(key, name, length):
+                if len(key) == length and equals_ci(key, name, length):
                     if values is None:
                         values = []
                     if _COMPATISH_DECODE_HEADERS:
@@ -980,12 +916,12 @@ class HTTPConnection:
         length = self._length
         flags = self._flags
 
-        if len_name == 4 and _equals_ci(name, _HOST, 4):
+        if len_name == 4 and equals_ci(name, _HOST, 4):
             flags |= _RF_HOST
-        elif len_name == 10 and _equals_ci(name, _CONNECTION, 10):
-            if value is not None and _contains_lc(value, len(value), _CLOSE, 5):
+        elif len_name == 10 and equals_ci(name, _CONNECTION, 10):
+            if value is not None and contains_ci(value, _CLOSE, 5):
                 flags |= _RF_CONNECTION_CLOSE
-        elif len_name == 14 and _equals_ci(name, _CONTENT_LENGTH, 14):
+        elif len_name == 14 and equals_ci(name, _CONTENT_LENGTH, 14):
             flags |= _RF_CONTENT_LENGTH
             if value is not None:
                 try:
@@ -996,13 +932,13 @@ class HTTPConnection:
                     length = value
                 else:
                     length = -1
-        elif len_name == 15 and _equals_ci(name, _ACCEPT_ENCODING, 15):
+        elif len_name == 15 and equals_ci(name, _ACCEPT_ENCODING, 15):
             flags |= _RF_ACCEPT_ENCODING
-        elif len_name == 17 and _equals_ci(name, _TRANSFER_ENCODING, 17):
+        elif len_name == 17 and equals_ci(name, _TRANSFER_ENCODING, 17):
             flags |= _RF_TRANSFER_ENCODING
             if value is not None:
                 flags &= ~_RF_TRANSFER_CHUNKED
-                if _endswith_lc(value, len(value), _CHUNKED, 7):
+                if endswith_ci(value, _CHUNKED, 7):
                     flags |= _RF_TRANSFER_CHUNKED
 
         self._length = length
@@ -1047,7 +983,7 @@ class HTTPConnection:
             raise
         return self._count - old_bytes
 
-    def getresponse(self, *, all_headers=None, and_cookies=None):
+    def getresponse(self, *, with_headers=False):
         state = self._state
         if self._resp is not None or (
             state != _CS_REQUEST_HEAD_OPEN
@@ -1083,15 +1019,15 @@ class HTTPConnection:
             try:
                 while True:
                     version, status, reason = _parse_status_line(self._sock)
-                    headers = _parse_headers(
-                        self._sock, status, all_headers, and_cookies)
+                    headers, connection, content_chunked, content_length, new_location = _parse_headers(
+                        self._sock, status, with_headers)
                     if status != 100:
                         break
             except OSError as e:
                 raise IncompleteRead(_errno(e.errno), "socket read failed", None, None, status)
 
             response_chunked, response_length, reusable = _derive_response_framing(
-                self.method, version, status, headers)
+                self.method, version, status, connection, content_chunked, content_length)
 
             if status < 200 and status != 101:
                 sock = owner = None
