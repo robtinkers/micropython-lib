@@ -370,14 +370,15 @@ def _parse_headers(sock, status, with_headers):
             new_location = line
 
         elif name_length == 10 and startswith_ci(line, _CONNECTION, 10):
-            if retained_name is not None:
-                line = _header_value(line, name_length)
             if containstoken_ci(line, _CLOSE, 5):
                 connection = _CM_CLOSE
             elif containstoken_ci(line, b"keep-alive", 10):
                 connection = _CM_KEEPALIVE
             else:
                 connection = _CM_UNDEFINED
+
+            if retained_name is not None:
+                line = _header_value(line, 10)
 
         elif name_length == 14 and startswith_ci(line, _CONTENT_LENGTH, 14):
             name_length = slice_uint(line, 15, len(line), 10)
@@ -391,11 +392,10 @@ def _parse_headers(sock, status, with_headers):
                 line = _header_value(line, 14)
 
         elif name_length == 17 and startswith_ci(line, _TRANSFER_ENCODING, 17):
+            content_chunked = endswith_ci(line, _CHUNKED, 7, trim=True)
+
             if retained_name is not None:
-                line = _header_value(line, name_length)
-                content_chunked = endswith_ci(line, _CHUNKED, 7)
-            else:
-                content_chunked = endswith_ci(line, _CHUNKED, 7, trim=True)
+                line = _header_value(line, 17)
 
         elif retained_name is not None:
             line = _header_value(line, name_length)
@@ -491,18 +491,17 @@ class HTTPResponse:
             owner._release_response(self, None, None)
         return sock
 
-    if _EXTRA_METHODS:
-
-        def drain(self, buf=None):
-            if buf is None:
-                size = _READ_BLOCK_SIZE
-                if self._length is not None:
-                    size = min(size, self._length - self._count)
-                buf = bytearray(size)
-            elif not buf:
-                raise ValueError("empty buffer")
-            while self.readinto(buf):
-                pass
+    def getheaders(self):
+        if _COMPATISH_DECODE_HEADERS:
+            if _ITERATE_HEADERS:
+                return ((decode_latin1(k), decode_latin1(v)) for k,v in self._headers)
+            else:
+                return [(decode_latin1(k), decode_latin1(v)) for k,v in self._headers]
+        else:
+            if _ITERATE_HEADERS:
+                return iter(self._headers)
+            else:
+                return self._headers
 
     def getheader(self, name, default=None):
         name = _encode_and_validate(name)
@@ -523,17 +522,71 @@ class HTTPResponse:
             result = decode_latin1(result)
         return result
 
-    def getheaders(self):
-        if _COMPATISH_DECODE_HEADERS:
-            if _ITERATE_HEADERS:
-                return ((decode_latin1(k), decode_latin1(v)) for k,v in self._headers)
-            else:
-                return [(decode_latin1(k), decode_latin1(v)) for k,v in self._headers]
-        else:
-            if _ITERATE_HEADERS:
-                return iter(self._headers)
-            else:
-                return self._headers
+    if _EXTRA_METHODS:
+
+        def _itercookies(self, name, raw):
+            if name is not None:
+                name = _encode_and_validate(name)
+                if name is None:
+                    return
+                name_length = len(name)
+
+            for key, value in self._headers:
+                if len(key) != 10 or not equals_ci(key, _SET_COOKIE, 10):
+                    continue
+
+                pos = value.find(b"=")
+                if pos <= 0:
+                    continue
+
+                if name is not None:
+                    if pos != name_length or not slice_equals(value, 0, pos, name):
+                        continue
+                    key = name
+                else:
+                    key = value[:pos]
+
+                if not raw:
+                    pos += 1
+                    end = value.find(b";", pos)
+                    if end < 0:
+                        end = len(value)
+                    value = value[pos:end]
+
+                if _COMPATISH_DECODE_HEADERS:
+                    key = decode_latin1(key)
+                    value = decode_latin1(value)
+
+                yield key, value
+
+        def getcookies(self):
+            result = self._itercookies(None, False)
+            return result if _ITERATE_HEADERS else list(result)
+
+        def getrawcookies(self):
+            result = self._itercookies(None, True)
+            return result if _ITERATE_HEADERS else list(result)
+
+        def getcookie(self, name, default=None):
+            for key, value in self._itercookies(name, False):
+                return value # first match wins
+            return default
+
+        def getrawcookie(self, name, default=None):
+            for key, value in self._itercookies(name, True):
+                return value # first match wins
+            return default
+
+        def drain(self, buf=None):
+            if buf is None:
+                size = _READ_BLOCK_SIZE
+                if self._length is not None:
+                    size = min(size, self._length - self._count)
+                buf = bytearray(size)
+            elif not buf:
+                raise ValueError("empty buffer")
+            while self.readinto(buf):
+                pass
 
     def read(self, amt=None):
         return self._read_body(None, amt)
@@ -938,7 +991,7 @@ class HTTPConnection:
         if name_length == 4 and equals_ci(name, _HOST, 4):
             flags |= _RF_HOST
         elif name_length == 10 and equals_ci(name, _CONNECTION, 10):
-            if value is not None and contains_ci(value, _CLOSE, 5):
+            if value is not None and containstoken_ci(value, _CLOSE, 5):
                 flags |= _RF_CONNECTION_CLOSE
         elif name_length == 14 and equals_ci(name, _CONTENT_LENGTH, 14):
             flags |= _RF_CONTENT_LENGTH
@@ -954,7 +1007,7 @@ class HTTPConnection:
             flags |= _RF_TRANSFER_ENCODING
             if value is not None:
                 flags &= ~_RF_TRANSFER_CHUNKED
-                if endswith_ci(value, _CHUNKED, 7):
+                if endswith_ci(value, _CHUNKED, 7, trim=True):
                     flags |= _RF_TRANSFER_CHUNKED
 
         self._length = length
@@ -1021,6 +1074,7 @@ class HTTPConnection:
                             self._length = 0
                 self._send_bytes(b"\r\n", False)
                 state = self._state = _CS_REQUEST_BODY_OPEN
+
             if state == _CS_REQUEST_BODY_OPEN:
                 self._state = _CS_RESPONSE_ACTIVE
                 if self._chunked:
@@ -1051,7 +1105,7 @@ class HTTPConnection:
             except OSError as e:
                 raise IncompleteRead(e.errno, "socket read failed", None, None, status)
 
-            response_chunked, response_length, reusable = _derive_response_framing(
+            content_chunked, content_length, reusable = _derive_response_framing(
                 self.method, version, status, connection, content_chunked, content_length)
 
             if status < 200 and status != 101:
@@ -1067,7 +1121,7 @@ class HTTPConnection:
 
             resp = self.response_class(
                 owner, sock, self.method, self.url, version, status, reason,
-                headers, response_chunked, response_length)
+                headers, content_chunked, content_length)
 
             if self._state != _CS_RESPONSE_CREATING:
                 raise ResponseNotReady()
@@ -1080,7 +1134,7 @@ class HTTPConnection:
             self._resp = resp
             self._state = _CS_RESPONSE_REUSABLE if reusable else _CS_RESPONSE_ACTIVE
 
-            if response_length == 0 and status != 101:
+            if content_length == 0 and status != 101:
                 resp.close()
 
             return resp
