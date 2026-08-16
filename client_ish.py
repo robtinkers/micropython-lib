@@ -5,7 +5,7 @@
 import micropython, socket, errno, gc
 
 from string_ish import (
-    equals_ci, contains_ci, startswith_ci, endswith_ci, slice_uint,
+    equals_ci, contains_ci, startswith_ci, endswith_ci, parse_uint, slice_uint,
 )
 
 _COMPATISH_EXCEPTIONS = const(0)
@@ -288,7 +288,7 @@ def _parse_status_line(sock):
 
         if len(status) != 3:
             break
-        status = slice_uint(status, 0, 3, 10)
+        status = parse_uint(status)
         if status < 100:
             break
 
@@ -640,7 +640,10 @@ class HTTPResponse:
                 if not line:
                     self._abort_read("EOF before chunk size")
                 pos = line.find(b";")
-                size = slice_uint(line, 0, pos if pos >= 0 else len(line), 16)
+                if pos >= 0:
+                    size = slice_uint(line, 0, pos, 16)
+                else:
+                    size = parse_uint(line, 16)
                 if size < 0:
                     self._abort_read("invalid chunk size")
                 if size > 0:
@@ -913,7 +916,7 @@ class HTTPConnection:
         elif len_name == 14 and equals_ci(name, _CONTENT_LENGTH, 14):
             flags |= _RF_CONTENT_LENGTH
             if value is not None:
-                value = slice_uint(value, 0, len(value), 10)
+                value = parse_uint(value)
                 if value >= 0 and (length is None or length == value):
                     length = value
                 else:
