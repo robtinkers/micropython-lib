@@ -514,11 +514,6 @@ def containstoken_ci(haystack: object, needle: object, needle_len=None) -> bool:
 
 @micropython.viper
 def slice_uint(buf: ptr8, start: int, end: int, base: int) -> int:
-    if base < 0:
-        base = -base
-        strict = False
-    else:
-        strict = True
     if base < 2 or base > 36:
         return -1
 
@@ -528,7 +523,6 @@ def slice_uint(buf: ptr8, start: int, end: int, base: int) -> int:
         return -1
 
     value = 0
-    digits = 0
     while start < end:
         char = buf[start]
         if 48 <= char and char <= 57:
@@ -537,24 +531,16 @@ def slice_uint(buf: ptr8, start: int, end: int, base: int) -> int:
             digit = char - 65 + 10
         elif 97 <= char and char <= 122:
             digit = char - 97 + 10
-        elif not strict:
-            break
         else:
             while start < end:
                 if buf[start] > 32:
                     return -1
                 start += 1
-            break
+            return value
         if digit >= base:
-            if not strict:
-                break
             return -1
         value = value * base + digit
         if value < 0:  # native-int overflow
             return -1
-        digits += 1
         start += 1
-
-    if digits == 0:
-        return -1
     return value
