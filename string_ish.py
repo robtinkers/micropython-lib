@@ -7,12 +7,8 @@ if _CHECK_OBJECT_TYPE:
 
 def _dispatch(func, haystack: object, needle: object, needle_len=None, flags=0):
     if isinstance(needle, str):
-        if needle_len is None:
-            needle = memoryview(needle)
-        else:
-            needle = memoryview(needle[:needle_len]) # ugh
-        needle_len = len(needle)
-    elif needle_len is None or needle_len > len(needle):
+        needle = memoryview(needle)
+    if needle_len is None or needle_len > len(needle):
         needle_len = len(needle)
     elif needle_len < 0:
         needle_len = max(0, len(needle) + needle_len)
@@ -428,21 +424,20 @@ def _endswith(haystack: object, needle_ptr: ptr8, needle_len: int, flags: int) -
         raise TypeError("haystack")
 
     i = int(len(haystack))
-    j = needle_len
     haystack_ptr = ptr8(haystack)
 
     if flags & 2:
         while i > 0 and haystack_ptr[i - 1] <= 32:
             i -= 1
 
-    if i < j:
+    if i < needle_len:
         return False
 
-    while j > 0:
+    while needle_len > 0:
         i -= 1
-        j -= 1
+        needle_len -= 1
         x = haystack_ptr[i]
-        y = needle_ptr[j]
+        y = needle_ptr[needle_len]
         if x != y:
             if flags & 1:
                 if 65 <= x and x <= 90:
