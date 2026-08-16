@@ -513,18 +513,18 @@ def containstoken_ci(haystack: object, needle: object, needle_len=None) -> bool:
     return _dispatch(_containstoken, haystack, needle, needle_len, 1)
 
 @micropython.viper
-def slice_uint(buf: ptr8, start: int, end: int, base: int) -> int:
+def slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
     if base < 2 or base > 36:
         return -1
 
-    while start < end and buf[start] <= 32:
+    while start < end and buf_ptr[start] <= 32:
         start += 1
     if start == end:
         return -1
 
     value = 0
     while start < end:
-        char = buf[start]
+        char = buf_ptr[start]
         if 48 <= char and char <= 57:
             digit = char - 48
         elif 65 <= char and char <= 90:
@@ -533,7 +533,7 @@ def slice_uint(buf: ptr8, start: int, end: int, base: int) -> int:
             digit = char - 97 + 10
         else:
             while start < end:
-                if buf[start] > 32:
+                if buf_ptr[start] > 32:
                     return -1
                 start += 1
             return value
@@ -544,3 +544,6 @@ def slice_uint(buf: ptr8, start: int, end: int, base: int) -> int:
             return -1
         start += 1
     return value
+
+def parse_uint(buf: object, base: int=10) -> int:
+    return slice_uint(buf, 0, len(buf), base)
