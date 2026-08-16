@@ -380,24 +380,30 @@ def slice_equals(haystack_ptr: ptr8, start: int, end: int, needle_ptr: ptr8) -> 
     return True
 
 @micropython.viper
-def _startswith(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int) -> bool:
+def _startswith(haystack: object, needle_ptr: ptr8, needle_len: int, flags: int) -> bool:
     if isinstance(haystack, str):
         haystack = memoryview(haystack)
     elif _CHECK_OBJECT_TYPE and not isinstance(haystack, _BYTES_LIKE):
         raise TypeError("haystack")
 
     haystack_len = int(len(haystack))
-    if haystack_len < needle_len:
-        return False
-
     haystack_ptr = ptr8(haystack)
 
     i = 0
-    while i < needle_len:
+    if flags & 2:
+        while i < haystack_len and haystack_ptr[i] <= 32:
+            i += 1
+
+    if haystack_len - i < needle_len:
+        return False
+
+    haystack_len = i + needle_len
+    needle_len = 0
+    while i < haystack_len:
         x = haystack_ptr[i]
-        y = needle_ptr[i]
+        y = needle_ptr[needle_len]
         if x != y:
-            if ci_flag:
+            if flags & 1:
                 if 65 <= x and x <= 90:
                     x += 32
                 if 65 <= y and y <= 90:
@@ -405,6 +411,7 @@ def _startswith(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: in
             if x != y:
                 return False
         i += 1
+        needle_len += 1
     return True
 
 def startswith(haystack: object, needle: object, needle_len=None) -> bool:
@@ -414,7 +421,7 @@ def startswith_ci(haystack: object, needle: object, needle_len=None) -> bool:
     return _dispatch(_startswith, haystack, needle, needle_len, 1)
 
 @micropython.viper
-def _endswith(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int) -> bool:
+def _endswith(haystack: object, needle_ptr: ptr8, needle_len: int, flags: int) -> bool:
     if isinstance(haystack, str):
         haystack = memoryview(haystack)
     elif _CHECK_OBJECT_TYPE and not isinstance(haystack, _BYTES_LIKE):
@@ -422,10 +429,14 @@ def _endswith(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int)
 
     i = int(len(haystack))
     j = needle_len
+    haystack_ptr = ptr8(haystack)
+
+    if flags & 2:
+        while i > 0 and haystack_ptr[i - 1] <= 32:
+            i -= 1
+
     if i < j:
         return False
-
-    haystack_ptr = ptr8(haystack)
 
     while j > 0:
         i -= 1
@@ -433,7 +444,7 @@ def _endswith(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int)
         x = haystack_ptr[i]
         y = needle_ptr[j]
         if x != y:
-            if ci_flag:
+            if flags & 1:
                 if 65 <= x and x <= 90:
                     x += 32
                 if 65 <= y and y <= 90:
@@ -442,11 +453,11 @@ def _endswith(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int)
                 return False
     return True
 
-def endswith(haystack: object, needle: object, needle_len=None) -> bool:
-    return _dispatch(_endswith, haystack, needle, needle_len, 0)
+def endswith(haystack: object, needle: object, needle_len=None, *, trim=False) -> bool:
+    return _dispatch(_endswith, haystack, needle, needle_len, 0 | (2 if trim else 0))
 
-def endswith_ci(haystack: object, needle: object, needle_len=None) -> bool:
-    return _dispatch(_endswith, haystack, needle, needle_len, 1)
+def endswith_ci(haystack: object, needle: object, needle_len=None, *, trim=False) -> bool:
+    return _dispatch(_endswith, haystack, needle, needle_len, 1 | (2 if trim else 0))
 
 @micropython.viper
 def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int, ci_flag: int) -> bool:
