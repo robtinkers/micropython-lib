@@ -414,11 +414,11 @@ def _startswith(haystack: object, needle_ptr: ptr8, needle_len: int, flags: int)
         needle_len += 1
     return True
 
-def startswith(haystack: object, needle: object, needle_len=None) -> bool:
-    return _dispatch(_startswith, haystack, needle, needle_len, 0)
+def startswith(haystack: object, needle: object, needle_len=None, *, flags=False) -> bool:
+    return _dispatch(_startswith, haystack, needle, needle_len, 0 | (2 if flags else 0))
 
-def startswith_ci(haystack: object, needle: object, needle_len=None) -> bool:
-    return _dispatch(_startswith, haystack, needle, needle_len, 1)
+def startswith_ci(haystack: object, needle: object, needle_len=None, *, flags=False) -> bool:
+    return _dispatch(_startswith, haystack, needle, needle_len, 1 | (2 if flags else 0))
 
 @micropython.viper
 def _endswith(haystack: object, needle_ptr: ptr8, needle_len: int, flags: int) -> bool:
