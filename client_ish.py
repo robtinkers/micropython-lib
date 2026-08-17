@@ -273,7 +273,7 @@ def _parse_hostport_from_url(url):
     if pos >= 0:
         start = pos + 1
 
-    return url[start:end]
+    return memoryview(url)[start:end]
 
 def _parse_status_line(sock):
     while True:
