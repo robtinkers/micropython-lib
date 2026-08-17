@@ -20,6 +20,7 @@ _PARSE_REASON = const(1)
 _RECYCLE_BUFFERS = const(1)
 _SSL_ENABLED = const(1)
 
+_DEFAULT_WITH_HEADERS = False
 _DEFAULT_TIMEOUT = const(10)
 _GC_FREE_THRESHOLD = const(32768)
 _READ_BLOCK_SIZE = const(1024)
@@ -432,7 +433,7 @@ def _derive_response_framing(method, version, status, connection, chunked, lengt
             reusable and chunked is None
             and (length is None or (length == 0 and status == 204)))
 
-    if method == b"HEAD" or status == 304:
+    if status == 304 or method == b"HEAD":
         return False, 0, (reusable and length != -1)
 
     if chunked is True:
@@ -602,9 +603,12 @@ class HTTPResponse:
             into = buf is not None
 
             if sock is None:
-                if self._length is not None and self._count >= self._length:
+                if _COMPATISH_EXCEPTIONS:
                     return 0 if into else b""
-                raise NotConnected()
+                else:
+                    if self._length is not None and self._count >= self._length:
+                        return 0 if into else b""
+                    raise NotConnected()
 
             if into:
                 if not buf:
@@ -612,6 +616,8 @@ class HTTPResponse:
                 amt = len(buf)
             elif amt is not None and amt < 0:
                 amt = None
+
+            bounded = amt is not None
 
             if amt == 0:
                 return 0 if into else b""
@@ -631,7 +637,11 @@ class HTTPResponse:
                         self._length = self._count
                         self.close()
                         return 0
-                    self._abort_read("EOF in response body")
+                    if _COMPATISH_EXCEPTIONS:
+                        self.close()
+                        return 0
+                    else:
+                        self._abort_read("EOF in response body")
 
                 self._count += n
                 if self._length is not None and self._count >= self._length:
@@ -669,7 +679,10 @@ class HTTPResponse:
                     if self._chunked:
                         self._abort_read("EOF in chunk data")
                     if self._length is not None:
-                        self._abort_read("EOF in response body")
+                        if not (_COMPATISH_EXCEPTIONS and bounded):
+                            self._abort_read("EOF in response body")
+                        self.close()
+                        break
                     self._length = self._count
                     self.close()
                     break
@@ -867,9 +880,15 @@ class HTTPConnection:
         if port is None:
             port = self.default_port
         if not isinstance(port, int):
-            raise TypeError("port must be int")
+            if _COMPATISH_EXCEPTIONS:
+                raise InvalidURL("port must be int")
+            else:
+                raise TypeError("port must be int")
         if not (0 <= port <= 65535):
-            raise TypeError("port invalid")
+            if _COMPATISH_EXCEPTIONS:
+                raise InvalidURL("port invalid")
+            else:
+                raise TypeError("port invalid")
 
         if port == self.default_port:
             hostport = the_host
@@ -1052,7 +1071,7 @@ class HTTPConnection:
             raise
         return self._count - old_bytes
 
-    def getresponse(self, *, with_headers=False):
+    def getresponse(self, *, with_headers=None):
         state = self._state
         if self._resp is not None or (
             state != _CS_REQUEST_HEAD_OPEN
@@ -1085,6 +1104,8 @@ class HTTPConnection:
             if _GC_FREE_THRESHOLD and gc.mem_free() < _GC_FREE_THRESHOLD:
                 gc.collect()
 
+            if with_headers is None:
+                with_headers = _DEFAULT_WITH_HEADERS
             if not with_headers or isinstance(with_headers, (bool, list, set, tuple)):
                 pass
             elif isinstance(with_headers, (bytes, bytearray)):
