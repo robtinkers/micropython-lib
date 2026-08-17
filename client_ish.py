@@ -89,8 +89,14 @@ class NotConnected(ImproperConnectionState): pass
 
 class BadStatusLine(HTTPException):
     def __init__(self, line):
-        if _COMPATISH_DECODE_HEADERS and isinstance(line, _BUFFER_TYPES):
-            line = decode_latin1(line)
+        if _COMPATISH_EXCEPTIONS:
+            if isinstance(line, _BUFFER_TYPES):
+                line = decode_latin1(line)
+            if not line:
+                line = repr(line)
+        elif _COMPATISH_DECODE_HEADERS:
+            if isinstance(line, _BUFFER_TYPES):
+                line = decode_latin1(line)
         self.errno = None
         self.args = line,
         self.line = line
@@ -98,7 +104,7 @@ class BadStatusLine(HTTPException):
 if _COMPATISH_EXCEPTIONS:
     class UnknownProtocol(HTTPException):
         def __init__(self, version):
-            if _COMPATISH_DECODE_HEADERS and isinstance(version, _BUFFER_TYPES):
+            if isinstance(version, _BUFFER_TYPES):
                 version = decode_latin1(version)
             self.errno = None
             self.args = version,
@@ -175,7 +181,7 @@ def _encode_and_validate(x, strict=0):
         return x
     return bytes(x)
 
-if _COMPATISH_DECODE_HEADERS:
+if _COMPATISH_DECODE_HEADERS or _COMPATISH_EXCEPTIONS:
 
     @micropython.viper
     def _latin1_to_utf8(src: ptr8, srclen: int, dst: ptr8) -> int:
@@ -724,7 +730,11 @@ class HTTPResponse:
             self._release_socket(False)
             raise
         except OSError as e:
-            self._abort_read("socket read failed", e.errno)
+            if _COMPATISH_EXCEPTIONS:
+                self._release_socket(False)
+                raise
+            else:
+                self._abort_read("socket read failed", e.errno)
 
     def _get_chunk_left(self):
         while True:
@@ -880,10 +890,7 @@ class HTTPConnection:
         if port is None:
             port = self.default_port
         if not isinstance(port, int):
-            if _COMPATISH_EXCEPTIONS:
-                raise InvalidURL("port must be int")
-            else:
-                raise TypeError("port must be int")
+            raise TypeError("port must be int")
         if not (0 <= port <= 65535):
             if _COMPATISH_EXCEPTIONS:
                 raise InvalidURL("port invalid")
@@ -1125,7 +1132,10 @@ class HTTPConnection:
                     if not is_interim:
                         break
             except OSError as e:
-                raise IncompleteRead(e.errno, "socket read failed", None, None, status)
+                if _COMPATISH_EXCEPTIONS:
+                    raise
+                else:
+                    raise IncompleteRead(e.errno, "socket read failed", None, None, status)
 
             content_chunked, content_length, reusable = _derive_response_framing(
                 self.method, version, status, connection, content_chunked, content_length)
@@ -1184,7 +1194,10 @@ class HTTPConnection:
                 gc.collect()
             self._sock = create_connection((self.host, self.port), self.timeout)
         except OSError as e:
-            raise ConnectError(e.errno, str(e))
+            if _COMPATISH_EXCEPTIONS:
+                raise
+            else:
+                raise ConnectError(e.errno, str(e))
 
     def _prep_request(self, body, encode_chunked):
         if isinstance(body, str):
@@ -1319,7 +1332,10 @@ class HTTPConnection:
         try:
             self._sock.sendall(data)
         except OSError as e:
-            raise IncompleteWrite(e.errno, "socket write failed", self._count, self._length)
+            if _COMPATISH_EXCEPTIONS:
+                raise
+            else:
+                raise IncompleteWrite(e.errno, "socket write failed", self._count, self._length)
 
         if accounting:
             self._count += len(data)
@@ -1398,8 +1414,11 @@ if _SSL_ENABLED:
             except Exception as e:
                 _close_quietly(raw)
                 raw = None
-                if isinstance(e, OSError):
+                if _COMPATISH_EXCEPTIONS:
+                    raise
+                elif isinstance(e, OSError):
                     raise ConnectError(e.errno, str(e))
-                raise ConnectError(ENONET, str(e))
+                else:
+                    raise ConnectError(ENONET, str(e))
             finally:
                 gc.collect()
