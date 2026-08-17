@@ -570,11 +570,11 @@ def _endswithtoken(haystack: object, needle_ptr: ptr8, needle_len: int, flags: i
         return True
     
     x = haystack_ptr[i-1]
-    return not ((48 <= x and x <= 57)
+    return False if ((48 <= x and x <= 57)
         or (65 <= x and x <= 90)
         or (97 <= x and x <= 122)
         or x == 45 or x == 46 or x == 95
-    )
+    ) else True
 
 def endswithtoken(haystack, needle, needle_len=None):
     return _dispatch(_endswithtoken, haystack, needle, needle_len, 2)
