@@ -5,7 +5,7 @@
 import micropython, socket, errno, gc
 
 from string_ish import (
-    equals_ci, contains_ci, containstoken_ci, startswith_ci, endswith_ci,
+    equals_ci, startswith_ci, containstoken_ci, endswithtoken_ci,
     parse_uint, slice_uint, slice_equals,
 )
 
@@ -43,7 +43,7 @@ _RF_ACCEPT_ENCODING = const(16)
 _RF_TRANSFER_ENCODING = const(32)
 _RF_TRANSFER_CHUNKED = const(64)
 
-_CM_UNDEFINED = const(0)
+_CM_UNKNOWN = const(0)
 _CM_CLOSE = const(1)
 _CM_KEEPALIVE = const(2)
 
@@ -336,7 +336,7 @@ def _parse_headers(sock, status, with_headers):
     content_length = None
     content_chunked = None
     new_location = None
-    connection = _CM_UNDEFINED
+    connection = _CM_UNKNOWN
 
     while True:
         line = sock.readline()
@@ -370,12 +370,12 @@ def _parse_headers(sock, status, with_headers):
             new_location = line
 
         elif name_length == 10 and startswith_ci(line, _CONNECTION, 10):
-            if containstoken_ci(line, _CLOSE, 5):
+            if connection == _CM_CLOSE:
+                pass
+            elif containstoken_ci(line, _CLOSE, 5):
                 connection = _CM_CLOSE
             elif containstoken_ci(line, b"keep-alive", 10):
                 connection = _CM_KEEPALIVE
-            else:
-                connection = _CM_UNDEFINED
 
             if retained_name is not None:
                 line = _header_value(line, 10)
@@ -392,7 +392,7 @@ def _parse_headers(sock, status, with_headers):
                 line = _header_value(line, 14)
 
         elif name_length == 17 and startswith_ci(line, _TRANSFER_ENCODING, 17):
-            content_chunked = endswith_ci(line, _CHUNKED, 7, trim=True)
+            content_chunked = endswithtoken_ci(line, _CHUNKED, 7)
 
             if retained_name is not None:
                 line = _header_value(line, 17)
@@ -1007,7 +1007,7 @@ class HTTPConnection:
             flags |= _RF_TRANSFER_ENCODING
             if value is not None:
                 flags &= ~_RF_TRANSFER_CHUNKED
-                if endswith_ci(value, _CHUNKED, 7, trim=True):
+                if endswithtoken_ci(value, _CHUNKED, 7):
                     flags |= _RF_TRANSFER_CHUNKED
 
         self._length = length
@@ -1098,9 +1098,10 @@ class HTTPConnection:
             try:
                 while True:
                     version, status, reason = _parse_status_line(self._sock)
+                    is_interim = (100 <= status < 200 and status != 101)
                     headers, connection, content_chunked, content_length, new_location = _parse_headers(
-                        self._sock, status, False if status == 100 else with_headers)
-                    if status != 100:
+                        self._sock, status, False if is_interim else with_headers)
+                    if not is_interim:
                         break
             except OSError as e:
                 raise IncompleteRead(e.errno, "socket read failed", None, None, status)
