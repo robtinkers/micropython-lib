@@ -74,9 +74,6 @@ _BUFFER_TYPES = (bytes, bytearray, memoryview)
 
 class HTTPException(Exception): pass
 
-if _COMPATISH_EXCEPTIONS:
-    error = HTTPException
-
 class ImproperConnectionState(HTTPException): pass
 class CannotSendRequest(ImproperConnectionState): pass
 class CannotSendHeader(ImproperConnectionState): pass
