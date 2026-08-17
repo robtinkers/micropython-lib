@@ -27,10 +27,6 @@ _READ_BLOCK_SIZE = const(1024)
 _READ_BLOCK_SIZE_HEXCRLF = const(b"400\r\n")
 _REQUEST_HEAD_SIZE = const(256)
 
-HTTP_PORT = const(80)
-HTTPS_PORT = const(443)
-OK = const(200)
-
 ENONET = getattr(errno, "ENONET", 64)
 ENETDOWN = getattr(errno, "ENETDOWN", 100)
 ENETUNREACH = getattr(errno, "ENETUNREACH", 101)
@@ -56,23 +52,23 @@ _CS_RESPONSE_CREATING = const(4)
 _CS_RESPONSE_ACTIVE = const(5)
 _CS_RESPONSE_REUSABLE = const(6)
 
-_ACCEPT_ENCODING = b"Accept-Encoding"
-_CONNECTION = b"Connection"
-_CONTENT_LENGTH = b"Content-Length"
-_HOST = b"Host"
-_LOCATION = b"Location"
-_SET_COOKIE = b"Set-Cookie"
-_TRANSFER_ENCODING = b"Transfer-Encoding"
+_ACCEPT_ENCODING = const(b"Accept-Encoding")
+_CONNECTION = const(b"Connection")
+_CONTENT_LENGTH = const(b"Content-Length")
+_HOST = const(b"Host")
+_LOCATION = const(b"Location")
+_SET_COOKIE = const(b"Set-Cookie")
+_TRANSFER_ENCODING = const(b"Transfer-Encoding")
 
-_CHUNKED = b"chunked"
-_CLOSE = b"close"
+_CHUNKED = const(b"chunked")
+_CLOSE = const(b"close")
 if not _PARSE_REASON:
     if _COMPATISH_DECODE_HEADERS:
-        _OKAY = "OK"
-        _NOT_OKAY = "Not OK"
+        _OKAY = const("OK")
+        _NOT_OKAY = const("Not OK")
     else:
-        _OKAY = b"OK"
-        _NOT_OKAY = b"Not OK"
+        _OKAY = const(b"OK")
+        _NOT_OKAY = const(b"Not OK")
 
 _BUFFER_TYPES = (bytes, bytearray, memoryview)
 
@@ -845,7 +841,7 @@ class HTTPResponse:
 
 class HTTPConnection:
     response_class = HTTPResponse
-    default_port = HTTP_PORT
+    default_port = 80
     timeout = _DEFAULT_TIMEOUT
     _network = None
 
@@ -1387,7 +1383,7 @@ if _SSL_ENABLED:
     import ssl
 
     class HTTPSConnection(HTTPConnection):
-        default_port = HTTPS_PORT
+        default_port = 443
 
         def __init__(self, host, port=None, *,
                      timeout=_DEFAULT_TIMEOUT, network=None, context=None):
