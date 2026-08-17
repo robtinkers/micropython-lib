@@ -536,6 +536,53 @@ def containstoken_ci(haystack: object, needle: object, needle_len=None) -> bool:
     return _dispatch(_containstoken, haystack, needle, needle_len, 1)
 
 @micropython.viper
+def _endswithtoken(haystack: object, needle_ptr: ptr8, needle_len: int, flags: int) -> bool:
+    if isinstance(haystack, str):
+        haystack = memoryview(haystack)
+    elif _CHECK_OBJECT_TYPE and not isinstance(haystack, _BYTES_LIKE):
+        raise TypeError("haystack")
+
+    i = int(len(haystack))
+    haystack_ptr = ptr8(haystack)
+
+    if flags & 2:
+        while i > 0 and haystack_ptr[i - 1] <= 32:
+            i -= 1
+
+    if i < needle_len:
+        return False
+
+    while needle_len > 0:
+        i -= 1
+        needle_len -= 1
+        x = haystack_ptr[i]
+        y = needle_ptr[needle_len]
+        if x != y:
+            if flags & 1:
+                if 65 <= x and x <= 90:
+                    x += 32
+                if 65 <= y and y <= 90:
+                    y += 32
+            if x != y:
+                return False
+
+    if i == 0:
+        return True
+    
+    x = haystack_ptr[i-1]
+    return not ((48 <= x and x <= 57)
+        or (65 <= x and x <= 90)
+        or (97 <= x and x <= 122)
+        or x == 45 or x == 46 or x == 95
+    )
+
+def endswithtoken(haystack, needle, needle_len=None):
+    return _dispatch(_endswithtoken, haystack, needle, needle_len, 2)
+
+def endswithtoken_ci(haystack, needle, needle_len=None):
+    return _dispatch(_endswithtoken, haystack, needle, needle_len, 3)
+
+@micropython.viper
 def slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
     if base < 2 or base > 36:
         return -1
