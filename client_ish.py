@@ -2,7 +2,7 @@
 #
 # Serious HTTP for tiny devices.
 
-import micropython, socket, errno, gc
+import micropython, socket, gc
 
 from string_ish import (
     equals_ci, startswith_ci, containstoken_ci, endswithtoken_ci,
@@ -27,11 +27,22 @@ _READ_BLOCK_SIZE = const(1024)
 _READ_BLOCK_SIZE_HEXCRLF = const(b"400\r\n")
 _REQUEST_HEAD_SIZE = const(256)
 
-ENONET = getattr(errno, "ENONET", 64)
-ENETDOWN = getattr(errno, "ENETDOWN", 100)
-ENETUNREACH = getattr(errno, "ENETUNREACH", 101)
-EHOSTDOWN = getattr(errno, "EHOSTDOWN", 112)
-EHOSTUNREACH = getattr(errno, "EHOSTUNREACH", 113)
+import sys
+if sys.platform == const("esp32"):
+    # esp-idf
+    ENONET = const(64)
+    ENETDOWN = const(115)
+    ENETUNREACH = const(114)
+    EHOSTDOWN = const(117)
+    EHOSTUNREACH = const(118)
+else:
+    import errno
+    # linux defaults
+    ENONET = getattr(errno, "ENONET", 64)
+    ENETDOWN = getattr(errno, "ENETDOWN", 100)
+    ENETUNREACH = getattr(errno, "ENETUNREACH", 101)
+    EHOSTDOWN = getattr(errno, "EHOSTDOWN", 112)
+    EHOSTUNREACH = getattr(errno, "EHOSTUNREACH", 113)
 
 _RF_HOST = const(1)
 _RF_CONNECTION_CLOSE = const(4)
