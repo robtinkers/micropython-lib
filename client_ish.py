@@ -290,11 +290,17 @@ def _slice_equals(haystack_ptr: ptr8, start: int, end: int, needle_ptr: ptr8) ->
 @micropython.viper
 def _validate(haystack: ptr8, haystack_len: int, strict: int) -> int:
     i = 0
-    while i < haystack_len:
-        x = haystack[i]
-        if x <= 32 and (strict or x == 10 or x == 13):
-            return 0
-        i += 1
+    if strict:
+        while i < haystack_len:
+            if haystack[i] <= 32:
+                return 0
+            i += 1
+    else:
+        while i < haystack_len:
+            x = haystack[i]
+            if x == 10 or x == 13:
+                return 0
+            i += 1
     return 1
 
 def _encode_and_validate(x, strict=0):
@@ -634,7 +640,6 @@ class HTTPResponse:
                 if name is not None:
                     if pos != name_length or not _slice_equals(value, 0, pos, name):
                         continue
-                    key = name
                 else:
                     key = value[:pos]
 
@@ -646,10 +651,14 @@ class HTTPResponse:
                     value = value[pos:end]
 
                 if _COMPATISH_DECODE_HEADERS:
-                    key = decode_latin1(key)
+                    if name is None:
+                        key = decode_latin1(key)
                     value = decode_latin1(value)
 
-                yield key, value
+                if name is None:
+                    yield key, value
+                else:
+                    yield value
 
         def getcookies(self):
             result = self._itercookies(None, False)
@@ -660,13 +669,13 @@ class HTTPResponse:
             return result if _ITERATE_HEADERS else list(result)
 
         def getcookie(self, name, default=None):
-            for cookie in self._itercookies(name, False):
-                return cookie[1] # first match wins
+            for value in self._itercookies(name, False):
+                return value # first match wins
             return default
 
         def getrawcookie(self, name, default=None):
-            for cookie in self._itercookies(name, True):
-                return cookie[1] # first match wins
+            for value in self._itercookies(name, True):
+                return value # first match wins
             return default
 
         def drain(self, buf=None):
@@ -1175,6 +1184,7 @@ class HTTPConnection:
             raise NotConnected()
 
         method = self.method
+        sock = self._sock
         resp = None
         try:
             if state == _CS_REQUEST_HEAD_OPEN:
@@ -1214,12 +1224,12 @@ class HTTPConnection:
             status = None
             try:
                 while True:
-                    version, status, reason = _parse_status_line(self._sock)
+                    version, status, reason = _parse_status_line(sock)
                     if 100 <= status < 200 and status != 101:
-                        _parse_headers(self._sock, status, False)
+                        _parse_headers(sock, status, False)
                         continue
                     headers, connection, chunked, content_length, new_location = _parse_headers(
-                        self._sock, status, with_headers)
+                        sock, status, with_headers)
                     break
             except OSError as e:
                 if _COMPATISH_EXCEPTIONS:
@@ -1245,11 +1255,10 @@ class HTTPConnection:
                 reusable = False
                 content_length = None
                 chunked = False
-            elif status < 200 or status == 204:
+            elif status == 204:
                 reusable = (
                     reusable and chunked is None
-                    and (content_length is None
-                         or (content_length == 0 and status == 204)))
+                    and (content_length is None or content_length == 0))
                 content_length = 0
                 chunked = False
             elif status == 304 or method == b"HEAD":
@@ -1268,27 +1277,16 @@ class HTTPConnection:
             else:
                 reusable = reusable and content_length is not None
 
-            if status < 200 and status != 101:
-                sock = owner = None
-                if not reusable:
-                    self._flags |= _RF_CONNECTION_CLOSE
-            else:
-                sock = self._sock
-                reusable = reusable and not (self._flags & _RF_CONNECTION_CLOSE)
-                owner = self
+            reusable = reusable and not (self._flags & _RF_CONNECTION_CLOSE)
 
             self._state = _CS_RESPONSE_CREATING
 
             resp = self.response_class(
-                owner, sock, method, self.url, version, status, reason,
+                self, sock, method, self.url, version, status, reason,
                 headers, chunked is True, content_length)
 
             if self._state != _CS_RESPONSE_CREATING:
                 raise ResponseNotReady()
-
-            if sock is None:
-                self._state = _CS_RESPONSE_ACTIVE
-                return resp
 
             self._sock = None
             self._resp = resp
@@ -1385,13 +1383,17 @@ class HTTPConnection:
         return body
 
     def _append_header(self, name, value):
-        self._head.extend(name)
-        self._head.extend(b": ")
-        self._head.extend(value)
-        self._head.extend(b"\r\n")
+        head = self._head
+        head.extend(name)
+        head.extend(b": ")
+        head.extend(value)
+        head.extend(b"\r\n")
 
     def _send_body(self, body):
-        send = self._send_chunk if self._chunked else self._send_bytes
+        send = (
+            HTTPConnection._send_chunk
+            if self._chunked else HTTPConnection._send_bytes
+        )
 
         if callable(body):
             body = body()
@@ -1407,7 +1409,8 @@ class HTTPConnection:
             self._state = _CS_REQUEST_BODY_OPEN
 
         if isinstance(body, _BUFFER_TYPES):
-            send(body)
+            if body:
+                send(self, body)
             return
 
         reader = getattr(body, "readinto", None)
@@ -1424,7 +1427,7 @@ class HTTPConnection:
                     raise TypeError("invalid body part")
                 if not n:
                     return
-                send(bmv if n == size else bmv[:n])
+                send(self, bmv if n == size else bmv[:n])
 
         reader = getattr(body, "read", None)
         if callable(reader):
@@ -1436,7 +1439,7 @@ class HTTPConnection:
                     raise TypeError("invalid body part")
                 if not buf:
                     return
-                send(buf)
+                send(self, buf)
                 buf = None
 
         for buf in body:
@@ -1444,12 +1447,12 @@ class HTTPConnection:
                 buf = buf.encode()
             if not isinstance(buf, _BUFFER_TYPES):
                 raise TypeError("invalid body part")
-            send(buf)
+            if not buf:
+                continue
+            send(self, buf)
             buf = None
 
     def _send_chunk(self, data):
-        if not data:
-            return
         data_length = len(data)
         self._send_bytes(
             _READ_BLOCK_SIZE_HEXCRLF if data_length == _READ_BLOCK_SIZE
@@ -1458,9 +1461,6 @@ class HTTPConnection:
         self._send_bytes(b"\r\n", False)
 
     def _send_bytes(self, data, accounting=True):
-        if not data:
-            return
-
         try:
             self._sock.sendall(data)
         except OSError as e:
