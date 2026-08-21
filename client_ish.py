@@ -387,14 +387,13 @@ def create_connection(address, timeout=None, *, resolver=None):
     raise exc
 
 def _parse_hostport_from_url(url):
-    url_len = len(url)
-    if url_len >= 7 and _equals_ci(url, b"http://", 7):
+    end = len(url)
+    if end >= 7 and _equals_ci(url, b"http://", 7):
         start = 7
-    elif url_len >= 8 and _equals_ci(url, b"https://", 8):
+    elif end >= 8 and _equals_ci(url, b"https://", 8):
         start = 8
     else:
         return None
-    end = url_len
     for separator in (b"/", b"?", b"#"):
         pos = url.find(separator, start)
         if 0 <= pos < end:
@@ -661,13 +660,13 @@ class HTTPResponse:
             return result if _ITERATE_HEADERS else list(result)
 
         def getcookie(self, name, default=None):
-            for key, value in self._itercookies(name, False):
-                return value # first match wins
+            for cookie in self._itercookies(name, False):
+                return cookie[1] # first match wins
             return default
 
         def getrawcookie(self, name, default=None):
-            for key, value in self._itercookies(name, True):
-                return value # first match wins
+            for cookie in self._itercookies(name, True):
+                return cookie[1] # first match wins
             return default
 
         def drain(self, buf=None):
@@ -852,8 +851,7 @@ class HTTPResponse:
                         self.close()
                         return 0
             elif self._chunk_left == 0:
-                terminator = self._sock.read(2)
-                if terminator != b"\r\n":
+                if self._sock.read(2) != b"\r\n":
                     self._abort_read("invalid chunk terminator")
                 self._chunk_left = None
             else:
@@ -986,14 +984,12 @@ class HTTPConnection:
             else:
                 raise TypeError("port invalid")
 
-        if port == self.default_port:
-            hostport = the_host
-        else:
-            hostport = b"%s:%d" % (the_host, port)
-
         self.host = hostaddr
         self._hostname = hostname
-        self._hostport = hostport
+        if port == self.default_port:
+            self._hostport = the_host
+        else:
+            self._hostport = b"%s:%d" % (the_host, port)
         self.port = port
 
         if timeout is not None:
@@ -1219,56 +1215,56 @@ class HTTPConnection:
             try:
                 while True:
                     version, status, reason = _parse_status_line(self._sock)
-                    is_interim = (100 <= status < 200 and status != 101)
-                    headers, connection, content_chunked, content_length, new_location = _parse_headers(
-                        self._sock, status, False if is_interim else with_headers)
-                    if not is_interim:
-                        break
+                    if 100 <= status < 200 and status != 101:
+                        _parse_headers(self._sock, status, False)
+                        continue
+                    headers, connection, chunked, content_length, new_location = _parse_headers(
+                        self._sock, status, with_headers)
+                    break
             except OSError as e:
                 if _COMPATISH_EXCEPTIONS:
                     raise
                 else:
                     raise IncompleteRead(e.errno, "socket read failed", None, None, status)
 
-            http10 = (version == 10)
-            chunked = content_chunked
-            content_chunked = False
+            reusable = version != 10
 
             if connection == _CM_CLOSE:
                 reusable = False
             elif connection == _CM_KEEPALIVE:
                 reusable = True
-            else:
-                reusable = not http10
 
-            if chunked and (http10 or content_length is not None):
+            if chunked and (version == 10 or content_length is not None):
                 reusable = False
 
             if status == 101:
+                reusable = False
                 content_length = 0
-                reusable = False
+                chunked = False
             elif method == b"CONNECT" and 200 <= status < 300:
-                content_length = None
                 reusable = False
+                content_length = None
+                chunked = False
             elif status < 200 or status == 204:
                 reusable = (
                     reusable and chunked is None
                     and (content_length is None
                          or (content_length == 0 and status == 204)))
                 content_length = 0
+                chunked = False
             elif status == 304 or method == b"HEAD":
                 reusable = reusable and content_length != -1
                 content_length = 0
+                chunked = False
             elif chunked is True:
-                content_chunked = True
                 content_length = None
             elif chunked is False:
+                reusable = False
                 if content_length is None or content_length < 0:
                     content_length = None
-                reusable = False
             elif content_length == -1:
-                content_length = None
                 reusable = False
+                content_length = None
             else:
                 reusable = reusable and content_length is not None
 
@@ -1285,7 +1281,7 @@ class HTTPConnection:
 
             resp = self.response_class(
                 owner, sock, method, self.url, version, status, reason,
-                headers, content_chunked, content_length)
+                headers, chunked is True, content_length)
 
             if self._state != _CS_RESPONSE_CREATING:
                 raise ResponseNotReady()
