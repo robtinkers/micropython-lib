@@ -1529,7 +1529,7 @@ if _SSL_ENABLED:
             self._context = context
 
         def _open_socket(self):
-            super()._open_socket()
+            HTTPConnection._open_socket(self)
             raw, self._sock = self._sock, None
             gc.collect()
             try:
