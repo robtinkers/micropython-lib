@@ -661,12 +661,14 @@ class HTTPResponse:
                     yield value
 
         def getcookies(self):
-            result = self._itercookies(None, False)
-            return result if _ITERATE_HEADERS else list(result)
+            if _ITERATE_HEADERS:
+                return self._itercookies(None, False)
+            return list(self._itercookies(None, False))
 
         def getrawcookies(self):
-            result = self._itercookies(None, True)
-            return result if _ITERATE_HEADERS else list(result)
+            if _ITERATE_HEADERS:
+                return self._itercookies(None, True)
+            return list(self._itercookies(None, True))
 
         def getcookie(self, name, default=None):
             for value in self._itercookies(name, False):
@@ -683,6 +685,8 @@ class HTTPResponse:
                 size = _READ_BLOCK_SIZE
                 if self._length is not None:
                     size = min(size, self._length - self._count)
+                if size == 0:
+                    return
                 buf = bytearray(size)
             elif not buf:
                 raise ValueError("empty buffer")
@@ -717,7 +721,8 @@ class HTTPResponse:
             elif amt is not None and amt < 0:
                 amt = None
 
-            bounded = amt is not None
+            if _COMPATISH_EXCEPTIONS:
+                bounded = amt is not None
 
             if amt == 0:
                 return 0 if into else b""
@@ -1161,8 +1166,6 @@ class HTTPConnection:
     def send(self, body):
         if self._state != _CS_REQUEST_HEAD_OPEN and self._state != _CS_REQUEST_BODY_OPEN:
             raise CannotSendRequest()
-        if self._sock is None:
-            raise NotConnected()
 
         old_bytes = self._count
         try:
@@ -1174,14 +1177,8 @@ class HTTPConnection:
 
     def getresponse(self, *, with_headers=None):
         state = self._state
-        if self._resp is not None or (
-            state != _CS_REQUEST_HEAD_OPEN
-            and state != _CS_REQUEST_BODY_OPEN
-            and state != _CS_RESPONSE_ACTIVE
-        ):
+        if (state != _CS_REQUEST_HEAD_OPEN and state != _CS_REQUEST_BODY_OPEN):
             raise ResponseNotReady()
-        if self._sock is None:
-            raise NotConnected()
 
         method = self.method
         sock = self._sock
@@ -1216,10 +1213,10 @@ class HTTPConnection:
             elif isinstance(with_headers, str):
                 with_headers = (with_headers.encode(), )
             else:
-                with_headers = tuple(
+                with_headers = [
                     name.encode() if isinstance(name, str) else name
                     for name in with_headers
-                )
+                ]
 
             status = None
             try:
