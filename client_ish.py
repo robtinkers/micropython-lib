@@ -148,12 +148,14 @@ else:
     class InvalidURL(ValueError): pass
 
 @micropython.viper
-def _equals_ci(haystack_ptr: ptr8, needle_ptr: ptr8, needle_len: int) -> bool:
+def _startswith(haystack_ptr: ptr8, needle_ptr: ptr8, needle_len: int, ci_flag: bool) -> bool:
     i = 0
     while i < needle_len:
         x = haystack_ptr[i]
         y = needle_ptr[i]
         if x != y:
+            if not ci_flag:
+                return False
             x |= 32
             y |= 32
             if x != y or x < 97 or x > 122:
@@ -272,17 +274,6 @@ def _slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
     return value
 
 @micropython.viper
-def _slice_equals(haystack_ptr: ptr8, start: int, end: int, needle_ptr: ptr8) -> bool:
-    i = start
-    j = 0
-    while i < end:
-        if haystack_ptr[i] != needle_ptr[j]:
-            return False
-        i += 1
-        j += 1
-    return True
-
-@micropython.viper
 def _validate(haystack: ptr8, haystack_len: int, strict: bool) -> bool:
     i = 0
     if strict:
@@ -389,9 +380,9 @@ def create_connection(address, timeout=None, *, resolver=None):
 
 def _parse_hostport_from_url(url):
     end = len(url)
-    if end >= 7 and _equals_ci(url, b"http://", 7):
+    if end >= 7 and _startswith(url, b"http://", 7, True):
         start = 7
-    elif end >= 8 and _equals_ci(url, b"https://", 8):
+    elif end >= 8 and _startswith(url, b"https://", 8, True):
         start = 8
     else:
         return None
@@ -416,11 +407,7 @@ def _parse_status_line(sock):
         line = sock.readline()
         line_length = len(line)
 
-        if (
-            line_length < 4
-            or not _slice_equals(line, 0, 4, b"TTP/")
-            or line[line_length - 1] != 10
-        ):
+        if line_length < 4 or line[line_length - 1] != 10:
             break
 
         pos = 4
@@ -429,10 +416,12 @@ def _parse_status_line(sock):
         if pos == line_length:
             break
 
-        if pos == 7 and _slice_equals(line, 4, 7, b"1.0"):
+        if pos == 7 and _startswith(line, b"TTP/1.0", 7, False):
             first = 10
-        elif pos >= 6 and _slice_equals(line, 4, 6, b"1."):
+        elif pos >= 6 and _startswith(line, b"TTP/1.", 6, False):
             first = 11
+        elif not _startswith(line, b"TTP/", 4, False):
+            break
         elif _COMPATISH_EXCEPTIONS:
             raise UnknownProtocol(b"H" + line[:pos])
         else:
@@ -498,16 +487,16 @@ def _parse_headers(sock, status, with_headers):
             retained_name = line[:name_length]
         elif with_headers:
             for retained_name in with_headers:
-                if len(retained_name) == name_length and _equals_ci(line, retained_name, name_length):
+                if len(retained_name) == name_length and _startswith(line, retained_name, name_length, True):
                     break
             else:
                 retained_name = None
 
-        if name_length == 8 and _equals_ci(line, _LOCATION, 8):
+        if name_length == 8 and _startswith(line, _LOCATION, 8, True):
             line = _header_value(line, name_length)
             new_location = line
 
-        elif name_length == 10 and _equals_ci(line, _CONNECTION, 10):
+        elif name_length == 10 and _startswith(line, _CONNECTION, 10, True):
             if connection == _CM_CLOSE:
                 pass
             elif _containstoken(line, _CLOSE, 5):
@@ -518,7 +507,7 @@ def _parse_headers(sock, status, with_headers):
             if retained_name is not None:
                 line = _header_value(line, 10)
 
-        elif name_length == 14 and _equals_ci(line, _CONTENT_LENGTH, 14):
+        elif name_length == 14 and _startswith(line, _CONTENT_LENGTH, 14, True):
             name_length = _slice_uint(line, 15, len(line), 10)
 
             if content_length is None:
@@ -529,7 +518,7 @@ def _parse_headers(sock, status, with_headers):
             if retained_name is not None:
                 line = _header_value(line, 14)
 
-        elif name_length == 17 and _equals_ci(line, _TRANSFER_ENCODING, 17):
+        elif name_length == 17 and _startswith(line, _TRANSFER_ENCODING, 17, True):
             content_chunked = _endswithtoken_chunked(line)
 
             if retained_name is not None:
@@ -608,7 +597,7 @@ class HTTPResponse:
         name_length = len(name)
         result = None
         for key, val in self._headers:
-            if len(key) != name_length or not _equals_ci(key, name, name_length):
+            if len(key) != name_length or not _startswith(key, name, name_length, True):
                 continue
             if result is None:
                 result = val
@@ -630,7 +619,7 @@ class HTTPResponse:
                 name_length = len(name)
 
             for key, value in self._headers:
-                if len(key) != 10 or not _equals_ci(key, _SET_COOKIE, 10):
+                if len(key) != 10 or not _startswith(key, _SET_COOKIE, 10, True):
                     continue
 
                 pos = value.find(b"=")
@@ -638,7 +627,7 @@ class HTTPResponse:
                     continue
 
                 if name is not None:
-                    if pos != name_length or not _slice_equals(value, 0, pos, name):
+                    if pos != name_length or not _startswith(value, name, pos, False):
                         continue
                 else:
                     key = value[:pos]
@@ -928,7 +917,7 @@ class HTTPResponse:
             length = len(name)
             values = None
             for key, value in self._headers:
-                if len(key) == length and _equals_ci(key, name, length):
+                if len(key) == length and _startswith(key, name, length, True):
                     if values is None:
                         values = []
                     if _COMPATISH_DECODE_HEADERS:
@@ -1115,12 +1104,12 @@ class HTTPConnection:
         length = self._length
         flags = self._flags
 
-        if name_length == 4 and _equals_ci(name, _HOST, 4):
+        if name_length == 4 and _startswith(name, _HOST, 4, True):
             flags |= _RF_HOST
-        elif name_length == 10 and _equals_ci(name, _CONNECTION, 10):
+        elif name_length == 10 and _startswith(name, _CONNECTION, 10, True):
             if value is not None and _containstoken(value, _CLOSE, 5):
                 flags |= _RF_CONNECTION_CLOSE
-        elif name_length == 14 and _equals_ci(name, _CONTENT_LENGTH, 14):
+        elif name_length == 14 and _startswith(name, _CONTENT_LENGTH, 14, True):
             flags |= _RF_CONTENT_LENGTH
             if value is not None:
                 value = _slice_uint(value, 0, len(value), 10)
@@ -1128,9 +1117,9 @@ class HTTPConnection:
                     length = value
                 else:
                     length = -1
-        elif name_length == 15 and _equals_ci(name, _ACCEPT_ENCODING, 15):
+        elif name_length == 15 and _startswith(name, _ACCEPT_ENCODING, 15, True):
             flags |= _RF_ACCEPT_ENCODING
-        elif name_length == 17 and _equals_ci(name, _TRANSFER_ENCODING, 17):
+        elif name_length == 17 and _startswith(name, _TRANSFER_ENCODING, 17, True):
             flags |= _RF_TRANSFER_ENCODING
             if value is not None:
                 flags &= ~_RF_TRANSFER_CHUNKED
