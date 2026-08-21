@@ -1205,7 +1205,7 @@ class HTTPConnection:
                 with_headers = _DEFAULT_WITH_HEADERS
             if not with_headers or isinstance(with_headers, bool):
                 pass
-            elif isinstance(with_headers, (bytes, bytearray)):
+            elif isinstance(with_headers, _BUFFER_TYPES):
                 with_headers = (with_headers, )
             elif isinstance(with_headers, str):
                 with_headers = (with_headers.encode(), )
