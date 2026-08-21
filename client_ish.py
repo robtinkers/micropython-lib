@@ -65,6 +65,8 @@ _TRANSFER_ENCODING = const(b"Transfer-Encoding")
 
 _CHUNKED = const(b"chunked")
 _CLOSE = const(b"close")
+_OKAY = const(b"OK")
+_NOT_OKAY = const(b"Not OK")
 
 _BUFFER_TYPES = (bytes, bytearray, memoryview)
 
@@ -454,7 +456,7 @@ def _parse_status_line(sock):
         elif _COMPATISH_DECODE_HEADERS:
             return (first, status, "OK" if status == 200 else "Not OK")
         else:
-            return (first, status, b"OK" if status == 200 else b"Not OK")
+            return (first, status, _OKAY if status == 200 else _NOT_OKAY)
 
     raise BadStatusLine(b"H" + line)
 
@@ -661,12 +663,14 @@ class HTTPResponse:
         def getcookies(self):
             if _ITERATE_HEADERS:
                 return self._itercookies(None, False)
-            return list(self._itercookies(None, False))
+            else:
+                return list(self._itercookies(None, False))
 
         def getrawcookies(self):
             if _ITERATE_HEADERS:
                 return self._itercookies(None, True)
-            return list(self._itercookies(None, True))
+            else:
+                return list(self._itercookies(None, True))
 
         def getcookie(self, name, default=None):
             for value in self._itercookies(name, False):
