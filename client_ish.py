@@ -15,7 +15,7 @@ _PARSE_REASON = const(1)
 _RECYCLE_BUFFERS = const(1)
 _SSL_ENABLED = const(1)
 
-_DEFAULT_WITH_HEADERS = False
+_DEFAULT_WITH_HEADERS = const(0) # i.e. False
 _DEFAULT_TIMEOUT = const(10)
 _GC_FREE_THRESHOLD = const(32768)
 _READ_BLOCK_SIZE = const(1024)
@@ -288,7 +288,7 @@ def _slice_equals(haystack_ptr: ptr8, start: int, end: int, needle_ptr: ptr8) ->
     return True
 
 @micropython.viper
-def _validate(haystack: ptr8, haystack_len: int, strict: int) -> int:
+def _validate(haystack: ptr8, haystack_len: int, strict: bool) -> int:
     i = 0
     if strict:
         while i < haystack_len:
@@ -303,7 +303,7 @@ def _validate(haystack: ptr8, haystack_len: int, strict: int) -> int:
             i += 1
     return 1
 
-def _encode_and_validate(x, strict=0):
+def _encode_and_validate(x, strict):
     if x is None:
         return None
     if isinstance(x, str):
@@ -552,7 +552,7 @@ def _parse_headers(sock, status, with_headers):
 class HTTPResponse:
     _chunk_left = None
 
-    def __init__(self, owner, sock, method, url, version, status, reason, headers, chunked, length):
+    def __init__(self, owner, sock, method, url, version, status, reason, headers, chunked, length, location):
         self._owner = owner
         self._sock = sock
         self.method = method
@@ -569,6 +569,9 @@ class HTTPResponse:
         self._headers = headers
         self._chunked = chunked
         self._length = length
+        if _COMPATISH_DECODE_HEADERS:
+            location = decode_latin1(location)
+        self.location = location
         self._count = 0
 
     def __enter__(self):
@@ -602,7 +605,7 @@ class HTTPResponse:
                 return self._headers
 
     def getheader(self, name, default=None):
-        name = _encode_and_validate(name)
+        name = _encode_and_validate(name, False)
         if name is None:
             return default
         name_length = len(name)
@@ -624,7 +627,7 @@ class HTTPResponse:
 
         def _itercookies(self, name, raw):
             if name is not None:
-                name = _encode_and_validate(name)
+                name = _encode_and_validate(name, False)
                 if name is None:
                     return
                 name_length = len(name)
@@ -920,7 +923,7 @@ class HTTPResponse:
         items = getheaders
 
         def get_all(self, name, default=None):
-            name = _encode_and_validate(name)
+            name = _encode_and_validate(name, False)
             if name is None:
                 return default
             length = len(name)
@@ -951,7 +954,7 @@ class HTTPConnection:
     _network = None
 
     def __init__(self, host, port=None, timeout=None, *, network=None):
-        the_host = _encode_and_validate(host, 1)
+        the_host = _encode_and_validate(host, True)
         if not the_host:
             raise InvalidURL(host)
 
@@ -1054,14 +1057,14 @@ class HTTPConnection:
         if self._state != _CS_IDLE:
             raise CannotSendRequest()
 
-        method = _encode_and_validate(method, 1)
+        method = _encode_and_validate(method, True)
         if not method:
             raise ValueError("invalid method")
         if not method.isupper():
             method = method.upper()
 
         if url:
-            valid_url = _encode_and_validate(url, 1)
+            valid_url = _encode_and_validate(url, True)
         else:
             valid_url = b"/"
         if not valid_url:
@@ -1094,11 +1097,11 @@ class HTTPConnection:
         if self._state != _CS_REQUEST_BUILDING:
             raise CannotSendHeader()
 
-        name = _encode_and_validate(name)
+        name = _encode_and_validate(name, False)
         if name is None:
             raise ValueError("invalid header name")
         if value is not None:
-            value = _encode_and_validate(value)
+            value = _encode_and_validate(value, False)
             if value is None:
                 raise ValueError("invalid header value")
             try:
@@ -1205,7 +1208,12 @@ class HTTPConnection:
                 gc.collect()
 
             if with_headers is None:
-                with_headers = _DEFAULT_WITH_HEADERS
+                if not _DEFAULT_WITH_HEADERS:
+                    with_headers = False
+                elif type(_DEFAULT_WITH_HEADERS) is int:
+                    with_headers = True
+                else:
+                    with_headers = _DEFAULT_WITH_HEADERS
             if not with_headers or isinstance(with_headers, bool):
                 pass
             elif isinstance(with_headers, _BUFFER_TYPES):
@@ -1280,7 +1288,7 @@ class HTTPConnection:
 
             resp = self.response_class(
                 self, sock, method, self.url, version, status, reason,
-                headers, chunked is True, content_length)
+                headers, chunked is True, content_length, new_location)
 
             if self._state != _CS_RESPONSE_CREATING:
                 raise ResponseNotReady()
