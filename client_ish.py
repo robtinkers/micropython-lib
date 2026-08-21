@@ -167,8 +167,22 @@ def _equals_ci(haystack_ptr: ptr8, needle_ptr: ptr8, needle_len: int) -> bool:
     return True
 
 @micropython.viper
-def _containstoken(haystack: object, needle_ptr: ptr8,
-                   needle_len: int) -> bool:
+def _istchar(x: int) -> bool:
+    return (
+        x == 33
+        or (35 <= x and x <= 39)
+        or (42 <= x and x <= 43)
+        or (45 <= x and x <= 46)
+        or (48 <= x and x <= 57)
+        or (65 <= x and x <= 90)
+        or (94 <= x and x <= 96)
+        or (97 <= x and x <= 122)
+        or x == 124
+        or x == 126
+    )
+
+@micropython.viper
+def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int) -> bool:
     haystack_len = int(len(haystack))
     haystack_ptr = ptr8(haystack)
     last_start = haystack_len - needle_len
@@ -181,30 +195,13 @@ def _containstoken(haystack: object, needle_ptr: ptr8,
             if x != y or x < 97 or x > 122:
                 i += 1
                 continue
-
-        # Candidate must begin at a token boundary.
-        if i:
-            x = haystack_ptr[i - 1]
-            if ((48 <= x and x <= 57)
-                or (65 <= x and x <= 90)
-                or (97 <= x and x <= 122)
-                or x == 45 or x == 46 or x == 95
-            ):
-                i += 1
-                continue
-
-        # Candidate must end at a token boundary.
+        if i and _istchar(haystack_ptr[i - 1]):
+            i += 1
+            continue
         j = i + needle_len
-        if j < haystack_len:
-            x = haystack_ptr[j]
-            if ((48 <= x and x <= 57)
-                or (65 <= x and x <= 90)
-                or (97 <= x and x <= 122)
-                or x == 45 or x == 46 or x == 95
-            ):
-                i += 1
-                continue
-
+        if j < haystack_len and _istchar(haystack_ptr[j]):
+            i += 1
+            continue
         j = 1
         while j < needle_len:
             x = haystack_ptr[i + j]
@@ -214,7 +211,6 @@ def _containstoken(haystack: object, needle_ptr: ptr8,
                 if x != y or x < 97 or x > 122:
                     break
             j += 1
-
         if j == needle_len:
             return True
         i += 1
@@ -244,12 +240,7 @@ def _endswithtoken_chunked(haystack: object) -> bool:
     if i == 0:
         return True
 
-    x = haystack_ptr[i-1]
-    return False if ((48 <= x and x <= 57)
-        or (65 <= x and x <= 90)
-        or (97 <= x and x <= 122)
-        or x == 45 or x == 46 or x == 95
-    ) else True
+    return not _istchar(haystack_ptr[i - 1])
 
 @micropython.viper
 def _slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
@@ -396,23 +387,21 @@ def create_connection(address, timeout=None, *, resolver=None):
     raise exc
 
 def _parse_hostport_from_url(url):
-    if url.startswith(b"http://"):
+    url_len = len(url)
+    if url_len >= 7 and _equals_ci(url, b"http://", 7):
         start = 7
-    elif url.startswith(b"https://"):
+    elif url_len >= 8 and _equals_ci(url, b"https://", 8):
         start = 8
     else:
         return None
-    end = len(url)
-
+    end = url_len
     for separator in (b"/", b"?", b"#"):
         pos = url.find(separator, start)
         if 0 <= pos < end:
             end = pos
-
     pos = url.rfind(b"@", start, end)
     if pos >= 0:
         start = pos + 1
-
     return memoryview(url)[start:end]
 
 def _parse_status_line(sock):
@@ -839,11 +828,13 @@ class HTTPResponse:
                 line = self._sock.readline()
                 if not line:
                     self._abort_read("EOF before chunk size")
-                pos = line.find(b";")
-                if pos >= 0:
-                    size = _slice_uint(line, 0, pos, 16)
-                else:
-                    size = _slice_uint(line, 0, len(line), 16)
+                line_length = len(line)
+                if (line_length < 2 or line[line_length - 2] != 13 or line[line_length - 1] != 10):
+                    self._abort_read("invalid chunk-size line ending")
+                size_end = line.find(b";")
+                if size_end < 0:
+                    size_end = line_length - 2
+                size = _slice_uint(line, 0, size_end, 16)
                 if size < 0:
                     self._abort_read("invalid chunk size")
                 if size > 0:
@@ -851,17 +842,18 @@ class HTTPResponse:
                     return size
                 while True:
                     line = self._sock.readline()
-                    if (line == b"\r\n" or line == b"\n"):
+                    if not line:
+                        self._abort_read("EOF in chunk trailers")
+                    line_length = len(line)
+                    if (line_length < 2 or line[line_length - 2] != 13 or line[line_length - 1] != 10):
+                        self._abort_read("invalid chunk trailer line ending")
+                    if line_length == 2:  # exactly b"\r\n"
                         self._length = self._count
                         self.close()
                         return 0
-                    if not line:
-                        self._abort_read("EOF in chunk trailers")
             elif self._chunk_left == 0:
-                line = self._sock.readline()
-                if not line:
-                    self._abort_read("EOF before chunk terminator")
-                if not (line == b"\r\n" or line == b"\n"):
+                terminator = self._sock.read(2)
+                if terminator != b"\r\n":
                     self._abort_read("invalid chunk terminator")
                 self._chunk_left = None
             else:
@@ -1211,14 +1203,17 @@ class HTTPConnection:
 
             if with_headers is None:
                 with_headers = _DEFAULT_WITH_HEADERS
-            if not with_headers or isinstance(with_headers, (bool, list, set, tuple)):
+            if not with_headers or isinstance(with_headers, bool):
                 pass
             elif isinstance(with_headers, (bytes, bytearray)):
                 with_headers = (with_headers, )
             elif isinstance(with_headers, str):
                 with_headers = (with_headers.encode(), )
             else:
-                with_headers = tuple(with_headers)
+                with_headers = tuple(
+                    name.encode() if isinstance(name, str) else name
+                    for name in with_headers
+                )
 
             status = None
             try:
@@ -1345,6 +1340,12 @@ class HTTPConnection:
 
         if encode_chunked is not None:
             encode_chunked = bool(encode_chunked)
+            if (
+                not encode_chunked
+                and not (flags & (_RF_CONTENT_LENGTH | _RF_TRANSFER_ENCODING))
+                and isinstance(body, _BUFFER_TYPES)
+            ):
+                length = len(body)
         elif flags & _RF_TRANSFER_ENCODING:
             encode_chunked = bool(flags & _RF_TRANSFER_CHUNKED)
         elif flags & _RF_CONTENT_LENGTH:
