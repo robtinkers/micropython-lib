@@ -1521,8 +1521,8 @@ if _SSL_ENABLED:
         default_port = 443
 
         def __init__(self, host, port=None, *,
-                     timeout=_DEFAULT_TIMEOUT, network=None, context=None):
-            super().__init__(host, port, timeout=timeout, network=network)
+                     timeout=None, network=None, context=None):
+            HTTPConnection.__init__(self, host, port, timeout=timeout, network=network)
             if context is None:
                 context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
                 context.verify_mode = ssl.CERT_NONE
