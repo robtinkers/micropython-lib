@@ -65,8 +65,8 @@ _TRANSFER_ENCODING = const(b"Transfer-Encoding")
 
 _CHUNKED = const(b"chunked")
 _CLOSE = const(b"close")
-_OKAY = const(b"OK")
-_NOT_OKAY = const(b"Not OK")
+_OK = const(b"OK")
+_NOT_OK = const(b"Not OK")
 
 _BUFFER_TYPES = (bytes, bytearray, memoryview)
 
@@ -250,7 +250,7 @@ def _slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
         cutoff = 0x03FFFFFF
         cutlim = 15
     else:
-        cutoff = 107374182
+        cutoff = 0x06666666
         cutlim = 3
 
     value = 0
@@ -283,20 +283,20 @@ def _slice_equals(haystack_ptr: ptr8, start: int, end: int, needle_ptr: ptr8) ->
     return True
 
 @micropython.viper
-def _validate(haystack: ptr8, haystack_len: int, strict: bool) -> int:
+def _validate(haystack: ptr8, haystack_len: int, strict: bool) -> bool:
     i = 0
     if strict:
         while i < haystack_len:
             if haystack[i] <= 32:
-                return 0
+                return False
             i += 1
     else:
         while i < haystack_len:
             x = haystack[i]
             if x == 10 or x == 13:
-                return 0
+                return False
             i += 1
-    return 1
+    return True
 
 def _encode_and_validate(x, strict):
     if x is None:
@@ -456,7 +456,7 @@ def _parse_status_line(sock):
         elif _COMPATISH_DECODE_HEADERS:
             return (first, status, "OK" if status == 200 else "Not OK")
         else:
-            return (first, status, _OKAY if status == 200 else _NOT_OKAY)
+            return (first, status, _OK if status == 200 else _NOT_OK)
 
     raise BadStatusLine(b"H" + line)
 
