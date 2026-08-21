@@ -240,7 +240,7 @@ def _endswithtoken_chunked(haystack: object) -> bool:
     if i == 0:
         return True
 
-    return not _istchar(haystack_ptr[i - 1])
+    return False if _istchar(haystack_ptr[i - 1]) else True
 
 @micropython.viper
 def _slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
