@@ -11,7 +11,7 @@ _COMPATISH_DECODE_HEADERS = const(0)
 
 _EXTRA_METHODS = const(1)
 _ITERATE_HEADERS = const(1)
-_PARSE_REASON = const(1)
+_PARSE_REASON = const(0)
 _RECYCLE_BUFFERS = const(1)
 _SSL_ENABLED = const(1)
 
