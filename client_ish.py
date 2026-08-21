@@ -11,7 +11,7 @@ _COMPATISH_DECODE_HEADERS = const(0)
 
 _EXTRA_METHODS = const(1)
 _ITERATE_HEADERS = const(1)
-_PARSE_REASON = const(0)
+_PARSE_REASON = const(1)
 _RECYCLE_BUFFERS = const(1)
 _SSL_ENABLED = const(1)
 
@@ -65,13 +65,6 @@ _TRANSFER_ENCODING = const(b"Transfer-Encoding")
 
 _CHUNKED = const(b"chunked")
 _CLOSE = const(b"close")
-if not _PARSE_REASON:
-    if _COMPATISH_DECODE_HEADERS:
-        _OKAY = const("OK")
-        _NOT_OKAY = const("Not OK")
-    else:
-        _OKAY = const(b"OK")
-        _NOT_OKAY = const(b"Not OK")
 
 _BUFFER_TYPES = (bytes, bytearray, memoryview)
 
@@ -458,8 +451,10 @@ def _parse_status_line(sock):
             while line_length > pos and line[line_length-1] <= 32:
                 line_length -= 1
             return (first, status, b"" if pos == line_length else line[pos:line_length])
+        elif _COMPATISH_DECODE_HEADERS:
+            return (first, status, "OK" if status == 200 else "Not OK")
         else:
-            return (first, status, _OKAY if status == 200 else _NOT_OKAY)
+            return (first, status, b"OK" if status == 200 else b"Not OK")
 
     raise BadStatusLine(b"H" + line)
 
@@ -666,14 +661,12 @@ class HTTPResponse:
         def getcookies(self):
             if _ITERATE_HEADERS:
                 return self._itercookies(None, False)
-            else:
-                return list(self._itercookies(None, False))
+            return list(self._itercookies(None, False))
 
         def getrawcookies(self):
             if _ITERATE_HEADERS:
                 return self._itercookies(None, True)
-            else:
-                return list(self._itercookies(None, True))
+            return list(self._itercookies(None, True))
 
         def getcookie(self, name, default=None):
             for value in self._itercookies(name, False):
@@ -1560,4 +1553,3 @@ if _SSL_ENABLED:
                     raise ConnectError(ENONET, str(e))
             finally:
                 gc.collect()
-
