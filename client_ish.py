@@ -11,7 +11,7 @@ _COMPATISH_DECODE_HEADERS = const(0)
 
 _EXTRA_METHODS = const(1)
 _ITERATE_HEADERS = const(1)
-_PARSE_REASON = const(1)
+_PARSE_REASON = const(0)
 _RECYCLE_BUFFERS = const(1)
 _SSL_ENABLED = const(1)
 
@@ -666,12 +666,14 @@ class HTTPResponse:
         def getcookies(self):
             if _ITERATE_HEADERS:
                 return self._itercookies(None, False)
-            return list(self._itercookies(None, False))
+            else:
+                return list(self._itercookies(None, False))
 
         def getrawcookies(self):
             if _ITERATE_HEADERS:
                 return self._itercookies(None, True)
-            return list(self._itercookies(None, True))
+            else:
+                return list(self._itercookies(None, True))
 
         def getcookie(self, name, default=None):
             for value in self._itercookies(name, False):
@@ -1558,3 +1560,4 @@ if _SSL_ENABLED:
                     raise ConnectError(ENONET, str(e))
             finally:
                 gc.collect()
+
