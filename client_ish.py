@@ -1208,7 +1208,7 @@ class HTTPConnection:
                 with_headers = (bytes(with_headers), )
             elif isinstance(with_headers, str):
                 with_headers = (with_headers.encode(), )
-            elif with_headers is not _DEFAULT_WITH_HEADERS and type(with_headers) is not frozenset:
+            elif type(with_headers) is not frozenset:
                 with_headers = [
                     name if type(name) is bytes
                     else bytes(name) if isinstance(name, _BUFFER_TYPES)
