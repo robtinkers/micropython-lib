@@ -4,14 +4,27 @@
 
 import micropython, socket, gc
 
+## esp32 (because MICROPY_USE_INTERNAL_ERRNO == 0)
+ENONET = const(64)
+ENETDOWN = const(115)
+ENETUNREACH = const(114)
+EHOSTDOWN = const(117)
+EHOSTUNREACH = const(118)
+## otherwise (we use the same values as linux uapi)
+#ENONET = const(64)
+#ENETDOWN = const(100)
+#ENETUNREACH = const(101)
+#EHOSTDOWN = const(112)
+#EHOSTUNREACH = const(113)
+
 _COMPATISH_EXCEPTIONS = const(0)
 _COMPATISH_MOST_METHODS = const(0)
-_COMPATISH_READ_RETURNS_BYTES = const(0)
 _COMPATISH_DECODE_HEADERS = const(0)
+_COMPATISH_REAL_REASON = const(0)
 
-_EXTRA_METHODS = const(0)
+_EXTRA_METHODS = const(1)
 _ITERATE_HEADERS = const(1)
-_PARSE_REASON = const(0)
+_READ_TO_BYTEARRAY = const(1)
 _RECYCLE_BUFFERS = const(1)
 _SSL_ENABLED = const(1)
 
@@ -21,22 +34,6 @@ _GC_FREE_THRESHOLD = const(32768)
 _READ_BLOCK_SIZE = const(1024)
 _READ_BLOCK_SIZE_HEXCRLF = const(b"400\r\n")
 _REQUEST_HEAD_SIZE = const(256)
-
-import sys
-if sys.platform == "esp32":
-    ## because MICROPY_USE_INTERNAL_ERRNO == 0
-    ENONET = 64
-    ENETDOWN = 115
-    ENETUNREACH = 114
-    EHOSTDOWN = 117
-    EHOSTUNREACH = 118
-else:
-    ## we use the same values as linux uapi
-    ENONET = 64
-    ENETDOWN = 100
-    ENETUNREACH = 101
-    EHOSTDOWN = 112
-    EHOSTUNREACH = 113
 
 _RF_HOST = const(1)
 _RF_CONNECTION_CLOSE = const(4)
@@ -309,11 +306,11 @@ def _encode_and_validate(x, strict):
 if _COMPATISH_DECODE_HEADERS or _COMPATISH_EXCEPTIONS:
 
     @micropython.viper
-    def _latin1_to_utf8(src: ptr8, srclen: int, dst: ptr8) -> int:
+    def _latin1_to_utf8(src: ptr8, end: int, dst: ptr8) -> int:
         write = int(dst) != 0
         dstlen = 0
         i = 0
-        while i < srclen:
+        while i < end:
             b = src[i]
             i += 1
             if b < 128:
@@ -341,6 +338,11 @@ if _COMPATISH_DECODE_HEADERS or _COMPATISH_EXCEPTIONS:
         utf8out = bytearray(utf8len)
         _latin1_to_utf8(buf, buflen, utf8out)
         return utf8out.decode()
+
+if _COMPATISH_DECODE_HEADERS:
+
+    def _decode_latin1_pair(a, b):
+        return (decode_latin1(a), decode_latin1(b))
 
 def _close_quietly(sock):
     if sock is not None:
@@ -437,17 +439,15 @@ def _parse_status_line(sock):
         if status < 100:
             break
 
-        if _PARSE_REASON:
+        if _COMPATISH_REAL_REASON:
             pos += 3
             while pos < line_length and line[pos] <= 32:
                 pos += 1
             while line_length > pos and line[line_length-1] <= 32:
                 line_length -= 1
             return (first, status, b"" if pos == line_length else line[pos:line_length])
-        elif _COMPATISH_DECODE_HEADERS:
-            return (first, status, "OK" if status == 200 else "Not OK")
         else:
-            return (first, status, _OK if status == 200 else _NOT_OK)
+            return (first, status, status == 200)
 
     raise BadStatusLine(b"H" + line)
 
@@ -543,22 +543,16 @@ class HTTPResponse:
     def __init__(self, owner, sock, method, url, version, status, reason, headers, chunked, length, location):
         self._owner = owner
         self._sock = sock
-        self.method = method
-        if _COMPATISH_DECODE_HEADERS:
-            url = decode_latin1(url)
+        self.method = method # bytes
         self.url = url
-        self.version = version
+        self.version = version # int
         self.status = status
         if _COMPATISH_MOST_METHODS:
             self.code = status
-        if _COMPATISH_DECODE_HEADERS and _PARSE_REASON:
-            reason = decode_latin1(reason)
         self.reason = reason
         self._headers = headers
         self._chunked = chunked
         self._length = length
-        if _COMPATISH_DECODE_HEADERS:
-            location = decode_latin1(location)
         self.location = location
         self._count = 0
 
@@ -583,9 +577,9 @@ class HTTPResponse:
     def getheaders(self):
         if _COMPATISH_DECODE_HEADERS:
             if _ITERATE_HEADERS:
-                return ((decode_latin1(k), decode_latin1(v)) for k,v in self._headers)
+                return (_decode_latin1_pair(key, val) for key, val in self._headers)
             else:
-                return [(decode_latin1(k), decode_latin1(v)) for k,v in self._headers]
+                return [_decode_latin1_pair(key, val) for key, val in self._headers]
         else:
             if _ITERATE_HEADERS:
                 return iter(self._headers)
@@ -608,8 +602,9 @@ class HTTPResponse:
         if result is None:
             return default
         if _COMPATISH_DECODE_HEADERS:
-            result = decode_latin1(result)
-        return result
+            return decode_latin1(result)
+        else:
+            return result
 
     if _EXTRA_METHODS:
 
@@ -620,36 +615,36 @@ class HTTPResponse:
                     return
                 name_length = len(name)
 
-            for key, value in self._headers:
+            for key, val in self._headers:
                 if len(key) != 10 or not _startswith(key, _SET_COOKIE, 10, True):
                     continue
 
-                pos = value.find(b"=")
+                pos = val.find(b"=")
                 if pos <= 0:
                     continue
 
                 if name is not None:
-                    if pos != name_length or not _startswith(value, name, pos, False):
+                    if pos != name_length or not _startswith(val, name, pos, False):
                         continue
                 else:
-                    key = value[:pos]
+                    key = val[:pos]
 
                 if not raw:
                     pos += 1
-                    end = value.find(b";", pos)
+                    end = val.find(b";", pos)
                     if end < 0:
-                        end = len(value)
-                    value = value[pos:end]
+                        end = len(val)
+                    val = val[pos:end]
 
                 if _COMPATISH_DECODE_HEADERS:
                     if name is None:
                         key = decode_latin1(key)
-                    value = decode_latin1(value)
+                    val = decode_latin1(val)
 
                 if name is None:
-                    yield key, value
+                    yield key, val
                 else:
-                    yield value
+                    yield val
 
         def getcookies(self):
             if _ITERATE_HEADERS:
@@ -664,13 +659,13 @@ class HTTPResponse:
                 return list(self._itercookies(None, True))
 
         def getcookie(self, name, default=None):
-            for value in self._itercookies(name, False):
-                return value # first match wins
+            for val in self._itercookies(name, False):
+                return val # first match wins
             return default
 
         def getrawcookie(self, name, default=None):
-            for value in self._itercookies(name, True):
-                return value # first match wins
+            for val in self._itercookies(name, True):
+                return val # first match wins
             return default
 
         def drain(self, buf=None):
@@ -809,7 +804,7 @@ class HTTPResponse:
                 data = None
                 del out[total:]
 
-            if _COMPATISH_READ_RETURNS_BYTES and type(out) is not bytes:
+            if not _READ_TO_BYTEARRAY and type(out) is not bytes:
                 out = bytes(out)
 
             return out
@@ -918,13 +913,14 @@ class HTTPResponse:
                 return default
             length = len(name)
             values = None
-            for key, value in self._headers:
+            for key, val in self._headers:
                 if len(key) == length and _startswith(key, name, length, True):
                     if values is None:
                         values = []
                     if _COMPATISH_DECODE_HEADERS:
-                        value = decode_latin1(value)
-                    values.append(value)
+                        values.append(decode_latin1(val))
+                    else:
+                        values.append(val)
             return default if values is None else values
 
         @property
@@ -1035,8 +1031,8 @@ class HTTPConnection:
             if headers is not None:
                 if isinstance(headers, dict):
                     headers = headers.items()
-                for key, value in headers:
-                    self.putheader(key, value)
+                for key, val in headers:
+                    self.putheader(key, val)
         except Exception:
             self._reset_request()
             raise
@@ -1246,7 +1242,7 @@ class HTTPConnection:
                 reusable = False
                 content_length = 0
                 chunked = False
-            elif method == b"CONNECT" and 200 <= status < 300:
+            elif 200 <= status < 300 and method == b"CONNECT":
                 reusable = False
                 content_length = None
                 chunked = False
@@ -1276,9 +1272,20 @@ class HTTPConnection:
 
             self._state = _CS_RESPONSE_CREATING
 
-            resp = self.response_class(
-                self, sock, method, self.url, version, status, reason,
-                headers, chunked is True, content_length, new_location)
+            if _COMPATISH_DECODE_HEADERS:
+                if type(reason) is bool:
+                    reason = "OK" if reason else "Not OK"
+                else:
+                    reason = decode_latin1(reason)
+                resp = self.response_class(
+                    self, sock, method, decode_latin1(self.url), version, status, reason,
+                    headers, chunked is True, content_length, decode_latin1(new_location))
+            else:
+                if type(reason) is bool:
+                    reason = _OK if reason else _NOT_OK
+                resp = self.response_class(
+                    self, sock, method, self.url, version, status, reason,
+                    headers, chunked is True, content_length, new_location)
 
             if self._state != _CS_RESPONSE_CREATING:
                 raise ResponseNotReady()
