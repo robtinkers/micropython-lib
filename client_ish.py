@@ -22,19 +22,21 @@ _READ_BLOCK_SIZE = const(1024)
 _READ_BLOCK_SIZE_HEXCRLF = const(b"400\r\n")
 _REQUEST_HEAD_SIZE = const(256)
 
-## esp-idf
-ENONET = const(64)
-ENETDOWN = const(115)
-ENETUNREACH = const(114)
-EHOSTDOWN = const(117)
-EHOSTUNREACH = const(118)
-
-## linux uapi
-#ENONET = const(64)
-#ENETDOWN = const(100)
-#ENETUNREACH = const(101)
-#EHOSTDOWN = const(112)
-#EHOSTUNREACH = const(113)
+import sys
+if sys.platform == "esp32":
+    ## because MICROPY_USE_INTERNAL_ERRNO == 0
+    ENONET = 64
+    ENETDOWN = 115
+    ENETUNREACH = 114
+    EHOSTDOWN = 117
+    EHOSTUNREACH = 118
+else:
+    ## we use the same values as linux uapi
+    ENONET = 64
+    ENETDOWN = 100
+    ENETUNREACH = 101
+    EHOSTDOWN = 112
+    EHOSTUNREACH = 113
 
 _RF_HOST = const(1)
 _RF_CONNECTION_CLOSE = const(4)
