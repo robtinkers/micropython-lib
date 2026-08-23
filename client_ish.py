@@ -171,8 +171,7 @@ def _istchar(x: int) -> bool:
         or (45 <= x and x <= 46)
         or (48 <= x and x <= 57)
         or (65 <= x and x <= 90)
-        or (94 <= x and x <= 96)
-        or (97 <= x and x <= 122)
+        or (94 <= x and x <= 122)
         or x == 124
         or x == 126
     )
@@ -385,10 +384,15 @@ def _parse_hostport_from_url(url):
         start = 8
     else:
         return None
-    for separator in (b"/", b"?", b"#"):
-        pos = url.find(separator, start)
-        if 0 <= pos < end:
-            end = pos
+    pos = url.find(b"/", start)
+    if pos >= 0:
+        end = pos
+    pos = url.find(b"?", start, end)
+    if pos >= 0:
+        end = pos
+    pos = url.find(b"#", start, end)
+    if pos >= 0:
+        end = pos
     pos = url.rfind(b"@", start, end)
     if pos >= 0:
         start = pos + 1
@@ -1411,7 +1415,7 @@ class HTTPConnection:
             return
 
         reader = getattr(body, "readinto", None)
-        if callable(reader):
+        if reader is not None:
             if self._length is None:
                 size = _READ_BLOCK_SIZE
             else:
@@ -1427,7 +1431,7 @@ class HTTPConnection:
                 send(self, bmv if n == size else bmv[:n])
 
         reader = getattr(body, "read", None)
-        if callable(reader):
+        if reader is not None:
             while True:
                 buf = reader(_READ_BLOCK_SIZE)
                 if isinstance(buf, str):
