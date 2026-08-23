@@ -218,10 +218,8 @@ def _endswithtoken_chunked(haystack: object) -> bool:
     haystack_ptr = ptr8(haystack)
     while i > 0 and haystack_ptr[i - 1] <= 32:
         i -= 1
-
     if i < 7:
         return False
-
     i -= 7
     if ((haystack_ptr[i] | 32) != 99
         or (haystack_ptr[i + 1] | 32) != 104
@@ -232,10 +230,8 @@ def _endswithtoken_chunked(haystack: object) -> bool:
         or (haystack_ptr[i + 6] | 32) != 100
     ):
         return False
-
     if i == 0:
         return True
-
     return False if _istchar(haystack_ptr[i - 1]) else True
 
 @micropython.viper
@@ -269,7 +265,6 @@ def _slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
             return -1
         value = value * base + digit
         start += 1
-
     return value
 
 @micropython.viper
