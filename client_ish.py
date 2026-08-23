@@ -24,7 +24,7 @@ _COMPATISH_REAL_REASON = const(0)
 
 _EXTRA_METHODS = const(1)
 _ITERATE_HEADERS = const(1)
-_READ_TO_BYTEARRAY = const(1)
+_READ_CAN_RETURN_BYTEARRAY = const(1)
 _RECYCLE_BUFFERS = const(1)
 _SSL_ENABLED = const(1)
 
@@ -163,7 +163,7 @@ def _startswith(haystack_ptr: ptr8, needle_ptr: ptr8, needle_len: int, ci_flag: 
     return True
 
 @micropython.viper
-def _istchar(x: int) -> bool:
+def _is_tchar(x: int) -> bool:
     return (
         x == 33
         or (35 <= x and x <= 39)
@@ -190,11 +190,11 @@ def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int) -> bool:
             if x != y or x < 97 or x > 122:
                 i += 1
                 continue
-        if i and _istchar(haystack_ptr[i - 1]):
+        if i and _is_tchar(haystack_ptr[i - 1]):
             i += 1
             continue
         j = i + needle_len
-        if j < haystack_len and _istchar(haystack_ptr[j]):
+        if j < haystack_len and _is_tchar(haystack_ptr[j]):
             i += 1
             continue
         j = 1
@@ -231,7 +231,7 @@ def _endswithtoken_chunked(haystack: object) -> bool:
         return False
     if i == 0:
         return True
-    return False if _istchar(haystack_ptr[i - 1]) else True
+    return False if _is_tchar(haystack_ptr[i - 1]) else True
 
 @micropython.viper
 def _slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
@@ -327,7 +327,7 @@ if _COMPATISH_DECODE_HEADERS or _COMPATISH_EXCEPTIONS:
         if buflen == 0:
             return ""
         utf8len = _latin1_to_utf8(buf, buflen, 0)
-        if utf8len == buflen:
+        if utf8len == buflen and not isinstance(buf, memoryview):
             return buf.decode()
         utf8out = bytearray(utf8len)
         _latin1_to_utf8(buf, buflen, utf8out)
@@ -803,7 +803,7 @@ class HTTPResponse:
                 data = None
                 del out[total:]
 
-            if not _READ_TO_BYTEARRAY and type(out) is not bytes:
+            if not _READ_CAN_RETURN_BYTEARRAY and type(out) is not bytes:
                 out = bytes(out)
 
             return out
@@ -1199,15 +1199,21 @@ class HTTPConnection:
                     with_headers = True
                 else:
                     with_headers = _DEFAULT_WITH_HEADERS
+
             if not with_headers or isinstance(with_headers, bool):
                 pass
-            elif isinstance(with_headers, _BUFFER_TYPES):
+            elif type(with_headers) is bytes:
                 with_headers = (with_headers, )
+            elif isinstance(with_headers, _BUFFER_TYPES):
+                with_headers = (bytes(with_headers), )
             elif isinstance(with_headers, str):
                 with_headers = (with_headers.encode(), )
-            else:
+            elif with_headers is not _DEFAULT_WITH_HEADERS and type(with_headers) is not frozenset:
                 with_headers = [
-                    name.encode() if isinstance(name, str) else name
+                    name if type(name) is bytes
+                    else bytes(name) if isinstance(name, _BUFFER_TYPES)
+                    else name.encode() if isinstance(name, str)
+                    else name
                     for name in with_headers
                 ]
 
@@ -1297,6 +1303,7 @@ class HTTPConnection:
                 resp.close()
 
             return resp
+
         except Exception:
             self._abort_request(resp)
             raise
