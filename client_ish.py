@@ -63,7 +63,6 @@ _SET_COOKIE = const(b"Set-Cookie")
 _TRANSFER_ENCODING = const(b"Transfer-Encoding")
 
 _CHUNKED = const(b"chunked")
-_CLOSE = const(b"close")
 _OK = const(b"OK")
 _NOT_OK = const(b"Not OK")
 
@@ -163,75 +162,105 @@ def _startswith(haystack_ptr: ptr8, needle_ptr: ptr8, needle_len: int, ci_flag: 
     return True
 
 @micropython.viper
-def _is_tchar(x: int) -> bool:
-    return (
-        x == 33
-        or (35 <= x and x <= 39)
-        or (42 <= x and x <= 43)
-        or (45 <= x and x <= 46)
-        or (48 <= x and x <= 57)
-        or (65 <= x and x <= 90)
-        or (94 <= x and x <= 122)
-        or x == 124
-        or x == 126
-    )
+def _connection_mode(haystack: object, value_start: int, mode: int) -> int:
+    if mode == _CM_CLOSE:
+        return mode
 
-@micropython.viper
-def _containstoken(haystack: object, needle_ptr: ptr8, needle_len: int) -> bool:
-    haystack_len = int(len(haystack))
+    end = int(len(haystack))
     haystack_ptr = ptr8(haystack)
-    last_start = haystack_len - needle_len
-    i = 0
-    while i <= last_start:
-        x = haystack_ptr[i]
-        y = needle_ptr[0]
-        if x != y:
-            x |= 32
-            if x != y or x < 97 or x > 122:
-                i += 1
-                continue
-        if i and _is_tchar(haystack_ptr[i - 1]):
+    i = value_start
+
+    while i < end:
+        # Skip whitespace and empty list members.
+        while i < end:
+            x = haystack_ptr[i]
+            if x > 32 and x != 44:
+                break
             i += 1
-            continue
-        j = i + needle_len
-        if j < haystack_len and _is_tchar(haystack_ptr[j]):
+        if i == end:
+            return mode
+
+        x |= 32
+
+        if x == 99:  # "close" ?
+            if ((end - i >= 5)
+                and (haystack_ptr[i + 1] | 32) == 108
+                and (haystack_ptr[i + 2] | 32) == 111
+                and (haystack_ptr[i + 3] | 32) == 115
+                and (haystack_ptr[i + 4] | 32) == 101
+            ):
+                j = i + 5
+                while j < end and haystack_ptr[j] <= 32:
+                    j += 1
+                if j == end:
+                    return _CM_CLOSE
+                if haystack_ptr[j] == 44:
+                    return _CM_CLOSE
+
+        elif x == 107:  # "keep-alive" ?
+            if ((end - i >= 10)
+                and (haystack_ptr[i + 1] | 32) == 101
+                and (haystack_ptr[i + 2] | 32) == 101
+                and (haystack_ptr[i + 3] | 32) == 112
+                and (haystack_ptr[i + 4]     ) == 45
+                and (haystack_ptr[i + 5] | 32) == 97
+                and (haystack_ptr[i + 6] | 32) == 108
+                and (haystack_ptr[i + 7] | 32) == 105
+                and (haystack_ptr[i + 8] | 32) == 118
+                and (haystack_ptr[i + 9] | 32) == 101
+            ):
+                j = i + 10
+                while j < end and haystack_ptr[j] <= 32:
+                    j += 1
+                if j == end:
+                    return _CM_KEEPALIVE
+                if haystack_ptr[j] == 44:
+                    mode = _CM_KEEPALIVE
+                    i = j + 1
+                    continue
+
+        # Skip an unrecognized or malformed member.
+        while i < end and haystack_ptr[i] != 44:
             i += 1
-            continue
-        j = 1
-        while j < needle_len:
-            x = haystack_ptr[i + j]
-            y = needle_ptr[j]
-            if x != y:
-                x |= 32
-                if x != y or x < 97 or x > 122:
-                    break
-            j += 1
-        if j == needle_len:
-            return True
+
         i += 1
-    return False
+
+    return mode
 
 @micropython.viper
-def _endswithtoken_chunked(haystack: object) -> bool:
-    i = int(len(haystack))
+def _encoding_chunked(haystack: object, value_start: int, mode: bool) -> bool:
+    end = int(len(haystack))
     haystack_ptr = ptr8(haystack)
-    while i > 0 and haystack_ptr[i - 1] <= 32:
-        i -= 1
-    if i < 7:
-        return False
-    i -= 7
-    if ((haystack_ptr[i] | 32) != 99
-        or (haystack_ptr[i + 1] | 32) != 104
-        or (haystack_ptr[i + 2] | 32) != 117
-        or (haystack_ptr[i + 3] | 32) != 110
-        or (haystack_ptr[i + 4] | 32) != 107
-        or (haystack_ptr[i + 5] | 32) != 101
-        or (haystack_ptr[i + 6] | 32) != 100
+
+    # Remove trailing whitespace and empty members.
+    while end > value_start and (haystack_ptr[end - 1] <= 32 or haystack_ptr[end - 1] == 44):
+        end -= 1
+
+    # This field line contains no nonempty member.
+    if end == value_start:
+        return mode
+
+    if ((end - value_start < 7)
+        or (haystack_ptr[end - 7] | 32) != 99
+        or (haystack_ptr[end - 6] | 32) != 104
+        or (haystack_ptr[end - 5] | 32) != 117
+        or (haystack_ptr[end - 4] | 32) != 110
+        or (haystack_ptr[end - 3] | 32) != 107
+        or (haystack_ptr[end - 2] | 32) != 101
+        or (haystack_ptr[end - 1] | 32) != 100
     ):
         return False
-    if i == 0:
+
+    end -= 7
+
+    # Skip whitespace preceding "chunked".
+    while end > value_start and haystack_ptr[end - 1] <= 32:
+        end -= 1
+
+    if end == value_start or haystack_ptr[end - 1] == 44:
         return True
-    return False if _is_tchar(haystack_ptr[i - 1]) else True
+
+    return False
 
 @micropython.viper
 def _slice_uint(buf_ptr: ptr8, start: int, end: int, base: int) -> int:
@@ -498,13 +527,7 @@ def _parse_headers(sock, status, with_headers):
             new_location = line
 
         elif name_length == 10 and _startswith(line, _CONNECTION, 10, True):
-            if connection == _CM_CLOSE:
-                pass
-            elif _containstoken(line, _CLOSE, 5):
-                connection = _CM_CLOSE
-            elif _containstoken(line, b"keep-alive", 10):
-                connection = _CM_KEEPALIVE
-
+            connection = _connection_mode(line, 11, connection)
             if retained_name is not None:
                 line = _header_value(line, 10)
 
@@ -520,7 +543,7 @@ def _parse_headers(sock, status, with_headers):
                 line = _header_value(line, 14)
 
         elif name_length == 17 and _startswith(line, _TRANSFER_ENCODING, 17, True):
-            content_chunked = _endswithtoken_chunked(line)
+            content_chunked = _encoding_chunked(line, 18, content_chunked is True)
 
             if retained_name is not None:
                 line = _header_value(line, 17)
@@ -1104,7 +1127,7 @@ class HTTPConnection:
         if name_length == 4 and _startswith(name, _HOST, 4, True):
             flags |= _RF_HOST
         elif name_length == 10 and _startswith(name, _CONNECTION, 10, True):
-            if value is not None and _containstoken(value, _CLOSE, 5):
+            if value is not None and _connection_mode(value, 0, _CM_UNKNOWN) == _CM_CLOSE:
                 flags |= _RF_CONNECTION_CLOSE
         elif name_length == 14 and _startswith(name, _CONTENT_LENGTH, 14, True):
             flags |= _RF_CONTENT_LENGTH
@@ -1119,10 +1142,11 @@ class HTTPConnection:
         elif name_length == 17 and _startswith(name, _TRANSFER_ENCODING, 17, True):
             flags |= _RF_TRANSFER_ENCODING
             if value is not None:
-                flags &= ~_RF_TRANSFER_CHUNKED
-                if _endswithtoken_chunked(value):
+                if _encoding_chunked(value, 0, bool(flags & _RF_TRANSFER_CHUNKED)):
                     flags |= _RF_TRANSFER_CHUNKED
-
+                else:
+                    flags &= ~_RF_TRANSFER_CHUNKED
+ 
         self._length = length
         self._flags = flags
 
