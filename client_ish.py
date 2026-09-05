@@ -23,7 +23,6 @@ _COMPATISH_DECODE_HEADERS = const(0)
 _COMPATISH_REAL_REASON = const(0)
 
 _EXTRA_METHODS = const(1)
-_ITERATE_HEADERS = const(1)
 _READ_CAN_RETURN_BYTEARRAY = const(1)
 _RECYCLE_BUFFERS = const(1)
 _SSL_ENABLED = const(1)
@@ -318,6 +317,8 @@ def _encode_and_validate(x, strict):
         x = x.encode()
     elif type(x) is int:
         x = b"%d" % x
+    elif isinstance(x, memoryview):
+        x = bytes(x)
     elif not isinstance(x, _BUFFER_TYPES):
         x = str(x).encode()
     if not _validate(x, len(x), strict):
@@ -593,40 +594,56 @@ class HTTPResponse:
             raise NotConnected()
         owner = self._owner
         self._sock = self._owner = None
-        owner._release_response(None, False)
+        owner._release_response(self, None, False)
         return sock
+
+    if _EXTRA_METHODS:
+
+        def detach_async(self):
+            import asyncio
+            sock = self.detach()
+            try:
+                sock.setblocking(False)
+                return asyncio.Stream(sock)
+            except Exception:
+                _close_quietly(sock)
+                raise
+
+    def items(self):
+        if _COMPATISH_DECODE_HEADERS:
+            return (_decode_latin1_pair(key, val) for key, val in self._headers)
+        else:
+            return iter(self._headers)
 
     def getheaders(self):
         if _COMPATISH_DECODE_HEADERS:
-            if _ITERATE_HEADERS:
-                return (_decode_latin1_pair(key, val) for key, val in self._headers)
-            else:
-                return [_decode_latin1_pair(key, val) for key, val in self._headers]
+            return [_decode_latin1_pair(key, val) for key, val in self._headers]
         else:
-            if _ITERATE_HEADERS:
-                return iter(self._headers)
-            else:
-                return self._headers
+            return list(self._headers)
+
+    def getheadervalues(self, name):
+        name = _encode_and_validate(name, False)
+        result = []
+        if name is not None:
+            name_length = len(name)
+            for key, val in self._headers:
+                if len(key) == name_length and _startswith(key, name, name_length, True):
+                    if _COMPATISH_DECODE_HEADERS:
+                        result.append(decode_latin1(val))
+                    else:
+                        result.append(val)
+        return result
 
     def getheader(self, name, default=None):
-        name = _encode_and_validate(name, False)
-        if name is None:
+        values = self.getheadervalues(name)
+        if not values:
             return default
-        name_length = len(name)
-        result = None
-        for key, val in self._headers:
-            if len(key) != name_length or not _startswith(key, name, name_length, True):
-                continue
-            if result is None:
-                result = val
-            else:
-                result += b", " + val
-        if result is None:
-            return default
-        if _COMPATISH_DECODE_HEADERS:
-            return decode_latin1(result)
+        elif len(values) == 1:
+            return values[0]
+        elif _COMPATISH_DECODE_HEADERS:
+            return ", ".join(values)
         else:
-            return result
+            return b", ".join(values)
 
     if _EXTRA_METHODS:
 
@@ -660,35 +677,32 @@ class HTTPResponse:
 
                 if _COMPATISH_DECODE_HEADERS:
                     if name is None:
-                        key = decode_latin1(key)
-                    val = decode_latin1(val)
-
-                if name is None:
-                    yield key, val
+                        yield _decode_latin1_pair(key, val)
+                    else:
+                        yield decode_latin1(val)
                 else:
-                    yield val
+                    if name is None:
+                        yield key, val
+                    else:
+                        yield val
 
         def getcookies(self):
-            if _ITERATE_HEADERS:
-                return self._itercookies(None, False)
-            else:
-                return list(self._itercookies(None, False))
+            return list(self._itercookies(None, False))
 
         def getrawcookies(self):
-            if _ITERATE_HEADERS:
-                return self._itercookies(None, True)
-            else:
-                return list(self._itercookies(None, True))
+            return list(self._itercookies(None, True))
 
         def getcookie(self, name, default=None):
+            result = default
             for val in self._itercookies(name, False):
-                return val # first match wins
-            return default
+                result = val # last match wins
+            return result
 
         def getrawcookie(self, name, default=None):
+            result = default
             for val in self._itercookies(name, True):
-                return val # first match wins
-            return default
+                result = val # last match wins
+            return result
 
         def drain(self, buf=None):
             if buf is None:
@@ -890,7 +904,7 @@ class HTTPResponse:
         owner = self._owner
         self._sock = self._owner = None
         if owner is not None:
-            owner._release_response(sock, complete)
+            owner._release_response(self, sock, complete)
 
     @property
     def closed(self):
@@ -927,7 +941,6 @@ class HTTPResponse:
 
         msg = headers
         get = getheader
-        items = getheaders
 
         def get_all(self, name, default=None):
             name = _encode_and_validate(name, False)
@@ -1146,7 +1159,7 @@ class HTTPConnection:
                     flags |= _RF_TRANSFER_CHUNKED
                 else:
                     flags &= ~_RF_TRANSFER_CHUNKED
- 
+
         self._length = length
         self._flags = flags
 
@@ -1316,7 +1329,7 @@ class HTTPConnection:
                     self, sock, method, self.url, version, status, reason,
                     headers, chunked is True, content_length, new_location)
 
-            if self._state != _CS_RESPONSE_CREATING:
+            if self._state != _CS_RESPONSE_CREATING or resp.closed:
                 raise ResponseNotReady()
 
             self._sock = None
@@ -1493,18 +1506,29 @@ class HTTPConnection:
         self._send_bytes(b"\r\n", False)
 
     def _send_bytes(self, data, accounting=True):
+        data_length = len(data)
+
         try:
-            self._sock.sendall(data)
+            n = self._sock.write(data)
         except OSError as e:
             if _COMPATISH_EXCEPTIONS:
                 raise
             else:
                 raise IncompleteWrite(e.errno, "socket write failed", self._count, self._length)
 
-        if accounting:
-            self._count += len(data)
+        if type(n) is not int or n < 0 or n > data_length:
+            raise IncompleteWrite(None, "invalid write", self._count, self._length)
 
-    def _release_response(self, sock, complete):
+        if accounting:
+            self._count += n
+
+        if n != data_length:
+            raise IncompleteWrite(None, "short write", self._count, self._length)
+
+    def _release_response(self, resp, sock, complete):
+        if self._resp is not resp:
+            _close_quietly(sock)
+            return
         reusable = complete and self._state == _CS_RESPONSE_REUSABLE
         self._sock = sock if reusable else None
         self._reset_request()
