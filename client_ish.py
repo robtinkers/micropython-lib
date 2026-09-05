@@ -476,7 +476,7 @@ def _parse_status_line(sock):
                 line_length -= 1
             return (first, status, b"" if pos == line_length else line[pos:line_length])
         else:
-            return (first, status, status == 200)
+            return (first, status, _OK if (status == 200) else _NOT_OK)
 
     raise BadStatusLine(b"H" + line)
 
@@ -567,17 +567,39 @@ class HTTPResponse:
         self._owner = owner
         self._sock = sock
         self.method = method # bytes
-        self.url = url
+        if _COMPATISH_DECODE_HEADERS:
+            self._url = url
+        else:
+            self.url = url
         self.version = version # int
         self.status = status
         if _COMPATISH_MOST_METHODS:
             self.code = status
-        self.reason = reason
+        if _COMPATISH_DECODE_HEADERS:
+            self._reason = reason
+        else:
+            self.reason = reason
         self._headers = headers
         self._chunked = chunked
         self._length = length
-        self.location = location
+        if _COMPATISH_DECODE_HEADERS:
+            self._location = location
+        else:
+            self.location = location
         self._count = 0
+
+    if _COMPATISH_DECODE_HEADERS:
+        @property
+        def url(self):
+            return decode_latin1(self._url)
+
+        @property
+        def reason(self):
+            return decode_latin1(self._reason)
+
+        @property
+        def location(self):
+            return decode_latin1(self._location)
 
     def __enter__(self):
         return self
@@ -1314,20 +1336,9 @@ class HTTPConnection:
 
             self._state = _CS_RESPONSE_CREATING
 
-            if _COMPATISH_DECODE_HEADERS:
-                if type(reason) is bool:
-                    reason = "OK" if reason else "Not OK"
-                else:
-                    reason = decode_latin1(reason)
-                resp = self.response_class(
-                    self, sock, method, decode_latin1(self.url), version, status, reason,
-                    headers, chunked is True, content_length, decode_latin1(new_location))
-            else:
-                if type(reason) is bool:
-                    reason = _OK if reason else _NOT_OK
-                resp = self.response_class(
-                    self, sock, method, self.url, version, status, reason,
-                    headers, chunked is True, content_length, new_location)
+            resp = self.response_class(
+                self, sock, method, self.url, version, status, reason,
+                headers, chunked is True, content_length, new_location)
 
             if self._state != _CS_RESPONSE_CREATING or resp.closed:
                 raise ResponseNotReady()
